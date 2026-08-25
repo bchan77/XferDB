@@ -21,45 +21,29 @@ jobs:
         env:
           GIT_SSL_NO_VERIFY: "true"
 
-      - name: Download and install Go
+      - name: Build and test
         shell: sh
+        env:
+          PATH: /usr/local/go/bin:$PATH
         run: |
           set -eu
+
+          # Download and install Go
           GO_VERSION="1.22.5"
+          echo "Downloading Go ${GO_VERSION}..."
           curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
           rm -rf /usr/local/go
           tar -C /usr/local -xzf /tmp/go.tar.gz
           rm -f /tmp/go.tar.gz
+
+          echo "Verifying Go installation..."
           /usr/local/go/bin/go version
 
-      - name: Set up Go environment
-        shell: sh
-        env:
-          PATH: /usr/local/go/bin:$PATH
-        run: |
-          set -eu
-          go version
-
-      - name: Download dependencies
-        shell: sh
-        env:
-          PATH: /usr/local/go/bin:$PATH
-        run: |
-          set -eu
+          echo "Downloading dependencies..."
           go mod download
 
-      - name: Build
-        shell: sh
-        env:
-          PATH: /usr/local/go/bin:$PATH
-        run: |
-          set -eu
+          echo "Building..."
           go build -v ./...
 
-      - name: Run tests
-        shell: sh
-        env:
-          PATH: /usr/local/go/bin:$PATH
-        run: |
-          set -eu
+          echo "Running tests..."
           go test -v ./...
