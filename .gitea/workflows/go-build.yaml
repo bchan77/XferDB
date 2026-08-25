@@ -17,7 +17,7 @@ jobs:
     runs-on: kubernetes
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         env:
           GIT_SSL_NO_VERIFY: "true"
 
