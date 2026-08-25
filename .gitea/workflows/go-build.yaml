@@ -21,6 +21,7 @@ jobs:
       - name: Checkout code
         run: |
           set -eu
+          apt-get update && apt-get install -y git
           git clone https://gitea.homelab.local/nextdevops/XferDB.git /workspace/nextdevops/XferDB
           cd /workspace/nextdevops/XferDB
           git fetch origin $GITHUB_SHA
