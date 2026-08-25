@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        env:
+          GIT_SSL_NO_VERIFY: "true"
 
       - name: Download and install Go
         shell: sh
