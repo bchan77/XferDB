@@ -6,21 +6,44 @@
 xferdb migrate --from postgres://source/db --to mysql://target/db
 ```
 
-## Supported Sources & Targets
+---
 
-| Database | Status | Notes |
-|----------|--------|-------|
-| PostgreSQL | ✅ | Full support |
-| MySQL | ✅ | Full support |
-| SQLite | ✅ | Full support |
-| MongoDB | 🔜 | Coming soon |
-| Cassandra | 🔜 | Coming soon |
-| **Pinecone** | 🔜 | Vector DB support |
-| **Qdrant** | 🔜 | Vector DB support |
-| **Weaviate** | 🔜 | Vector DB support |
-| **Chroma** | 🔜 | Vector DB support |
+## 🎯 Mission
+
+Moving data between different database systems is painful. Each DB has its own migration tooling, quirks, and incompatibilities. **XferDB aims to be the universal translator for database transfers.**
+
+> **Goal**: One command to migrate from *any* supported database to *any* other — SQL, NoSQL, and vector databases alike.
+
+---
+
+## Why XferDB?
+
+| Problem | Solution |
+|---------|----------|
+| No universal DB migration tool | XferDB handles PostgreSQL, MySQL, MongoDB, Cassandra, and more |
+| Vendor lock-in | Escape to any target DB without rewriting your migration scripts |
+| Complex ETL pipelines | Simple CLI — no pipeline builder needed |
+| Vendor-specific vector DBs | First-class support for Pinecone, Qdrant, Weaviate, Chroma |
+
+---
+
+## Supported Databases
+
+| Database | Source | Target | Notes |
+|----------|--------|--------|-------|
+| PostgreSQL | ✅ | ✅ | Full support |
+| MySQL | ✅ | ✅ | Full support |
+| SQLite | ✅ | ✅ | Full support |
+| MongoDB | 🔜 | 🔜 | Coming soon |
+| Cassandra | 🔜 | 🔜 | Coming soon |
+| **Pinecone** | 🔜 | 🔜 | Vector DB |
+| **Qdrant** | 🔜 | 🔜 | Vector DB |
+| **Weaviate** | 🔜 | 🔜 | Vector DB |
+| **Chroma** | 🔜 | 🔜 | Vector DB |
 
 > 🔜 = Planned support
+
+---
 
 ## Features
 
@@ -30,6 +53,9 @@ xferdb migrate --from postgres://source/db --to mysql://target/db
 - ✅ **Validation** — data integrity checks post-transfer
 - 🔒 **Secure** — TLS support, credentials never logged
 - 🧩 **Pluggable drivers** — add your own source/target adapters
+- 🐳 **Docker ready** — run anywhere containerized
+
+---
 
 ## Installation
 
@@ -52,6 +78,12 @@ sudo mv xferdb /usr/local/bin/
 iwr https://gitea.homelab.local/nextdevops/XferDB/releases/latest/download/xferdb-windows-amd64.exe -OutFile xferdb.exe
 ```
 
+### Docker
+
+```bash
+docker run -v ~/.xferdb:/data xferdb migrate --from postgres://source/db --to mysql://target/db
+```
+
 ### From source
 
 ```bash
@@ -60,18 +92,22 @@ cd XferDB
 go install
 ```
 
+---
+
 ## Quick Start
 
-### Connect to source and target
+### Using connection strings
 
 ```bash
-# Using connection strings
 xferdb migrate \
-  --from "postgres://user:pass@localhost:5432/source_db" \
-  --to "mysql://user:pass@localhost:3306/target_db"
+  --from "postgres://user:password@localhost:5432/source_db" \
+  --to "mysql://user:password@localhost:3306/target_db"
+```
 
-# Using config file
-xferdb migrate --config xferdb.yaml
+### Using a config file
+
+```bash
+xferdb migrate --config migration.yaml
 ```
 
 ### Example config file
@@ -99,9 +135,36 @@ transfer:
   validate: true
 ```
 
+---
+
+## Roadmap
+
+- [ ] PostgreSQL source & target adapter
+- [ ] MySQL source & target adapter
+- [ ] SQLite source & target adapter
+- [ ] Incremental sync with cursor-based pagination
+- [ ] MongoDB adapter
+- [ ] Cassandra adapter
+- [ ] Vector DB adapters (Pinecone, Qdrant, Weaviate, Chroma)
+- [ ] Web UI for migration configuration
+- [ ] Scheduled/repeated migrations
+- [ ] Data transformation pipeline (column mapping, type casting)
+
+---
+
 ## Documentation
 
 Full documentation available at: [https://gitea.homelab.local/nextdevops/XferDB/wiki](https://gitea.homelab.local/nextdevops/XferDB/wiki)
+
+---
+
+## Contributing
+
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+All contributions require a Signed-off-by line (DCO).
+
+---
 
 ## License
 
