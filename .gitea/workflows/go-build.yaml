@@ -14,7 +14,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: go-builder
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,22 +22,10 @@ jobs:
           GIT_SSL_NO_VERIFY: "true"
 
       - name: Build and test
-        shell: sh
-        env:
-          PATH: /usr/local/go/bin:$PATH
+        shell: bash
         run: |
           set -eu
-
-          # Download and install Go
-          GO_VERSION="1.22.5"
-          echo "Downloading Go ${GO_VERSION}..."
-          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
-          rm -rf /usr/local/go
-          tar -C /usr/local -xzf /tmp/go.tar.gz
-          rm -f /tmp/go.tar.gz
-
-          echo "Verifying Go installation..."
-          /usr/local/go/bin/go version
+          go version
 
           echo "Downloading dependencies..."
           go mod download
