@@ -21,8 +21,10 @@ jobs:
         env:
           GIT_SSL_NO_VERIFY: "true"
 
-      - name: Download and install Go
+      - name: Download, install Go, and build
         shell: sh
+        env:
+          PATH: /usr/local/go/bin:$PATH
         run: |
           set -eu
           GO_VERSION="1.22.5"
@@ -40,19 +42,11 @@ jobs:
           echo "Verifying Go installation..."
           /usr/local/go/bin/go version
 
-      - name: Set up Go environment
-        shell: sh
-        run: |
-          set -eu
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          echo "GOPATH=$HOME/go" >> "$GITHUB_ENV"
-          go version
+          echo "Downloading dependencies..."
+          go mod download
 
-      - name: Download dependencies
-        run: go mod download
+          echo "Building..."
+          go build -v ./...
 
-      - name: Build
-        run: go build -v ./...
-
-      - name: Run tests
-        run: go test -v ./...
+          echo "Running tests..."
+          go test -v ./...
