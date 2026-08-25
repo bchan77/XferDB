@@ -31,9 +31,9 @@ Moving data between different database systems is painful. Each DB has its own m
 
 | Database | Source | Target | Notes |
 |----------|--------|--------|-------|
-| PostgreSQL | ✅ | ✅ | Full support |
-| MySQL | ✅ | ✅ | Full support |
-| SQLite | ✅ | ✅ | Full support |
+| PostgreSQL | 🔜 | 🔜 | Coming soon |
+| MySQL | 🔜 | 🔜 | Coming soon |
+| SQLite | 🔜 | 🔜 | Coming soon |
 | MongoDB | 🔜 | 🔜 | Coming soon |
 | Cassandra | 🔜 | 🔜 | Coming soon |
 | **Pinecone** | 🔜 | 🔜 | Vector DB |
@@ -61,21 +61,23 @@ Moving data between different database systems is painful. Each DB has its own m
 
 ### Binary (recommended)
 
+> **Note:** Binaries are published to GitHub on official releases. For development builds, build from source.
+
 ```bash
 # macOS (Apple Silicon)
-curl -fsSL https://gitea.homelab.local/nextdevops/XferDB/releases/latest/download/xferdb-darwin-arm64 | tar -xz
+curl -fsSL https://github.com/nextdevops/XferDB/releases/latest/download/xferdb-darwin-arm64 | tar -xz
 sudo mv xferdb /usr/local/bin/
 
 # macOS (Intel)
-curl -fsSL https://gitea.homelab.local/nextdevops/XferDB/releases/latest/download/xferdb-darwin-amd64 | tar -xz
+curl -fsSL https://github.com/nextdevops/XferDB/releases/latest/download/xferdb-darwin-amd64 | tar -xz
 sudo mv xferdb /usr/local/bin/
 
 # Linux
-curl -fsSL https://gitea.homelab.local/nextdevops/XferDB/releases/latest/download/xferdb-linux-amd64 | tar -xz
+curl -fsSL https://github.com/nextdevops/XferDB/releases/latest/download/xferdb-linux-amd64 | tar -xz
 sudo mv xferdb /usr/local/bin/
 
 # Windows
-iwr https://gitea.homelab.local/nextdevops/XferDB/releases/latest/download/xferdb-windows-amd64.exe -OutFile xferdb.exe
+iwr https://github.com/nextdevops/XferDB/releases/latest/download/xferdb-windows-amd64.exe -OutFile xferdb.exe
 ```
 
 ### Docker
@@ -100,8 +102,8 @@ go install
 
 ```bash
 xferdb migrate \
-  --from "postgres://user:password@localhost:5432/source_db" \
-  --to "mysql://user:password@localhost:3306/target_db"
+  --from "postgres://user:***@localhost:5432/source_db" \
+  --to "mysql://user:***@localhost:3306/target_db"
 ```
 
 ### Using a config file
@@ -133,6 +135,29 @@ transfer:
   batch_size: 1000
   workers: 4
   validate: true
+```
+
+---
+
+## Development
+
+Development happens on the internal Gitea instance. Source code is eventually released to GitHub with official releases.
+
+### Building from source
+
+```bash
+# Clone from internal Gitea
+git clone https://gitea.homelab.local/nextdevops/XferDB.git
+cd XferDB
+
+# Download dependencies
+go mod download
+
+# Build
+go build -o xferdb ./cmd/xferdb
+
+# Run
+./xferdb version
 ```
 
 ---
