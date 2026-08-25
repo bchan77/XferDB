@@ -22,7 +22,6 @@ jobs:
           GIT_SSL_NO_VERIFY: "true"
 
       - name: Download, install Go, and build
-        shell: sh
         env:
           PATH: /usr/local/go/bin:$PATH
         run: |
