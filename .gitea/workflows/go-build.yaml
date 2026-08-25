@@ -34,25 +34,32 @@ jobs:
 
       - name: Set up Go environment
         shell: sh
+        env:
+          PATH: /usr/local/go/bin:$PATH
         run: |
           set -eu
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           go version
 
       - name: Download dependencies
         shell: sh
+        env:
+          PATH: /usr/local/go/bin:$PATH
         run: |
           set -eu
           go mod download
 
       - name: Build
         shell: sh
+        env:
+          PATH: /usr/local/go/bin:$PATH
         run: |
           set -eu
           go build -v ./...
 
       - name: Run tests
         shell: sh
+        env:
+          PATH: /usr/local/go/bin:$PATH
         run: |
           set -eu
           go test -v ./...
