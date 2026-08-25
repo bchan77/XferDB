@@ -15,45 +15,44 @@ on:
 jobs:
   build:
     runs-on: kubernetes
-    container:
-      image: ubuntu:22.04
     steps:
       - name: Checkout code
-        run: |
-          set -eu
-          apt-get update && apt-get install -y git
-          git clone https://gitea.homelab.local/nextdevops/XferDB.git /workspace/nextdevops/XferDB
-          cd /workspace/nextdevops/XferDB
-          git fetch origin $GITHUB_SHA
-          git checkout $GITHUB_SHA
+        uses: actions/checkout@v4
         env:
           GIT_SSL_NO_VERIFY: "true"
 
-      - name: Download, install Go, and build
-        env:
-          PATH: /usr/local/go/bin:$PATH
+      - name: Download and install Go
+        shell: sh
         run: |
           set -eu
           GO_VERSION="1.22.5"
-          GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
-          GO_URL="https://go.dev/dl/${GO_TARBALL}"
-
-          echo "Downloading Go ${GO_VERSION}..."
-          curl -fsSL "$GO_URL" -o "$GO_TARBALL"
-
-          echo "Installing Go..."
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
           rm -rf /usr/local/go
-          tar -C /usr/local -xzf "$GO_TARBALL"
-          rm -f "$GO_TARBALL"
-
-          echo "Verifying Go installation..."
+          tar -C /usr/local -xzf /tmp/go.tar.gz
+          rm -f /tmp/go.tar.gz
           /usr/local/go/bin/go version
 
-          echo "Downloading dependencies..."
+      - name: Set up Go environment
+        shell: sh
+        run: |
+          set -eu
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          go version
+
+      - name: Download dependencies
+        shell: sh
+        run: |
+          set -eu
           go mod download
 
-          echo "Building..."
+      - name: Build
+        shell: sh
+        run: |
+          set -eu
           go build -v ./...
 
-          echo "Running tests..."
+      - name: Run tests
+        shell: sh
+        run: |
+          set -eu
           go test -v ./...
