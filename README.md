@@ -177,6 +177,30 @@ go build -o xferdb ./cmd/xferdb
 
 ---
 
+## Versioning
+
+XferDB follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
+
+| Version | Milestone |
+|---------|-----------|
+| `v0.1.0` | PostgreSQL source & target (CLI) |
+| `v0.2.0` | MySQL adapter |
+| `v0.3.0` | SQLite adapter |
+| `v0.4.0` | Web UI |
+| `v1.0.0` | Stable release |
+
+**Pre-1.0 convention:**
+
+```
+v0.MINOR.PATCH
+     |     └── Bug fixes
+     └── New features (adapters, UI, etc.)
+```
+
+The `v1.0.0` release will be tagged once the CLI interface and config format are considered stable.
+
+---
+
 ## Documentation
 
 Full documentation available at: [https://gitea.homelab.local/nextdevops/XferDB/wiki](https://gitea.homelab.local/nextdevops/XferDB/wiki)
