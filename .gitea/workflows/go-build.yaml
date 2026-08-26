@@ -38,14 +38,14 @@ jobs:
         if: success()
         shell: bash
         env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITEA_REPO: ${{ github.repository }}
           PR_INDEX: ${{ github.event.pull_request.number }}
         run: |
           echo "Approving PR #${PR_INDEX}..."
           curl -s -X POST \
             "https://gitea.homelab.local/api/v1/repos/${GITEA_REPO}/pulls/${PR_INDEX}/reviews" \
-            -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Authorization: token ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{"body":"✅ Build passed!","event":"APPROVE"}'
 
@@ -53,13 +53,13 @@ jobs:
         if: failure()
         shell: bash
         env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITEA_REPO: ${{ github.repository }}
           PR_INDEX: ${{ github.event.pull_request.number }}
         run: |
           echo "Requesting changes on PR #${PR_INDEX}..."
           curl -s -X POST \
             "https://gitea.homelab.local/api/v1/repos/${GITEA_REPO}/pulls/${PR_INDEX}/reviews" \
-            -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Authorization: token ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{"body":"❌ Build failed. Please fix the issues.","event":"REQUEST_REVIEW"}'
