@@ -2,18 +2,31 @@ package commands
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"gitea.homelab.local/nextdevops/XferDB/api"
+	"gitea.homelab.local/nextdevops/XferDB/state"
 )
+
+// ServerAddr is the base URL of the XferDB API server, set via --server flag.
+var ServerAddr string
 
 var RootCmd = &cobra.Command{
 	Use:   "xferdb",
 	Short: "Universal database transfer tool",
-	Long: `XferDB migrates data between any supported databases with a single command.
+	Long: `XferDB migrates data between any supported databases.
 
-Supported sources: PostgreSQL, MySQL, SQLite, MongoDB (soon)
-Supported targets: PostgreSQL, MySQL, SQLite, MongoDB (soon)`,
-	Version: "0.1.0",
+Start the API server first:
+  xferdb server
+
+Then use projects and migrations:
+  xferdb project create --name myproject --source sqlite:///src.db --target sqlite:///dst.db
+  xferdb project use myproject
+  xferdb migrate`,
+	Version: "0.2.0",
 }
 
 func Execute() error {
@@ -21,6 +34,11 @@ func Execute() error {
 }
 
 func init() {
+	RootCmd.PersistentFlags().StringVar(&ServerAddr, "server", "http://localhost:8080",
+		"XferDB API server address")
+
+	RootCmd.AddCommand(serverCmd)
+	RootCmd.AddCommand(projectCmd)
 	RootCmd.AddCommand(migrateCmd)
 	RootCmd.AddCommand(versionCmd)
 	RootCmd.AddCommand(listCmd)
@@ -30,23 +48,52 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print XferDB version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("XferDB v0.1.0")
+		fmt.Println("XferDB v0.2.0")
 	},
 }
 
 var listCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List supported source and target databases",
+	Short: "List supported database adapters",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Supported Sources & Targets:")
-		fmt.Println("  ✅ PostgreSQL")
-		fmt.Println("  ✅ MySQL")
-		fmt.Println("  ✅ SQLite")
-		fmt.Println("  🔜 MongoDB (coming soon)")
-		fmt.Println("  🔜 Cassandra (coming soon)")
-		fmt.Println("  🔜 Pinecone (coming soon)")
-		fmt.Println("  🔜 Qdrant (coming soon)")
-		fmt.Println("  🔜 Weaviate (coming soon)")
-		fmt.Println("  🔜 Chroma (coming soon)")
+		fmt.Println("Supported adapters:")
+		fmt.Println("  postgres")
+		fmt.Println("  mysql")
+		fmt.Println("  sqlite")
 	},
+}
+
+var serverCmd = &cobra.Command{
+	Use:   "server",
+	Short: "Start the XferDB API server",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		addr, _ := cmd.Flags().GetString("addr")
+		dbPath := xferdbStatePath()
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+			return err
+		}
+		db, err := state.Open(dbPath)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		log.Printf("XferDB API server listening on %s (state: %s)", addr, dbPath)
+		return api.NewServer(db).ListenAndServe(addr)
+	},
+}
+
+func init() {
+	serverCmd.Flags().String("addr", ":8080", "Address to listen on")
+}
+
+// xferdbStatePath returns the default state DB path (~/.xferdb/state.db).
+func xferdbStatePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".xferdb", "state.db")
+}
+
+// xferdbContextPath returns the path to the current project context file.
+func xferdbContextPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".xferdb", "current_project")
 }

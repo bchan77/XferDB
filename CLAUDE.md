@@ -16,19 +16,23 @@ See `ARCHITECTURE.md` for full system design, endpoint list, SQL schema, and pac
 
 ## Current State of the Codebase
 
-The existing code is **scaffolding only** — nothing is wired up end-to-end.
+**ALL 11 TASKS COMPLETE. The system is fully built and compiles clean (`go build ./...`, `go vet ./...`).**
 
-| File | Status | Notes |
-|------|--------|-------|
-| `internal/adapter/interface.go` | Stub | Single `Adapter` interface — simpler than ARCHITECTURE.md's split Source/Target design. Will be superseded by `adapters/adapter.go`. |
-| `internal/config/config.go` | Working | YAML config loader. Maps cleanly to a Project config (just needs name/id fields added). |
-| `internal/transfer/transfer.go` | Stub | Basic batch loop with no checkpointing, no state manager, no project awareness. |
-| `internal/validator/validator.go` | Stub | Row count check only. |
-| `cmd/xferdb/commands/migrate.go` | Stub | Prints "not yet implemented". |
-| `pkg/logger/logger.go` | Working | Simple logger. |
-| `pkg/metrics/metrics.go` | Working | Metrics package. |
+| Package | Status | Notes |
+|---------|--------|-------|
+| `adapters/` | Done | Core types + SourceAdapter/TargetAdapter interfaces |
+| `adapters/sqlite/` | Done | Full source + target with INSERT OR REPLACE upsert |
+| `adapters/postgres/` | Done | Full source + target with ON CONFLICT DO UPDATE |
+| `adapters/mysql/` | Done | Full source + target with ON DUPLICATE KEY UPDATE |
+| `registry/` | Done | Adapter registry + connection string parser (own package to avoid import cycle) |
+| `state/` | Done | SQLite metadb: projects, migrations, migration_tables, checkpoints |
+| `engine/` | Done | Migration engine with pause/resume, checkpointing, progress events |
+| `stats/` | Done | Stats collector consuming engine events; thread-safe Snapshot() |
+| `analyzer/` | Done | Schema diff engine + rule-based suggestions + AI stub interface |
+| `api/` | Done | REST API (net/http ServeMux): projects, migrations, preflight, analyze, stats |
+| `cmd/xferdb/` | Done | CLI rewritten as thin API client; `server`, `project`, `migrate` commands |
 
-**No concrete adapter implementations exist. No API server. No state manager.**
+Legacy scaffolding in `internal/` is superseded — do not extend it.
 
 ---
 
@@ -97,10 +101,10 @@ Use `lib/pq` (already in go.mod). WriteBatch uses `INSERT ... ON CONFLICT DO UPD
 
 Use `go-sql-driver/mysql` (already in go.mod). WriteBatch uses `INSERT ... ON DUPLICATE KEY UPDATE`.
 
-### Task #5 — Adapter registry — blocked by #2, #3, #4
-**Package:** `adapters/registry.go`
+### Task #5 — Adapter registry — DONE
+**Package:** `registry/registry.go`
 
-Maps type strings ("postgres", "mysql", "sqlite") to constructor functions. Parses connection strings (`postgres://user:pass@host/db`) into `ConnectionConfig`. Used by the engine and API to instantiate the right adapter at runtime.
+Maps type strings ("postgres", "mysql", "sqlite") to constructor functions. Parses connection strings (`postgres://user:pass@host/db`) into `ConnectionConfig`. Lives in its own package (not inside `adapters/`) to avoid the import cycle that would arise from `adapters` importing its own sub-packages.
 
 ### Task #6 — State Manager with projects — blocked by #1
 **Package:** `state/metadb.go`, `state/projects.go`, `state/migrations.go`, `state/checkpoints.go`
