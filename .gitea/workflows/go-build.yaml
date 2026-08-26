@@ -27,6 +27,9 @@ jobs:
           set -eu
           go version
 
+          echo "Fixing dependencies..."
+          go mod tidy
+
           echo "Downloading dependencies..."
           go mod download
 
