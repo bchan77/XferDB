@@ -39,12 +39,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          GITEA_REPO: ${{ github.repository }}
-          PR_INDEX: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "Approving PR #${PR_INDEX}..."
-          curl -s -X POST \
-            "https://gitea.homelab.local/api/v1/repos/${GITEA_REPO}/pulls/${PR_INDEX}/reviews" \
+          echo "Approving PR #${PR_NUMBER}..."
+          curl -v -X POST \
+            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUMBER}/reviews" \
             -H "Authorization: token ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{"body":"✅ Build passed!","event":"APPROVE"}'
@@ -54,12 +53,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          GITEA_REPO: ${{ github.repository }}
-          PR_INDEX: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "Requesting changes on PR #${PR_INDEX}..."
-          curl -s -X POST \
-            "https://gitea.homelab.local/api/v1/repos/${GITEA_REPO}/pulls/${PR_INDEX}/reviews" \
+          echo "Requesting changes on PR #${PR_NUMBER}..."
+          curl -v -X POST \
+            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUMBER}/reviews" \
             -H "Authorization: token ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{"body":"❌ Build failed. Please fix the issues.","event":"REQUEST_REVIEW"}'
