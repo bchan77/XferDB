@@ -1,0 +1,162 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/engine"
+	"gitea.homelab.local/nextdevops/XferDB/state"
+	"gitea.homelab.local/nextdevops/XferDB/stats"
+)
+
+// MigrationsHandler holds shared engine/collector maps for migration endpoints.
+type MigrationsHandler struct {
+	DB         *state.MetaDB
+	Mu         *sync.Mutex
+	Engines    map[string]*engine.Engine
+	Collectors map[string]*stats.Collector
+	Cancels    map[string]context.CancelFunc
+}
+
+// StartMigration handles POST /api/v1/projects/{id}/migrations.
+func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	p, err := h.DB.GetProject(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	migrationID := uuid.New().String()
+	mig := &adapters.Migration{
+		ID:        migrationID,
+		ProjectID: projectID,
+		Status:    adapters.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	if err := h.DB.CreateMigration(r.Context(), mig); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	eng := engine.New(migrationID, p, h.DB)
+	col := stats.NewCollector(migrationID, eng.Events())
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	h.Mu.Lock()
+	h.Engines[migrationID] = eng
+	h.Collectors[migrationID] = col
+	h.Cancels[migrationID] = cancel
+	h.Mu.Unlock()
+
+	col.Start(ctx)
+	go func() {
+		defer func() {
+			cancel()
+			h.Mu.Lock()
+			delete(h.Engines, migrationID)
+			delete(h.Cancels, migrationID)
+			h.Mu.Unlock()
+		}()
+		eng.Run(ctx) //nolint:errcheck
+	}()
+
+	writeJSON(w, http.StatusCreated, mig)
+}
+
+// ListMigrations handles GET /api/v1/projects/{id}/migrations.
+func (h *MigrationsHandler) ListMigrations(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	migs, err := h.DB.ListMigrations(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, migs)
+}
+
+// GetMigration handles GET /api/v1/migrations/{id}.
+func (h *MigrationsHandler) GetMigration(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mig, err := h.DB.GetMigration(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "migration not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, mig)
+}
+
+// PatchMigration handles PATCH /api/v1/migrations/{id} for pause/resume.
+func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var body struct {
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	h.Mu.Lock()
+	eng, ok := h.Engines[id]
+	h.Mu.Unlock()
+
+	if !ok {
+		writeError(w, http.StatusNotFound, "no active engine for migration")
+		return
+	}
+
+	switch body.Action {
+	case "pause":
+		eng.Pause()
+	case "resume":
+		eng.Resume()
+	default:
+		writeError(w, http.StatusBadRequest, "action must be 'pause' or 'resume'")
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// DeleteMigration handles DELETE /api/v1/migrations/{id}.
+func (h *MigrationsHandler) DeleteMigration(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	h.Mu.Lock()
+	cancel, hasCancel := h.Cancels[id]
+	h.Mu.Unlock()
+
+	if hasCancel {
+		cancel()
+	}
+
+	if err := h.DB.DeleteMigration(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GetStats handles GET /api/v1/migrations/{id}/stats.
+func (h *MigrationsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	h.Mu.Lock()
+	col, ok := h.Collectors[id]
+	h.Mu.Unlock()
+
+	if !ok {
+		writeError(w, http.StatusNotFound, "no stats collector for migration")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, col.Snapshot())
+}
