@@ -31,9 +31,9 @@ Moving data between different database systems is painful. Each DB has its own m
 
 | Database | Source | Target | Notes |
 |----------|--------|--------|-------|
-| PostgreSQL | 🔜 | 🔜 | Coming soon |
-| MySQL | 🔜 | 🔜 | Coming soon |
-| SQLite | 🔜 | 🔜 | Coming soon |
+| SQLite | ✅ | ✅ | Fully working |
+| PostgreSQL | 🔜 | 🔜 | Implemented, pending live DB testing |
+| MySQL | 🔜 | 🔜 | Implemented, pending live DB testing |
 | MongoDB | 🔜 | 🔜 | Coming soon |
 | Cassandra | 🔜 | 🔜 | Coming soon |
 | **Pinecone** | 🔜 | 🔜 | Vector DB |
@@ -41,7 +41,7 @@ Moving data between different database systems is painful. Each DB has its own m
 | **Weaviate** | 🔜 | 🔜 | Vector DB |
 | **Chroma** | 🔜 | 🔜 | Vector DB |
 
-> 🔜 = Planned support
+> ✅ = Working &nbsp;|&nbsp; 🔜 = Planned or implemented but not yet verified against a live instance
 
 ---
 
@@ -98,43 +98,71 @@ go install
 
 ## Quick Start
 
-### Using connection strings
+XferDB runs as an API server. The CLI talks to it.
+
+### 1. Start the server
 
 ```bash
-xferdb migrate \
-  --from "postgres://user:***@localhost:5432/source_db" \
-  --to "mysql://user:***@localhost:3306/target_db"
+xferdb server
+# Listening on :8080, state at ~/.xferdb/state.db
 ```
 
-### Using a config file
+### 2. Create a project
 
 ```bash
-xferdb migrate --config migration.yaml
+xferdb project create \
+  --name my-migration \
+  --source sqlite:///path/to/source.db \
+  --target sqlite:///path/to/target.db
 ```
 
-### Example config file
+### 3. Run a migration
 
-```yaml
-source:
-  type: postgres
-  host: localhost
-  port: 5432
-  database: source_db
-  user: ${POSTGRES_USER}
-  password: ${POSTGRES_PASSWORD}
+```bash
+xferdb project use my-migration
+xferdb migrate
+# Migration started: <id>
+# phase=complete       table=                     rows=50000/50000  rate=0/s  eta=0s
+```
 
-target:
-  type: mysql
-  host: localhost
-  port: 3306
-  database: target_db
-  user: ${MYSQL_USER}
-  password: ${MYSQL_PASSWORD}
+### SQLite example (working today)
 
-transfer:
-  batch_size: 1000
-  workers: 4
-  validate: true
+```bash
+# Start server
+xferdb server &
+
+# Create project
+xferdb project create \
+  --name sqlite-test \
+  --source sqlite:///source.db \
+  --target sqlite:///target.db
+
+# Migrate
+xferdb project use sqlite-test
+xferdb migrate
+```
+
+### Via the REST API directly
+
+```bash
+# Create project
+curl -X POST http://localhost:8080/api/v1/projects \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-migration",
+    "source_config": {"type": "sqlite", "dsn": "/path/to/source.db"},
+    "target_config": {"type": "sqlite", "dsn": "/path/to/target.db"},
+    "transfer_config": {"batch_size": 1000}
+  }'
+
+# Run preflight
+curl -X POST http://localhost:8080/api/v1/projects/<id>/preflight
+
+# Start migration
+curl -X POST http://localhost:8080/api/v1/projects/<id>/migrations
+
+# Check progress
+curl http://localhost:8080/api/v1/migrations/<id>/stats
 ```
 
 ---
@@ -164,14 +192,17 @@ go build -o xferdb ./cmd/xferdb
 
 ## Roadmap
 
-- [ ] PostgreSQL source & target adapter
-- [ ] MySQL source & target adapter
-- [ ] SQLite source & target adapter
-- [ ] Incremental sync with cursor-based pagination
+- [x] SQLite source & target adapter
+- [x] REST API with projects, migrations, preflight, schema analysis
+- [x] Pause/resume with checkpointing and crash recovery
+- [x] Multi-project support
+- [ ] PostgreSQL adapter — live DB testing
+- [ ] MySQL adapter — live DB testing
 - [ ] MongoDB adapter
 - [ ] Cassandra adapter
 - [ ] Vector DB adapters (Pinecone, Qdrant, Weaviate, Chroma)
 - [ ] Web UI for migration configuration
+- [ ] WebSocket live progress
 - [ ] Scheduled/repeated migrations
 - [ ] Data transformation pipeline (column mapping, type casting)
 
