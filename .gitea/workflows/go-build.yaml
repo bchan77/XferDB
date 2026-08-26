@@ -14,7 +14,7 @@ on:
 
 jobs:
   build:
-    runs-on: go-builder
+    runs-on: rocky9.8
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
