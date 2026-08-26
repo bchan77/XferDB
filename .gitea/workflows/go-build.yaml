@@ -38,11 +38,11 @@ jobs:
         if: success()
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: *** secrets.GH_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           echo "Approving PR #${PR_NUMBER}..."
-          curl -v -X POST \
+          curl -s -k -X POST \
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUMBER}/reviews" \
             -H "Authorization: token ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
@@ -52,11 +52,11 @@ jobs:
         if: failure()
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: *** secrets.GH_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           echo "Requesting changes on PR #${PR_NUMBER}..."
-          curl -v -X POST \
+          curl -s -k -X POST \
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUMBER}/reviews" \
             -H "Authorization: token ${GH_TOKEN}" \
             -H "Content-Type: application/json" \
