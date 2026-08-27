@@ -27,10 +27,12 @@ const (
 
 // TransferConfig controls batch transfer behaviour.
 type TransferConfig struct {
-	BatchSize int         `json:"batch_size"`
-	Workers   int         `json:"workers"`
-	Validate  bool        `json:"validate"`
-	OnError   ErrorPolicy `json:"on_error"`
+	BatchSize  int         `json:"batch_size"`
+	Workers    int         `json:"workers"`
+	Validate   bool        `json:"validate"`
+	OnError    ErrorPolicy `json:"on_error"`
+	DataOnly   bool        `json:"data_only"`   // skip schema creation; target schema must already exist
+	SchemaOnly bool        `json:"schema_only"` // create schema on target but do not transfer data
 }
 
 // Project is a named migration project with a fixed source/target configuration.
@@ -96,10 +98,36 @@ type ColumnDef struct {
 	DefaultValue *string `json:"default_value,omitempty"`
 }
 
-// TableSchema describes the structure of a table.
+// IndexDef describes an index on a table (excluding the primary key index).
+type IndexDef struct {
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
+	Unique  bool     `json:"unique"`
+}
+
+// ForeignKey describes a foreign key constraint.
+type ForeignKey struct {
+	Name       string   `json:"name"`
+	Columns    []string `json:"columns"`
+	RefTable   string   `json:"ref_table"`
+	RefColumns []string `json:"ref_columns"`
+	OnDelete   string   `json:"on_delete,omitempty"`
+	OnUpdate   string   `json:"on_update,omitempty"`
+}
+
+// CheckConstraint describes a CHECK constraint on a table.
+type CheckConstraint struct {
+	Name       string `json:"name"`
+	Expression string `json:"expression"`
+}
+
+// TableSchema describes the full structure of a table.
 type TableSchema struct {
-	Name    string      `json:"name"`
-	Columns []ColumnDef `json:"columns"`
+	Name        string            `json:"name"`
+	Columns     []ColumnDef       `json:"columns"`
+	Indexes     []IndexDef        `json:"indexes,omitempty"`
+	ForeignKeys []ForeignKey      `json:"foreign_keys,omitempty"`
+	Checks      []CheckConstraint `json:"checks,omitempty"`
 }
 
 // ChangeType classifies a schema alteration.
@@ -159,6 +187,12 @@ type TargetAdapter interface {
 	GetSchema(ctx context.Context, table string) (*TableSchema, error)
 	CreateTable(ctx context.Context, schema *TableSchema) error
 	AlterTable(ctx context.Context, table string, changes []SchemaChange) error
+	// CreateIndexes creates non-primary-key indexes. Called after all data is transferred
+	// so bulk inserts are faster and FK checks don't fire during the copy.
+	CreateIndexes(ctx context.Context, table string, indexes []IndexDef) error
+	// CreateConstraints adds foreign key and CHECK constraints. Called last so that
+	// all tables exist before cross-table references are validated.
+	CreateConstraints(ctx context.Context, table string, fks []ForeignKey, checks []CheckConstraint) error
 	WriteBatch(ctx context.Context, table string, batch *Batch) error
 	CheckPermissions(ctx context.Context) (*PermissionCheck, error)
 }

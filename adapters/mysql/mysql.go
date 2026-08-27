@@ -88,7 +88,106 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 		}
 		schema.Columns = append(schema.Columns, col)
 	}
-	return schema, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	indexes, err := getIndexes(ctx, db, table)
+	if err != nil {
+		return nil, err
+	}
+	schema.Indexes = indexes
+
+	fks, err := getForeignKeys(ctx, db, table)
+	if err != nil {
+		return nil, err
+	}
+	schema.ForeignKeys = fks
+
+	return schema, nil
+}
+
+// getIndexes returns non-primary-key indexes for a table.
+func getIndexes(ctx context.Context, db *sql.DB, table string) ([]adapters.IndexDef, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT INDEX_NAME, NON_UNIQUE,
+		    GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',') AS COLUMNS
+		FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+		AND INDEX_NAME != 'PRIMARY'
+		GROUP BY INDEX_NAME, NON_UNIQUE
+		ORDER BY INDEX_NAME`, table)
+	if err != nil {
+		return nil, fmt.Errorf("mysql indexes(%s): %w", table, err)
+	}
+	defer rows.Close()
+
+	var result []adapters.IndexDef
+	for rows.Next() {
+		var name, colCSV string
+		var nonUnique int
+		if err := rows.Scan(&name, &nonUnique, &colCSV); err != nil {
+			return nil, err
+		}
+		result = append(result, adapters.IndexDef{
+			Name:    name,
+			Columns: strings.Split(colCSV, ","),
+			Unique:  nonUnique == 0,
+		})
+	}
+	return result, rows.Err()
+}
+
+// getForeignKeys returns foreign key constraints for a table.
+func getForeignKeys(ctx context.Context, db *sql.DB, table string) ([]adapters.ForeignKey, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+		    kcu.CONSTRAINT_NAME,
+		    kcu.COLUMN_NAME,
+		    kcu.REFERENCED_TABLE_NAME,
+		    kcu.REFERENCED_COLUMN_NAME,
+		    rc.UPDATE_RULE,
+		    rc.DELETE_RULE
+		FROM information_schema.KEY_COLUMN_USAGE kcu
+		JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+		    ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+		   AND rc.CONSTRAINT_SCHEMA = kcu.TABLE_SCHEMA
+		WHERE kcu.TABLE_SCHEMA = DATABASE() AND kcu.TABLE_NAME = ?
+		AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+		ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`, table)
+	if err != nil {
+		return nil, fmt.Errorf("mysql foreign keys(%s): %w", table, err)
+	}
+	defer rows.Close()
+
+	var nameOrder []string
+	fkMap := make(map[string]*adapters.ForeignKey)
+	for rows.Next() {
+		var name, col, refTable, refCol, updateRule, deleteRule string
+		if err := rows.Scan(&name, &col, &refTable, &refCol, &updateRule, &deleteRule); err != nil {
+			return nil, err
+		}
+		if _, ok := fkMap[name]; !ok {
+			nameOrder = append(nameOrder, name)
+			fkMap[name] = &adapters.ForeignKey{
+				Name:     name,
+				RefTable: refTable,
+				OnUpdate: updateRule,
+				OnDelete: deleteRule,
+			}
+		}
+		fkMap[name].Columns = append(fkMap[name].Columns, col)
+		fkMap[name].RefColumns = append(fkMap[name].RefColumns, refCol)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := make([]adapters.ForeignKey, 0, len(nameOrder))
+	for _, n := range nameOrder {
+		result = append(result, *fkMap[n])
+	}
+	return result, nil
 }
 
 // pkColumns returns the primary key column names for a schema.

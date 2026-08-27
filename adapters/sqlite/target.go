@@ -60,7 +60,7 @@ func (t *Target) GetSchema(ctx context.Context, table string) (*adapters.TableSc
 }
 
 func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) error {
-	defs := make([]string, 0, len(schema.Columns))
+	defs := make([]string, 0, len(schema.Columns)+len(schema.ForeignKeys)+len(schema.Checks))
 	for _, c := range schema.Columns {
 		def := fmt.Sprintf(`%s %s`, quote(c.Name), c.Type)
 		if c.PrimaryKey {
@@ -74,10 +74,58 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 		}
 		defs = append(defs, def)
 	}
+	// SQLite FK constraints must be declared in CREATE TABLE (no ALTER TABLE ADD FK).
+	for _, fk := range schema.ForeignKeys {
+		fromCols := make([]string, len(fk.Columns))
+		toCols := make([]string, len(fk.RefColumns))
+		for i, c := range fk.Columns {
+			fromCols[i] = quote(c)
+		}
+		for i, c := range fk.RefColumns {
+			toCols[i] = quote(c)
+		}
+		fkDef := fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
+			strings.Join(fromCols, ", "), quote(fk.RefTable), strings.Join(toCols, ", "))
+		if fk.OnDelete != "" && fk.OnDelete != "NO ACTION" {
+			fkDef += " ON DELETE " + fk.OnDelete
+		}
+		if fk.OnUpdate != "" && fk.OnUpdate != "NO ACTION" {
+			fkDef += " ON UPDATE " + fk.OnUpdate
+		}
+		defs = append(defs, fkDef)
+	}
+	for _, chk := range schema.Checks {
+		defs = append(defs, fmt.Sprintf("CHECK (%s)", chk.Expression))
+	}
 	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (%s)`, quote(schema.Name), strings.Join(defs, ", "))
 	if _, err := t.db.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("create table %s: %w", schema.Name, err)
 	}
+	return nil
+}
+
+func (t *Target) CreateIndexes(ctx context.Context, table string, indexes []adapters.IndexDef) error {
+	for _, idx := range indexes {
+		cols := make([]string, len(idx.Columns))
+		for i, c := range idx.Columns {
+			cols[i] = quote(c)
+		}
+		unique := ""
+		if idx.Unique {
+			unique = "UNIQUE "
+		}
+		query := fmt.Sprintf(`CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)`,
+			unique, quote(idx.Name), quote(table), strings.Join(cols, ", "))
+		if _, err := t.db.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("create index %s on %s: %w", idx.Name, table, err)
+		}
+	}
+	return nil
+}
+
+// CreateConstraints is a no-op for SQLite: FK and CHECK constraints are included
+// inline in CreateTable since SQLite does not support ALTER TABLE ADD CONSTRAINT.
+func (t *Target) CreateConstraints(_ context.Context, _ string, _ []adapters.ForeignKey, _ []adapters.CheckConstraint) error {
 	return nil
 }
 
