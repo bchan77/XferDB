@@ -12,13 +12,9 @@ const defaultBatchSize = 1000
 
 // transferTable copies all rows from source to target for a single table,
 // resuming from the last checkpoint if one exists.
+// Table creation is handled in Phase 1 of Engine.Run before this is called.
 func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableSchema) error {
 	table := sourceSchema.Name
-
-	// Ensure the table exists on the target. Create it from the source schema if not.
-	if err := e.ensureTargetTable(ctx, sourceSchema); err != nil {
-		return err
-	}
 
 	total, err := e.source.GetRowCount(ctx, table)
 	if err != nil {
@@ -125,18 +121,6 @@ func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableS
 		RowsTotal:       total,
 		Timestamp:       done,
 	})
-	return nil
-}
-
-// ensureTargetTable creates the table on the target if it does not already exist.
-func (e *Engine) ensureTargetTable(ctx context.Context, schema adapters.TableSchema) error {
-	existing, err := e.target.GetSchema(ctx, schema.Name)
-	if err == nil && existing != nil && len(existing.Columns) > 0 {
-		return nil // table already exists
-	}
-	if err := e.target.CreateTable(ctx, &schema); err != nil {
-		return fmt.Errorf("create target table %s: %w", schema.Name, err)
-	}
 	return nil
 }
 

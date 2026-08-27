@@ -118,6 +118,12 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		// Reset rate sample so we don't compute a stale rate over the pause gap.
 		c.lastSampleTime = time.Now()
 		c.lastSampleRows = s.Rows.Transferred
+
+	case engine.EventSchemaPhase:
+		s.Phase = "schema"
+
+	case engine.EventPostSchemaPhase:
+		s.Phase = "post_schema"
 	}
 
 	s.Tables.Pending = s.Tables.Total - s.Tables.Completed - s.Tables.InProgress

@@ -94,6 +94,93 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 	return nil
 }
 
+func (t *Target) CreateIndexes(ctx context.Context, table string, indexes []adapters.IndexDef) error {
+	for _, idx := range indexes {
+		var count int
+		if err := t.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.STATISTICS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+			table, idx.Name).Scan(&count); err != nil {
+			return fmt.Errorf("check index %s existence: %w", idx.Name, err)
+		}
+		if count > 0 {
+			continue // already exists — idempotent on resume
+		}
+		cols := make([]string, len(idx.Columns))
+		for i, c := range idx.Columns {
+			cols[i] = quote(c)
+		}
+		unique := ""
+		if idx.Unique {
+			unique = "UNIQUE "
+		}
+		q := fmt.Sprintf(`CREATE %sINDEX %s ON %s (%s)`,
+			unique, quote(idx.Name), quote(table), strings.Join(cols, ", "))
+		if _, err := t.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("create index %s on %s: %w", idx.Name, table, err)
+		}
+	}
+	return nil
+}
+
+func (t *Target) CreateConstraints(ctx context.Context, table string, fks []adapters.ForeignKey, checks []adapters.CheckConstraint) error {
+	for _, fk := range fks {
+		var count int
+		if err := t.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = ?`,
+			table, fk.Name).Scan(&count); err != nil {
+			return fmt.Errorf("check fk existence %s: %w", fk.Name, err)
+		}
+		if count > 0 {
+			continue
+		}
+		fromCols := make([]string, len(fk.Columns))
+		toCols := make([]string, len(fk.RefColumns))
+		for i, c := range fk.Columns {
+			fromCols[i] = quote(c)
+		}
+		for i, c := range fk.RefColumns {
+			toCols[i] = quote(c)
+		}
+		q := fmt.Sprintf(
+			`ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)`,
+			quote(table), quote(fk.Name),
+			strings.Join(fromCols, ", "),
+			quote(fk.RefTable),
+			strings.Join(toCols, ", "),
+		)
+		if fk.OnDelete != "" && fk.OnDelete != "NO ACTION" {
+			q += " ON DELETE " + fk.OnDelete
+		}
+		if fk.OnUpdate != "" && fk.OnUpdate != "NO ACTION" {
+			q += " ON UPDATE " + fk.OnUpdate
+		}
+		if _, err := t.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("add foreign key %s.%s: %w", table, fk.Name, err)
+		}
+	}
+
+	for _, chk := range checks {
+		var count int
+		if err := t.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = ?`,
+			table, chk.Name).Scan(&count); err != nil {
+			return fmt.Errorf("check constraint existence %s: %w", chk.Name, err)
+		}
+		if count > 0 {
+			continue
+		}
+		q := fmt.Sprintf(`ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s)`,
+			quote(table), quote(chk.Name), chk.Expression)
+		if _, err := t.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("add check %s.%s: %w", table, chk.Name, err)
+		}
+	}
+	return nil
+}
+
 func (t *Target) AlterTable(ctx context.Context, table string, changes []adapters.SchemaChange) error {
 	for _, change := range changes {
 		var query string

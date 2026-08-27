@@ -60,8 +60,13 @@ func (e *Engine) Resume() {
 	}
 }
 
-// Run executes the full migration. It blocks until the migration completes,
-// fails, or ctx is cancelled. The events channel is closed when Run returns.
+// Run executes the full migration in three phases:
+//  1. Schema   — create all target tables (idempotent; skipped when DataOnly=true)
+//  2. Data     — transfer rows table by table (resumes from last checkpoint)
+//  3. Post-schema — create indexes and constraints after data load (skipped when DataOnly=true)
+//
+// Run blocks until the migration completes, fails, or ctx is cancelled.
+// The events channel is closed when Run returns.
 func (e *Engine) Run(ctx context.Context) error {
 	defer close(e.events)
 
@@ -79,19 +84,53 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
-	// Load existing table progress to skip completed tables on resume.
-	existingProgress, err := e.db.GetTableProgress(ctx, e.migrationID)
-	if err != nil {
-		return e.fail(ctx, err)
-	}
-	doneSet := completedTableSet(existingProgress)
+	dataOnly := e.project.TransferConfig.DataOnly
+	schemaOnly := e.project.TransferConfig.SchemaOnly
 
-	for _, schema := range tables {
-		if doneSet[schema.Name] {
-			continue // already completed in a previous run
+	// Phase 1: Schema — create all target tables before any data is transferred.
+	// CreateTable uses IF NOT EXISTS so this is safe to re-run on resume.
+	if !dataOnly {
+		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
+		for _, schema := range tables {
+			if err := e.target.CreateTable(ctx, &schema); err != nil {
+				return e.fail(ctx, fmt.Errorf("create table %s: %w", schema.Name, err))
+			}
 		}
-		if err := e.transferTable(ctx, schema); err != nil {
+	}
+
+	if !schemaOnly {
+		// Phase 2: Data — transfer rows for each table, skipping already-complete ones.
+		existingProgress, err := e.db.GetTableProgress(ctx, e.migrationID)
+		if err != nil {
 			return e.fail(ctx, err)
+		}
+		doneSet := completedTableSet(existingProgress)
+
+		for _, schema := range tables {
+			if doneSet[schema.Name] {
+				continue
+			}
+			if err := e.transferTable(ctx, schema); err != nil {
+				return e.fail(ctx, err)
+			}
+		}
+	}
+
+	// Phase 3: Post-schema — indexes and FK constraints after all data is loaded.
+	// Creating indexes after bulk insert is faster; FKs must come after all tables exist.
+	if !dataOnly {
+		e.emit(ProgressEvent{Kind: EventPostSchemaPhase, Timestamp: time.Now()})
+		for _, schema := range tables {
+			if len(schema.Indexes) > 0 {
+				if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
+					return e.fail(ctx, fmt.Errorf("create indexes for %s: %w", schema.Name, err))
+				}
+			}
+			if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
+				if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
+					return e.fail(ctx, fmt.Errorf("create constraints for %s: %w", schema.Name, err))
+				}
+			}
 		}
 	}
 
