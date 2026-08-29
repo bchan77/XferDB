@@ -162,8 +162,16 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 		eng.Pause()
 	case "resume":
 		eng.Resume()
+	case "cancel":
+		h.Mu.Lock()
+		cancel, hasCancel := h.Cancels[id]
+		h.Mu.Unlock()
+		if hasCancel {
+			cancel()
+		}
+		h.DB.SetMigrationError(r.Context(), id, fmt.Errorf("cancelled by user"))
 	default:
-		writeError(w, http.StatusBadRequest, "action must be 'pause' or 'resume'")
+		writeError(w, http.StatusBadRequest, "action must be 'pause', 'resume', or 'cancel'")
 		return
 	}
 

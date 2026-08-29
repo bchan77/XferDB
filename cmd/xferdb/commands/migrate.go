@@ -24,6 +24,7 @@ Examples:
 		projectFlag, _ := cmd.Flags().GetString("project")
 		preflightOnly, _ := cmd.Flags().GetBool("preflight")
 		statusOnly, _ := cmd.Flags().GetBool("status")
+		cancelOnly, _ := cmd.Flags().GetBool("cancel")
 		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
 		truncate, _ := cmd.Flags().GetBool("truncate")
 		workers, _ := cmd.Flags().GetInt("workers")
@@ -55,6 +56,14 @@ Examples:
 			return pollStats(migrationID)
 		}
 
+		if cancelOnly {
+			migrationID, err := latestMigrationID(projectID)
+			if err != nil {
+				return err
+			}
+			return cancelMigration(migrationID)
+		}
+
 		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers)
 		if err != nil {
 			return err
@@ -70,6 +79,7 @@ func init() {
 	migrateCmd.Flags().StringP("project", "p", "", "Project name (overrides current context)")
 	migrateCmd.Flags().Bool("preflight", false, "Check connectivity and permissions without migrating")
 	migrateCmd.Flags().Bool("status", false, "Re-attach to the latest migration and show live progress")
+	migrateCmd.Flags().Bool("cancel", false, "Cancel the currently running migration")
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
 	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
 	migrateCmd.Flags().Int("workers", 1, "Number of tables to migrate concurrently")
@@ -153,6 +163,35 @@ func resolveProjectID(name string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("project %q not found", name)
+}
+
+// cancelMigration sends a cancel action to the migration and reports the result.
+func cancelMigration(migrationID string) error {
+	body, _ := json.Marshal(map[string]string{"action": "cancel"})
+	req, err := http.NewRequest(http.MethodPatch,
+		ServerAddr+"/api/v1/migrations/"+migrationID,
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("migration %s is not running (already finished or never started)", migrationID)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		var e map[string]any
+		json.NewDecoder(resp.Body).Decode(&e)
+		return fmt.Errorf("server error %d: %v", resp.StatusCode, e["error"])
+	}
+	fmt.Printf("Migration %s cancelled.\n", migrationID)
+	return nil
 }
 
 // latestMigrationID returns the most recently created migration ID for a project.
