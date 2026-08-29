@@ -35,6 +35,7 @@ var projectCreateCmd = &cobra.Command{
 		srcDSN, _ := cmd.Flags().GetString("source")
 		tgtDSN, _ := cmd.Flags().GetString("target")
 		desc, _ := cmd.Flags().GetString("description")
+		batchSize, _ := cmd.Flags().GetInt("batch-size")
 
 		if name == "" || srcDSN == "" || tgtDSN == "" {
 			return fmt.Errorf("--name, --source, and --target are required")
@@ -55,7 +56,7 @@ var projectCreateCmd = &cobra.Command{
 				DSN:  tgtDSN,
 			},
 			"transfer_config": adapters.TransferConfig{
-				BatchSize: 1000,
+				BatchSize: batchSize,
 				OnError:   adapters.ErrorPolicyAbort,
 			},
 		}
@@ -83,6 +84,7 @@ func init() {
 	projectCreateCmd.Flags().String("source", "", "Source database DSN")
 	projectCreateCmd.Flags().String("target", "", "Target database DSN")
 	projectCreateCmd.Flags().StringP("description", "d", "", "Project description")
+	projectCreateCmd.Flags().Int("batch-size", 1000, "Rows per batch (higher = faster, more memory)")
 }
 
 var projectListCmd = &cobra.Command{
