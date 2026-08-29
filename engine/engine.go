@@ -84,6 +84,13 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
+	// Announce all table names upfront so the stats collector can show pending tables.
+	tableNames := make([]string, len(tables))
+	for i, t := range tables {
+		tableNames[i] = t.Name
+	}
+	e.emit(ProgressEvent{Kind: EventMigrationStart, TableNames: tableNames, Timestamp: time.Now()})
+
 	cfg := e.project.TransferConfig
 	dataOnly := cfg.DataOnly
 	schemaOnly := cfg.SchemaOnly

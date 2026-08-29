@@ -80,19 +80,36 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 	s := &c.snapshot
 
 	switch ev.Kind {
+	case engine.EventMigrationStart:
+		for _, name := range ev.TableNames {
+			if _, exists := c.tableIndex[name]; !exists {
+				idx := len(s.TableDetails)
+				s.TableDetails = append(s.TableDetails, TableDetail{
+					Name:   name,
+					Status: "pending",
+				})
+				c.tableIndex[name] = idx
+			}
+		}
+
 	case engine.EventTableStart:
 		s.Phase = "in_progress"
 		s.CurrentTable = ev.TableName
 		s.Rows.Total += ev.RowsTotal
 		s.Tables.Total++
 		s.Tables.InProgress++
-		idx := len(s.TableDetails)
-		s.TableDetails = append(s.TableDetails, TableDetail{
-			Name:   ev.TableName,
-			Status: "in_progress",
-			Total:  ev.RowsTotal,
-		})
-		c.tableIndex[ev.TableName] = idx
+		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			s.TableDetails[idx].Status = "in_progress"
+			s.TableDetails[idx].Total = ev.RowsTotal
+		} else {
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:   ev.TableName,
+				Status: "in_progress",
+				Total:  ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+		}
 
 	case engine.EventBatch:
 		s.CurrentTable = ev.TableName

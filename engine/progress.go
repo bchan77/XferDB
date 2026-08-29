@@ -6,14 +6,15 @@ import "time"
 type EventKind string
 
 const (
-	EventTableStart     EventKind = "table_start"
-	EventBatch          EventKind = "batch"
-	EventTableDone      EventKind = "table_done"
-	EventComplete       EventKind = "complete"
-	EventError          EventKind = "error"
-	EventPaused         EventKind = "paused"
-	EventResumed        EventKind = "resumed"
-	EventSchemaPhase    EventKind = "schema_phase"
+	EventMigrationStart  EventKind = "migration_start"  // emitted once with all table names
+	EventTableStart      EventKind = "table_start"
+	EventBatch           EventKind = "batch"
+	EventTableDone       EventKind = "table_done"
+	EventComplete        EventKind = "complete"
+	EventError           EventKind = "error"
+	EventPaused          EventKind = "paused"
+	EventResumed         EventKind = "resumed"
+	EventSchemaPhase     EventKind = "schema_phase"
 	EventPostSchemaPhase EventKind = "post_schema_phase"
 )
 
@@ -23,6 +24,7 @@ type ProgressEvent struct {
 	MigrationID     string
 	Kind            EventKind
 	TableName       string
+	TableNames      []string // set only for EventMigrationStart
 	RowsTransferred int64
 	RowsTotal       int64
 	Timestamp       time.Time
