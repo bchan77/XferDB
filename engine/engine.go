@@ -90,10 +90,15 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	// Filter to only the requested tables when --tables is specified.
 	if len(cfg.Tables) > 0 {
-		tables = filterTables(tables, cfg.Tables)
-		if len(tables) == 0 {
+		filtered := filterTables(tables, cfg.Tables)
+		// Fail fast if any requested name has no match in the source.
+		if missing := missingRequestedTables(filtered, cfg.Tables); len(missing) > 0 {
+			return e.fail(ctx, fmt.Errorf("tables not found in source: %s", strings.Join(missing, ", ")))
+		}
+		if len(filtered) == 0 {
 			return e.fail(ctx, fmt.Errorf("no matching tables found for filter: %v", cfg.Tables))
 		}
+		tables = filtered
 	}
 
 	// Fetch row counts for all tables upfront so the ETA covers the whole migration.
@@ -274,6 +279,26 @@ func filterTables(tables []adapters.TableSchema, filters []string) []adapters.Ta
 		}
 	}
 	return out
+}
+
+// missingRequestedTables returns the names from the requested filter list that
+// have no corresponding entry in the found (post-filter) tables slice.
+func missingRequestedTables(found []adapters.TableSchema, requested []string) []string {
+	foundSet := make(map[string]bool, len(found))
+	for _, t := range found {
+		foundSet[strings.ToLower(t.Name)] = true
+	}
+	var missing []string
+	for _, req := range requested {
+		bare := req
+		if idx := strings.LastIndex(req, "."); idx >= 0 {
+			bare = req[idx+1:]
+		}
+		if !foundSet[strings.ToLower(bare)] && !foundSet[strings.ToLower(req)] {
+			missing = append(missing, req)
+		}
+	}
+	return missing
 }
 
 // checkPause blocks if a pause signal is pending, updating state accordingly.
