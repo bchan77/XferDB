@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -30,6 +31,20 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
+	}
+
+	// Prevent concurrent migrations for the same project.
+	existing, err := h.DB.ListMigrations(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, m := range existing {
+		if m.Status == adapters.StatusPending || m.Status == adapters.StatusInProgress {
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("migration %s is already %s for this project — wait for it to finish or delete it first", m.ID, m.Status))
+			return
+		}
 	}
 
 	// Optional per-run TransferConfig overrides in the request body.
