@@ -151,8 +151,15 @@ func parsePgDumpBlocks(data []byte) []ddlBlock {
 			continue
 		}
 
-		// Skip SET statements — session config hints unsupported by some targets.
-		if strings.HasPrefix(trimmed, "SET ") {
+		// Skip SET statements and psql metacommands — these are session-config
+		// hints or client-only commands. SET is unrecognised by some targets
+		// (e.g. YugabyteDB rejects "SET transaction_timeout = 0" from PG17
+		// dumps). Lines starting with "\" are psql metacommands (\connect,
+		// \encoding, etc.) that are only valid inside psql; sent to a direct
+		// database connection they produce a syntax error.
+		if strings.HasPrefix(trimmed, "SET ") ||
+			strings.HasPrefix(trimmed, `\`) ||
+			strings.HasPrefix(trimmed, "SELECT pg_catalog.set_config(") {
 			continue
 		}
 
