@@ -42,7 +42,7 @@ func pgDumpPreData(ctx context.Context, src, tgt adapters.ConnectionConfig, recr
 	}
 	args = append(args, pgConnStr(src))
 
-	return runPgDumpPsql(ctx, args, src, tgt, recreate)
+	return runPgDumpPsql(ctx, args, src, tgt)
 }
 
 // pgDumpPostData transfers the post-data schema section (indexes, triggers,
@@ -63,13 +63,15 @@ func pgDumpPostData(ctx context.Context, src, tgt adapters.ConnectionConfig) (bo
 		pgConnStr(src),
 	}
 
-	return runPgDumpPsql(ctx, args, src, tgt, false)
+	return runPgDumpPsql(ctx, args, src, tgt)
 }
 
 // runPgDumpPsql runs pg_dump with the given args and pipes its output into psql
-// on the target. stopOnError controls whether psql aborts on the first error
-// (appropriate when recreating; lenient mode handles "already exists" on re-runs).
-func runPgDumpPsql(ctx context.Context, dumpArgs []string, src, tgt adapters.ConnectionConfig, stopOnError bool) (bool, error) {
+// on the target. psql always runs with ON_ERROR_STOP=off so that harmless
+// compatibility warnings (e.g. "unrecognized configuration parameter
+// transaction_timeout" from PG17 dumps against older targets) do not abort
+// the restore. Real failures surface during Phase 2 data transfer.
+func runPgDumpPsql(ctx context.Context, dumpArgs []string, src, tgt adapters.ConnectionConfig) (bool, error) {
 	dumpCmd := exec.CommandContext(ctx, "pg_dump", dumpArgs...)
 	dumpCmd.Env = withPGPassword(src)
 
@@ -81,12 +83,8 @@ func runPgDumpPsql(ctx context.Context, dumpArgs []string, src, tgt adapters.Con
 		return false, fmt.Errorf("pg_dump: %w: %s", err, strings.TrimSpace(dumpErr.String()))
 	}
 
-	errStop := "off"
-	if stopOnError {
-		errStop = "on"
-	}
 	psqlArgs := []string{
-		"--set", "ON_ERROR_STOP=" + errStop,
+		"--set", "ON_ERROR_STOP=off",
 		"--quiet",
 		pgConnStr(tgt),
 	}
@@ -97,6 +95,7 @@ func runPgDumpPsql(ctx context.Context, dumpArgs []string, src, tgt adapters.Con
 	var psqlErr bytes.Buffer
 	psqlCmd.Stderr = &psqlErr
 
+	// psql exits non-zero only for fatal connection errors when ON_ERROR_STOP=off.
 	if err := psqlCmd.Run(); err != nil {
 		return false, fmt.Errorf("psql schema restore: %w: %s", err, strings.TrimSpace(psqlErr.String()))
 	}
