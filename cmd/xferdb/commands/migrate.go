@@ -30,6 +30,7 @@ Examples:
 		workers, _ := cmd.Flags().GetInt("workers")
 		batchWorkers, _ := cmd.Flags().GetInt("batch-workers")
 		offsetSegments, _ := cmd.Flags().GetBool("offset-segments")
+		batchSize, _ := cmd.Flags().GetInt("batch-size")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 
 		if recreateSchema && truncate {
@@ -77,7 +78,7 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers, batchWorkers, offsetSegments, tables)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers, batchWorkers, batchSize, offsetSegments, tables)
 		if err != nil {
 			return err
 		}
@@ -98,6 +99,7 @@ func init() {
 	migrateCmd.Flags().Int("workers", 1, "Number of tables to migrate concurrently")
 	migrateCmd.Flags().Int("batch-workers", 1, "Number of parallel workers per table (splits table by PK range; falls back to OFFSET when no integer PK)")
 	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --batch-workers)")
+	migrateCmd.Flags().Int("batch-size", 0, "Rows per batch (overrides the project default; 0 = use project default)")
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 }
 
@@ -234,13 +236,16 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, workers, batchWorkers int, offsetSegments bool, tables []string) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool, workers, batchWorkers, batchSize int, offsetSegments bool, tables []string) (string, error) {
 	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
 		"workers":         workers,
 		"batch_workers":   batchWorkers,
 		"offset_fallback": offsetSegments,
+	}
+	if batchSize > 0 {
+		req["batch_size"] = batchSize
 	}
 	if len(tables) > 0 {
 		req["tables"] = tables

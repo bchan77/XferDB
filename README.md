@@ -178,6 +178,9 @@ xferdb migrate --truncate
 # Drop and recreate target tables (schema changed on source)
 xferdb migrate --recreate-schema
 
+# Override batch size for this run (project default is used when not set)
+xferdb migrate --batch-size 5000
+
 # Migrate specific tables only (comma-separated; schema.table notation supported)
 xferdb migrate --tables orders,customers
 xferdb migrate --tables public.orders,public.customers
