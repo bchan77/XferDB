@@ -23,6 +23,7 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectFlag, _ := cmd.Flags().GetString("project")
 		preflightOnly, _ := cmd.Flags().GetBool("preflight")
+		statusOnly, _ := cmd.Flags().GetBool("status")
 		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
 		truncate, _ := cmd.Flags().GetBool("truncate")
 
@@ -44,6 +45,15 @@ Examples:
 			return runPreflight(projectName, projectID)
 		}
 
+		if statusOnly {
+			migrationID, err := latestMigrationID(projectID)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Attaching to migration %s...\n", migrationID)
+			return pollStats(migrationID)
+		}
+
 		migrationID, err := startMigration(projectID, recreateSchema, truncate)
 		if err != nil {
 			return err
@@ -58,6 +68,7 @@ Examples:
 func init() {
 	migrateCmd.Flags().StringP("project", "p", "", "Project name (overrides current context)")
 	migrateCmd.Flags().Bool("preflight", false, "Check connectivity and permissions without migrating")
+	migrateCmd.Flags().Bool("status", false, "Re-attach to the latest migration and show live progress")
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
 	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
 }
@@ -140,6 +151,29 @@ func resolveProjectID(name string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("project %q not found", name)
+}
+
+// latestMigrationID returns the most recently created migration ID for a project.
+func latestMigrationID(projectID string) (string, error) {
+	resp, err := http.Get(ServerAddr + "/api/v1/projects/" + projectID + "/migrations")
+	if err != nil {
+		return "", fmt.Errorf("list migrations: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var migrations []struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&migrations); err != nil {
+		return "", fmt.Errorf("decode migrations: %w", err)
+	}
+	if len(migrations) == 0 {
+		return "", fmt.Errorf("no migrations found for this project — run 'xferdb migrate' to start one")
+	}
+	// API returns newest first; take the first entry.
+	return migrations[0].ID, nil
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
