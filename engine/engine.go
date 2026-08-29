@@ -84,12 +84,16 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
-	// Announce all table names upfront so the stats collector can show pending tables.
+	// Fetch row counts for all tables upfront so the ETA covers the whole migration.
 	tableNames := make([]string, len(tables))
+	tableCounts := make(map[string]int64, len(tables))
 	for i, t := range tables {
 		tableNames[i] = t.Name
+		if n, err := e.source.GetRowCount(ctx, t.Name); err == nil {
+			tableCounts[t.Name] = n
+		}
 	}
-	e.emit(ProgressEvent{Kind: EventMigrationStart, TableNames: tableNames, Timestamp: time.Now()})
+	e.emit(ProgressEvent{Kind: EventMigrationStart, TableNames: tableNames, TableCounts: tableCounts, Timestamp: time.Now()})
 
 	cfg := e.project.TransferConfig
 	dataOnly := cfg.DataOnly
