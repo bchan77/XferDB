@@ -45,5 +45,7 @@ type TableDetail struct {
 type RowStats struct {
 	Total         int64
 	Transferred   int64
-	RatePerSecond float64
+	RatePerSecond float64 // overall throughput (rows written/s), time-windowed
+	ReadRate      float64 // source read throughput (rows/s), per-batch EMA
+	WriteRate     float64 // target write throughput (rows/s), per-batch EMA
 }

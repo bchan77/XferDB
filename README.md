@@ -103,6 +103,7 @@ Migration started: 7fba746e-...
 Tracking progress (Ctrl+C to detach)...
 Phase: in_progress     Elapsed: 51s  ETA: 22m 10s
 Rows:  110,000 / 2,100,000   Rate: 1,506/s
+Read:  18,500/s   Write: 1,506/s   (target is bottleneck)
 Batch: 5,000 rows   Table workers: 3   Segment workers: 4
 ────────────────────────────────────────────────────────────
   ✓  customers                       100,000 rows

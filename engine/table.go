@@ -72,10 +72,12 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 			return err
 		}
 
+		t0 := time.Now()
 		batch, err := e.source.ReadBatch(ctx, table, adapters.BatchOptions{
 			Offset: offset,
 			Limit:  batchSize,
 		})
+		readDur := time.Since(t0)
 		if err != nil {
 			return fmt.Errorf("read batch %s offset %d: %w", table, offset, err)
 		}
@@ -83,9 +85,11 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 			break
 		}
 
+		t1 := time.Now()
 		if err := e.target.WriteBatch(ctx, table, batch); err != nil {
 			return fmt.Errorf("write batch %s offset %d: %w", table, offset, err)
 		}
+		writeDur := time.Since(t1)
 
 		offset += batch.Size
 		rowsTransferred += int64(batch.Size)
@@ -115,6 +119,9 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 			TableName:       table,
 			RowsTransferred: rowsTransferred,
 			RowsTotal:       total,
+			BatchRows:       batch.Size,
+			ReadDuration:    readDur,
+			WriteDuration:   writeDur,
 			Timestamp:       time.Now(),
 		})
 	}
@@ -308,6 +315,7 @@ func (e *Engine) transferSegmentPK(ctx context.Context, table, pkCol string, pkF
 			return err
 		}
 
+		t0 := time.Now()
 		batch, err := e.source.ReadBatch(ctx, table, adapters.BatchOptions{
 			Limit:     batchSize,
 			PKCol:     pkCol,
@@ -315,6 +323,7 @@ func (e *Engine) transferSegmentPK(ctx context.Context, table, pkCol string, pkF
 			PKMax:     pkTo,
 			PKMaxIncl: isLast,
 		})
+		readDur := time.Since(t0)
 		if err != nil {
 			return fmt.Errorf("read pk-segment %s [%d, %d]: %w", table, current, pkTo, err)
 		}
@@ -322,9 +331,11 @@ func (e *Engine) transferSegmentPK(ctx context.Context, table, pkCol string, pkF
 			break
 		}
 
+		t1 := time.Now()
 		if err := e.target.WriteBatch(ctx, table, batch); err != nil {
 			return fmt.Errorf("write pk-segment %s [%d, %d]: %w", table, current, pkTo, err)
 		}
+		writeDur := time.Since(t1)
 
 		written := rowsWritten.Add(int64(batch.Size))
 		e.emit(ProgressEvent{
@@ -332,6 +343,9 @@ func (e *Engine) transferSegmentPK(ctx context.Context, table, pkCol string, pkF
 			TableName:       table,
 			RowsTransferred: written,
 			RowsTotal:       total,
+			BatchRows:       batch.Size,
+			ReadDuration:    readDur,
+			WriteDuration:   writeDur,
 			Timestamp:       time.Now(),
 		})
 
@@ -359,10 +373,12 @@ func (e *Engine) transferSegmentOffset(ctx context.Context, table string, startO
 			limit = remaining
 		}
 
+		t0 := time.Now()
 		batch, err := e.source.ReadBatch(ctx, table, adapters.BatchOptions{
 			Offset: offset,
 			Limit:  limit,
 		})
+		readDur := time.Since(t0)
 		if err != nil {
 			return fmt.Errorf("read offset-segment %s offset %d: %w", table, offset, err)
 		}
@@ -370,9 +386,11 @@ func (e *Engine) transferSegmentOffset(ctx context.Context, table string, startO
 			break
 		}
 
+		t1 := time.Now()
 		if err := e.target.WriteBatch(ctx, table, batch); err != nil {
 			return fmt.Errorf("write offset-segment %s offset %d: %w", table, offset, err)
 		}
+		writeDur := time.Since(t1)
 
 		offset += batch.Size
 		rowsRead += batch.Size
@@ -382,6 +400,9 @@ func (e *Engine) transferSegmentOffset(ctx context.Context, table string, startO
 			TableName:       table,
 			RowsTransferred: written,
 			RowsTotal:       total,
+			BatchRows:       batch.Size,
+			ReadDuration:    readDur,
+			WriteDuration:   writeDur,
 			Timestamp:       time.Now(),
 		})
 	}

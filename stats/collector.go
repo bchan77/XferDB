@@ -125,6 +125,7 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.CurrentTable = ev.TableName
 		s.Rows.Transferred = c.totalTransferred(ev)
 		c.updateRate(s)
+		c.updateReadWriteRates(s, ev)
 		if idx, ok := c.tableIndex[ev.TableName]; ok {
 			s.TableDetails[idx].Transferred = ev.RowsTransferred
 		}
@@ -181,6 +182,32 @@ func (c *Collector) totalTransferred(ev engine.ProgressEvent) int64 {
 		total += n
 	}
 	return total
+}
+
+// updateReadWriteRates computes per-batch EMA read and write rates from the timing
+// data attached to each EventBatch. Each batch carries its own ReadDuration and
+// WriteDuration so the rates reflect actual source/target throughput independently.
+func (c *Collector) updateReadWriteRates(s *StatsSnapshot, ev engine.ProgressEvent) {
+	if ev.BatchRows <= 0 {
+		return
+	}
+	const alpha = 0.3
+	if ev.ReadDuration > 0 {
+		instant := float64(ev.BatchRows) / ev.ReadDuration.Seconds()
+		if s.Rows.ReadRate == 0 {
+			s.Rows.ReadRate = instant
+		} else {
+			s.Rows.ReadRate = alpha*instant + (1-alpha)*s.Rows.ReadRate
+		}
+	}
+	if ev.WriteDuration > 0 {
+		instant := float64(ev.BatchRows) / ev.WriteDuration.Seconds()
+		if s.Rows.WriteRate == 0 {
+			s.Rows.WriteRate = instant
+		} else {
+			s.Rows.WriteRate = alpha*instant + (1-alpha)*s.Rows.WriteRate
+		}
+	}
 }
 
 // updateRate computes an exponentially-smoothed rows/sec rate.

@@ -30,4 +30,8 @@ type ProgressEvent struct {
 	RowsTotal       int64
 	Timestamp       time.Time
 	Err             error // set only for EventError
+	// Batch timing — set only for EventBatch; used to compute separate read/write rates.
+	BatchRows     int           // rows in this specific batch (not cumulative)
+	ReadDuration  time.Duration // time spent in source.ReadBatch
+	WriteDuration time.Duration // time spent in target.WriteBatch
 }

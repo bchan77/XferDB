@@ -319,6 +319,10 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 		snap.Phase, fmtDuration(snap.ElapsedSeconds), fmtDuration(snap.ETASeconds)))
 	lines = append(lines, fmt.Sprintf("Rows:  %s / %s   Rate: %.0f/s",
 		fmtInt(snap.Rows.Transferred), fmtInt(snap.Rows.Total), snap.Rows.RatePerSecond))
+	if snap.Rows.ReadRate > 0 || snap.Rows.WriteRate > 0 {
+		lines = append(lines, fmt.Sprintf("Read:  %.0f/s   Write: %.0f/s   %s",
+			snap.Rows.ReadRate, snap.Rows.WriteRate, bottleneckHint(snap.Rows.ReadRate, snap.Rows.WriteRate)))
+	}
 	cfg := snap.Config
 	lines = append(lines, fmt.Sprintf("Batch: %s rows   Table workers: %d   Segment workers: %d",
 		fmtInt(int64(cfg.BatchSize)), cfg.TableWorkers, cfg.SegmentWorkers))
@@ -383,4 +387,22 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// bottleneckHint returns a short parenthetical label when one side is
+// meaningfully slower than the other (>20% gap), so the user can tell at
+// a glance whether to look at the source, target, or neither.
+func bottleneckHint(readRate, writeRate float64) string {
+	if readRate <= 0 || writeRate <= 0 {
+		return ""
+	}
+	ratio := readRate / writeRate
+	switch {
+	case ratio > 1.2:
+		return "(target is bottleneck)"
+	case ratio < 0.83: // writeRate > readRate * 1.2
+		return "(source is bottleneck)"
+	default:
+		return "(balanced)"
+	}
 }
