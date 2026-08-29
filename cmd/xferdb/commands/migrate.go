@@ -338,6 +338,10 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 		lines = append(lines, strings.Repeat("─", 60))
 	}
 
+	if snap.Phase == "post_schema" && snap.PostSchemaStatus != "" {
+		lines = append(lines, fmt.Sprintf("  → %s", snap.PostSchemaStatus))
+	}
+
 	for _, t := range snap.TableDetails {
 		var marker, detail string
 		switch t.Status {

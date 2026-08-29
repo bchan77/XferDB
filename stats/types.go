@@ -21,9 +21,10 @@ type StatsSnapshot struct {
 	Tables         TableStats
 	TableDetails   []TableDetail
 	Rows           RowStats
-	CurrentTable   string
-	ETASeconds     float64
-	Errors         []string
+	CurrentTable     string
+	ETASeconds       float64
+	PostSchemaStatus string // last post-schema item being built (index/constraint name)
+	Errors           []string
 	Resource       *ResourceStats `json:"resource,omitempty"`
 }
 

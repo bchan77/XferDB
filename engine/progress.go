@@ -23,6 +23,7 @@ const (
 	EventResumed         EventKind = "resumed"
 	EventSchemaPhase     EventKind = "schema_phase"
 	EventPostSchemaPhase EventKind = "post_schema_phase"
+	EventPostSchemaItem  EventKind = "post_schema_item" // one index/constraint being built
 	EventResourceSample  EventKind = "resource_sample"
 )
 
@@ -52,6 +53,8 @@ type ProgressEvent struct {
 	BatchRows     int           // rows in this specific batch (not cumulative)
 	ReadDuration  time.Duration // time spent in source.ReadBatch
 	WriteDuration time.Duration // time spent in target.WriteBatch
+	// Post-schema progress — set only for EventPostSchemaItem.
+	PostSchemaMsg string
 	// Resource sample — set only for EventResourceSample.
 	Resource *ResourceSample
 }

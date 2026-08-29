@@ -256,6 +256,9 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 	case engine.EventPostSchemaPhase:
 		s.Phase = "post_schema"
 
+	case engine.EventPostSchemaItem:
+		s.PostSchemaStatus = ev.PostSchemaMsg
+
 	case engine.EventResourceSample:
 		if ev.Resource == nil {
 			break
