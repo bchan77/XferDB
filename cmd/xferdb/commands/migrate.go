@@ -31,6 +31,7 @@ Examples:
 		segmentWorkers, _ := cmd.Flags().GetInt("segment-workers")
 		offsetSegments, _ := cmd.Flags().GetBool("offset-segments")
 		batchSize, _ := cmd.Flags().GetInt("batch-size")
+		bulkCopy, _ := cmd.Flags().GetBool("bulk-copy")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 
 		if recreateSchema && truncate {
@@ -78,7 +79,7 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, tables)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, tables)
 		if err != nil {
 			return err
 		}
@@ -100,6 +101,7 @@ func init() {
 	migrateCmd.Flags().Int("segment-workers", 1, "Number of parallel workers per table (splits by PK range; falls back to OFFSET when no integer PK)")
 	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --segment-workers)")
 	migrateCmd.Flags().Int("batch-size", 0, "Rows per batch (overrides the project default; 0 = use project default)")
+	migrateCmd.Flags().Bool("bulk-copy", false, "Use PostgreSQL COPY protocol for writes (faster; requires target table to be empty — combine with --truncate or --recreate-schema)")
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 }
 
@@ -236,13 +238,14 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments bool, tables []string) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments, bulkCopy bool, tables []string) (string, error) {
 	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
 		"table_workers":   tableWorkers,
 		"segment_workers": segmentWorkers,
 		"offset_fallback": offsetSegments,
+		"bulk_copy":       bulkCopy,
 	}
 	if batchSize > 0 {
 		req["batch_size"] = batchSize
@@ -320,13 +323,20 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 	lines = append(lines, fmt.Sprintf("Rows:  %s / %s   Rate: %.0f/s",
 		fmtInt(snap.Rows.Transferred), fmtInt(snap.Rows.Total), snap.Rows.RatePerSecond))
 	if snap.Rows.ReadRate > 0 || snap.Rows.WriteRate > 0 {
-		lines = append(lines, fmt.Sprintf("Read:  %.0f/s   Write: %.0f/s   %s",
-			snap.Rows.ReadRate, snap.Rows.WriteRate, bottleneckHint(snap.Rows.ReadRate, snap.Rows.WriteRate)))
+		lines = append(lines, fmt.Sprintf("Read:  %.0f/s   Write: %.0f/s",
+			snap.Rows.ReadRate, snap.Rows.WriteRate))
 	}
 	cfg := snap.Config
 	lines = append(lines, fmt.Sprintf("Batch: %s rows   Table workers: %d   Segment workers: %d",
 		fmtInt(int64(cfg.BatchSize)), cfg.TableWorkers, cfg.SegmentWorkers))
-	lines = append(lines, strings.Repeat("─", 60))
+	if snap.Resource != nil {
+		r := snap.Resource
+		lines = append(lines, fmt.Sprintf("Goroutines: %-5d  Heap: %.1f MiB  Sys: %.1f MiB  CPU: %.1f%%  GC: %d",
+			r.Goroutines, r.MemAllocMB, r.MemSysMB, r.CPUPercent, r.GCNum))
+		lines = append(lines, strings.Repeat("─", 60))
+	} else {
+		lines = append(lines, strings.Repeat("─", 60))
+	}
 
 	for _, t := range snap.TableDetails {
 		var marker, detail string
@@ -342,11 +352,20 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 			}
 			detail = fmt.Sprintf("%s / %s rows  (%d%%)",
 				fmtInt(t.Transferred), fmtInt(t.Total), pct)
+		case "failed":
+			marker = "✗"
+			detail = "failed"
+		case "not_started":
+			marker = "·"
+			detail = "not started"
 		default:
 			marker = "○"
 			detail = "pending"
 		}
 		lines = append(lines, fmt.Sprintf("  %s  %-30s  %s", marker, truncate(t.Name, 30), detail))
+		if t.Status == "failed" && t.Error != "" {
+			lines = append(lines, fmt.Sprintf("     └─ %s", truncate(t.Error, 72)))
+		}
 	}
 
 	for _, e := range snap.Errors {
@@ -389,20 +408,3 @@ func truncate(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
-// bottleneckHint returns a short parenthetical label when one side is
-// meaningfully slower than the other (>20% gap), so the user can tell at
-// a glance whether to look at the source, target, or neither.
-func bottleneckHint(readRate, writeRate float64) string {
-	if readRate <= 0 || writeRate <= 0 {
-		return ""
-	}
-	ratio := readRate / writeRate
-	switch {
-	case ratio > 1.2:
-		return "(target is bottleneck)"
-	case ratio < 0.83: // writeRate > readRate * 1.2
-		return "(source is bottleneck)"
-	default:
-		return "(balanced)"
-	}
-}

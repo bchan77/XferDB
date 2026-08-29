@@ -13,6 +13,7 @@ type MigrationConfig struct {
 // StatsSnapshot is a point-in-time view of a migration's progress.
 type StatsSnapshot struct {
 	MigrationID    string
+	ProjectID      string
 	Phase          string
 	StartedAt      time.Time
 	ElapsedSeconds float64
@@ -23,6 +24,7 @@ type StatsSnapshot struct {
 	CurrentTable   string
 	ETASeconds     float64
 	Errors         []string
+	Resource       *ResourceStats `json:"resource,omitempty"`
 }
 
 // TableStats counts tables by state.
@@ -31,14 +33,16 @@ type TableStats struct {
 	Completed  int
 	InProgress int
 	Pending    int
+	Failed     int
 }
 
 // TableDetail holds per-table progress for display.
 type TableDetail struct {
 	Name        string
-	Status      string // "pending", "in_progress", "done"
+	Status      string // "pending", "in_progress", "done", "failed"
 	Transferred int64
 	Total       int64
+	Error       string // set when Status == "failed"
 }
 
 // RowStats tracks row-level transfer progress and throughput.
@@ -48,4 +52,13 @@ type RowStats struct {
 	RatePerSecond float64 // overall throughput (rows written/s), time-windowed
 	ReadRate      float64 // source read throughput (rows/s), per-batch EMA
 	WriteRate     float64 // target write throughput (rows/s), per-batch EMA
+}
+
+// ResourceStats holds point-in-time process resource consumption for a migration.
+type ResourceStats struct {
+	Goroutines int     // current goroutine count
+	MemAllocMB float64 // heap allocation (MiB)
+	MemSysMB   float64 // total OS memory obtained (MiB)
+	GCNum      uint32  // completed GC cycles
+	CPUPercent  float64 // fraction of one CPU; multiply by GOMAXPROCS for total
 }

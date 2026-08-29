@@ -65,6 +65,17 @@ func (m *MetaDB) migrate() error {
 			PRIMARY KEY (migration_id, table_name)
 		);
 
+		CREATE TABLE IF NOT EXISTS project_tables (
+			project_id        TEXT NOT NULL,
+			table_name        TEXT NOT NULL,
+			status            TEXT NOT NULL DEFAULT 'not_started',
+			rows_transferred  INTEGER NOT NULL DEFAULT 0,
+			rows_total        INTEGER NOT NULL DEFAULT 0,
+			last_migration_id TEXT,
+			updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (project_id, table_name)
+		);
+
 		CREATE TABLE IF NOT EXISTS checkpoints (
 			migration_id TEXT NOT NULL REFERENCES migrations(id),
 			table_name   TEXT NOT NULL,

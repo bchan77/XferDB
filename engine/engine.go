@@ -81,11 +81,23 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, err)
 	}
 
-	tables, err := e.source.ListTables(ctx)
+	allTables, err := e.source.ListTables(ctx)
 	if err != nil {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
+	// Register every source table in the project registry (INSERT OR IGNORE) so
+	// --status always shows the full DB picture regardless of which tables this
+	// specific migration touches.
+	{
+		names := make([]string, len(allTables))
+		for i, t := range allTables {
+			names[i] = t.Name
+		}
+		e.db.RegisterProjectTables(ctx, e.project.ID, names) //nolint:errcheck
+	}
+
+	tables := allTables
 	cfg := e.project.TransferConfig
 
 	// Filter to only the requested tables when --tables is specified.
@@ -115,17 +127,37 @@ func (e *Engine) Run(ctx context.Context) error {
 	dataOnly := cfg.DataOnly
 	schemaOnly := cfg.SchemaOnly
 
-	// Phase 1: Schema — create all target tables before any data is transferred.
-	if !dataOnly {
+	// nativeSchema is true when pg_dump handled Phase 1; Phase 3 must then use
+	// pg_dump --section=post-data instead of the introspection-based index loop.
+	var nativeSchema bool
+
+	// Phase 1: Schema.
+	// For postgres→postgres migrations, prefer pg_dump --section=pre-data so that
+	// extensions (pgvector, PostGIS, …), custom types, and sequences are transferred
+	// exactly as they exist on the source. Falls back to introspection-based
+	// CreateTable when pg_dump/psql are not on PATH.
+	// Skipped entirely for --truncate (schema already exists on target).
+	if !dataOnly && !cfg.Truncate {
 		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
-		for _, schema := range tables {
-			if cfg.RecreateSchema {
-				if err := e.target.DropTable(ctx, schema.Name); err != nil {
-					return e.fail(ctx, fmt.Errorf("drop table %s: %w", schema.Name, err))
-				}
+
+		if e.project.SourceConfig.Type == "postgres" && e.project.TargetConfig.Type == "postgres" {
+			ok, err := pgDumpPreData(ctx, e.project.SourceConfig, e.project.TargetConfig, cfg.RecreateSchema)
+			if err != nil {
+				return e.fail(ctx, fmt.Errorf("pg_dump pre-data: %w", err))
 			}
-			if err := e.target.CreateTable(ctx, &schema); err != nil {
-				return e.fail(ctx, fmt.Errorf("create table %s: %w", schema.Name, err))
+			nativeSchema = ok
+		}
+
+		if !nativeSchema {
+			for _, schema := range tables {
+				if cfg.RecreateSchema {
+					if err := e.target.DropTable(ctx, schema.Name); err != nil {
+						return e.fail(ctx, fmt.Errorf("drop table %s: %w", schema.Name, err))
+					}
+				}
+				if err := e.target.CreateTable(ctx, &schema); err != nil {
+					return e.fail(ctx, fmt.Errorf("create table %s: %w", schema.Name, err))
+				}
 			}
 		}
 	}
@@ -139,7 +171,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		doneSet := completedTableSet(existingProgress)
 
 		// Truncate requested: clear existing data before loading.
-		// Skip when RecreateSchema is set — the table was just recreated, already empty.
+		// With native pg_dump schema (--recreate-schema), tables are dropped and
+		// recreated so they're already empty. With introspection-based recreate,
+		// DropTable+CreateTable also leaves tables empty. Either way, skip truncate.
 		if cfg.Truncate && !cfg.RecreateSchema {
 			for _, schema := range tables {
 				if !doneSet[schema.Name] {
@@ -147,6 +181,12 @@ func (e *Engine) Run(ctx context.Context) error {
 						return e.fail(ctx, fmt.Errorf("truncate table %s: %w", schema.Name, err))
 					}
 				}
+			}
+		}
+
+		if cfg.BulkCopy {
+			if bw, ok := e.target.(adapters.BulkCopyWriter); ok {
+				bw.EnableCopy()
 			}
 		}
 
@@ -164,50 +204,78 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		close(work)
 
-		workerCtx, cancelWorkers := context.WithCancel(ctx)
-		defer cancelWorkers()
-
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		var firstErr error
+		var tableErrors []error
 
 		for i := 0; i < workers; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for schema := range work {
-					if err := e.transferTable(workerCtx, schema); err != nil {
+					if err := e.transferTable(ctx, schema); err != nil {
+						// Mark only this table as failed; other tables keep going.
+						now := time.Now()
+						e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+							TableName:   schema.Name,
+							Status:      adapters.StatusFailed,
+							CompletedAt: &now,
+						})
+						e.emit(ProgressEvent{
+							Kind:      EventTableFailed,
+							TableName: schema.Name,
+							Err:       err,
+							Timestamp: now,
+						})
+						e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
+							"failed", e.migrationID, 0, 0)
 						mu.Lock()
-						if firstErr == nil {
-							firstErr = err
-							cancelWorkers() // stop other workers on first error
-						}
+						tableErrors = append(tableErrors, fmt.Errorf("%s: %w", schema.Name, err))
 						mu.Unlock()
-						return
+					} else {
+						// Persist final counts to the project registry.
+						transferred, total, _ := e.db.GetTableFinalProgress(ctx, e.migrationID, schema.Name)
+						e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
+							"done", e.migrationID, transferred, total)
 					}
 				}
 			}()
 		}
 		wg.Wait()
 
-		if firstErr != nil {
-			return e.fail(ctx, firstErr)
+		if len(tableErrors) > 0 {
+			msgs := make([]string, len(tableErrors))
+			for i, te := range tableErrors {
+				msgs[i] = te.Error()
+			}
+			return e.fail(ctx, fmt.Errorf("%d table(s) failed: %s", len(tableErrors), strings.Join(msgs, "; ")))
 		}
 	}
 
 	// Phase 3: Post-schema — indexes and FK constraints after all data is loaded.
-	// Creating indexes after bulk insert is faster; FKs must come after all tables exist.
-	if !dataOnly {
+	// Building indexes on a populated table is faster than maintaining them during inserts.
+	// When native pg_dump schema was used in Phase 1, pg_dump --section=post-data
+	// handles this (so it picks up ivfflat/hnsw vector indexes and other extension-specific
+	// index types that our introspection doesn't know how to recreate).
+	// Skipped for --truncate when native schema wasn't used (indexes already exist).
+	if !dataOnly && (!cfg.Truncate || nativeSchema) {
 		e.emit(ProgressEvent{Kind: EventPostSchemaPhase, Timestamp: time.Now()})
-		for _, schema := range tables {
-			if len(schema.Indexes) > 0 {
-				if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
-					return e.fail(ctx, fmt.Errorf("create indexes for %s: %w", schema.Name, err))
-				}
+
+		if nativeSchema {
+			if _, err := pgDumpPostData(ctx, e.project.SourceConfig, e.project.TargetConfig); err != nil {
+				return e.fail(ctx, fmt.Errorf("pg_dump post-data: %w", err))
 			}
-			if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
-				if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
-					return e.fail(ctx, fmt.Errorf("create constraints for %s: %w", schema.Name, err))
+		} else {
+			for _, schema := range tables {
+				if len(schema.Indexes) > 0 {
+					if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
+						return e.fail(ctx, fmt.Errorf("create indexes for %s: %w", schema.Name, err))
+					}
+				}
+				if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
+					if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
+						return e.fail(ctx, fmt.Errorf("create constraints for %s: %w", schema.Name, err))
+					}
 				}
 			}
 		}

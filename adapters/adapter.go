@@ -38,6 +38,7 @@ type TransferConfig struct {
 	RecreateSchema bool        `json:"recreate_schema"` // drop and recreate tables before migrating
 	Truncate       bool        `json:"truncate"`        // truncate tables before loading data (keeps schema)
 	Tables         []string    `json:"tables"`          // if non-empty, only migrate these tables; supports "schema.table" notation
+	BulkCopy       bool        `json:"bulk_copy"`       // use COPY protocol instead of INSERT; requires target table to be empty
 }
 
 // Project is a named migration project with a fixed source/target configuration.
@@ -190,6 +191,14 @@ type SourceAdapter interface {
 	GetPKRange(ctx context.Context, table, pkColumn string) (min, max int64, err error)
 	ReadBatch(ctx context.Context, table string, opts BatchOptions) (*Batch, error)
 	CheckPermissions(ctx context.Context) (*PermissionCheck, error)
+}
+
+// BulkCopyWriter is an optional interface for target adapters that support the
+// PostgreSQL COPY protocol for fast bulk loading. The engine enables this when
+// the target table is guaranteed clean (truncate or recreate-schema mode).
+// COPY is not safe in upsert mode because it lacks ON CONFLICT support.
+type BulkCopyWriter interface {
+	EnableCopy()
 }
 
 // TargetAdapter is implemented by any database that can act as a migration target.
