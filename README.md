@@ -91,7 +91,7 @@ docker run -v ~/.xferdb:/data xferdb migrate --from postgres://source/db --to my
 ```bash
 git clone https://gitea.homelab.local/nextdevops/XferDB.git
 cd XferDB
-go install
+go install ./cmd/xferdb
 ```
 
 ---
