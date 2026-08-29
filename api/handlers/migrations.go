@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -22,6 +24,7 @@ type MigrationsHandler struct {
 	Engines    map[string]*engine.Engine
 	Collectors map[string]*stats.Collector
 	Cancels    map[string]context.CancelFunc
+	Log        *slog.Logger
 }
 
 // StartMigration handles POST /api/v1/projects/{id}/migrations.
@@ -57,6 +60,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		TableWorkers   *int     `json:"table_workers"`
 		SegmentWorkers *int     `json:"segment_workers"`
 		OffsetFallback *bool    `json:"offset_fallback"`
+		BulkCopy       *bool    `json:"bulk_copy"`
 		Tables         []string `json:"tables"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
@@ -83,6 +87,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if overrides.OffsetFallback != nil {
 		p.TransferConfig.OffsetFallback = *overrides.OffsetFallback
+	}
+	if overrides.BulkCopy != nil {
+		p.TransferConfig.BulkCopy = *overrides.BulkCopy
 	}
 	if len(overrides.Tables) > 0 {
 		p.TransferConfig.Tables = overrides.Tables
@@ -115,11 +122,12 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	if effectiveSegmentWorkers < 1 {
 		effectiveSegmentWorkers = 1
 	}
-	col := stats.NewCollector(migrationID, eng.Events(), stats.MigrationConfig{
+	migLog := h.Log.With("migration_id", migrationID, "project", p.Name, "project_id", projectID)
+	col := stats.NewCollector(migrationID, projectID, eng.Events(), stats.MigrationConfig{
 		BatchSize:      effectiveBatchSize,
 		TableWorkers:   effectiveTableWorkers,
 		SegmentWorkers: effectiveSegmentWorkers,
-	})
+	}, migLog)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -128,6 +136,22 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	h.Collectors[migrationID] = col
 	h.Cancels[migrationID] = cancel
 	h.Mu.Unlock()
+
+	cfg := p.TransferConfig
+	tables := cfg.Tables
+	if len(tables) == 0 {
+		tables = []string{"(all)"}
+	}
+	migLog.Info("migration.started",
+		"tables", tables,
+		"table_workers", effectiveTableWorkers,
+		"segment_workers", effectiveSegmentWorkers,
+		"batch_size", effectiveBatchSize,
+		"recreate_schema", cfg.RecreateSchema,
+		"truncate", cfg.Truncate,
+		"bulk_copy", cfg.BulkCopy,
+		"data_only", cfg.DataOnly,
+	)
 
 	col.Start(ctx)
 	go func() {
@@ -190,8 +214,10 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 	switch body.Action {
 	case "pause":
 		eng.Pause()
+		h.Log.Info("migration.paused", "migration_id", id)
 	case "resume":
 		eng.Resume()
+		h.Log.Info("migration.resumed", "migration_id", id)
 	case "cancel":
 		h.Mu.Lock()
 		cancel, hasCancel := h.Cancels[id]
@@ -200,6 +226,7 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 			cancel()
 		}
 		h.DB.SetMigrationError(r.Context(), id, fmt.Errorf("cancelled by user"))
+		h.Log.Info("migration.cancelled", "migration_id", id)
 	default:
 		writeError(w, http.StatusBadRequest, "action must be 'pause', 'resume', or 'cancel'")
 		return
@@ -240,5 +267,33 @@ func (h *MigrationsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, col.Snapshot())
+	snap := col.Snapshot()
+
+	// Augment the snapshot with project-level table records for tables that are
+	// not part of this migration's scope (e.g. when --tables filters to a subset).
+	// This gives --status a full project-wide view across all migration runs.
+	if snap.ProjectID != "" {
+		projectTables, err := h.DB.GetProjectTables(r.Context(), snap.ProjectID)
+		if err == nil && len(projectTables) > 0 {
+			inScope := make(map[string]bool, len(snap.TableDetails))
+			for _, td := range snap.TableDetails {
+				inScope[td.Name] = true
+			}
+			for _, pt := range projectTables {
+				if !inScope[pt.TableName] {
+					snap.TableDetails = append(snap.TableDetails, stats.TableDetail{
+						Name:        pt.TableName,
+						Status:      pt.Status,
+						Transferred: pt.RowsTransferred,
+						Total:       pt.RowsTotal,
+					})
+				}
+			}
+			sort.Slice(snap.TableDetails, func(i, j int) bool {
+				return snap.TableDetails[i].Name < snap.TableDetails[j].Name
+			})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, snap)
 }

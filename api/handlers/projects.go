@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -16,7 +17,8 @@ import (
 
 // ProjectsHandler holds shared dependencies for project-related endpoints.
 type ProjectsHandler struct {
-	DB *state.MetaDB
+	DB  *state.MetaDB
+	Log *slog.Logger
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -60,6 +62,12 @@ func (h *ProjectsHandler) CreateProject(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.Log.Info("project.created",
+		"project_id", p.ID,
+		"name", p.Name,
+		"source_type", p.SourceConfig.Type,
+		"target_type", p.TargetConfig.Type,
+	)
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -87,10 +95,17 @@ func (h *ProjectsHandler) GetProject(w http.ResponseWriter, r *http.Request) {
 // DeleteProject handles DELETE /api/v1/projects/{id}.
 func (h *ProjectsHandler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Fetch name before deletion for the log entry.
+	p, _ := h.DB.GetProject(r.Context(), id)
 	if err := h.DB.DeleteProject(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	name := id
+	if p != nil {
+		name = p.Name
+	}
+	h.Log.Info("project.deleted", "project_id", id, "name", name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -142,6 +157,22 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.Log.Info("project.preflight",
+		"project_id", id,
+		"status", result.Status,
+		"source_errors", len(func() []string {
+			if result.Source != nil {
+				return result.Source.Errors
+			}
+			return nil
+		}()),
+		"target_errors", len(func() []string {
+			if result.Target != nil {
+				return result.Target.Errors
+			}
+			return nil
+		}()),
+	)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -188,6 +219,16 @@ func (h *ProjectsHandler) Analyze(w http.ResponseWriter, r *http.Request) {
 	result.SourceType = p.SourceConfig.Type
 	result.TargetType = p.TargetConfig.Type
 
+	issueCount := 0
+	for _, t := range result.Tables {
+		issueCount += len(t.Issues)
+	}
+	h.Log.Info("project.analyzed",
+		"project_id", id,
+		"tables", len(result.Tables),
+		"compatible", result.Compatible,
+		"issues", issueCount,
+	)
 	writeJSON(w, http.StatusOK, result)
 }
 

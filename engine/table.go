@@ -197,12 +197,11 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 		if segFrom > pkMax {
 			break // more workers than PK range width
 		}
-		isLast := segTo == pkMax
 
 		wg.Add(1)
-		go func(from, to int64, last bool) {
+		go func(from, to int64) {
 			defer wg.Done()
-			if err := e.transferSegmentPK(workerCtx, table, pkCol, from, to, last, total, &rowsWritten, batchSize); err != nil {
+			if err := e.transferSegmentPK(workerCtx, table, pkCol, from, to, total, &rowsWritten, batchSize); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -210,7 +209,7 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 				}
 				mu.Unlock()
 			}
-		}(segFrom, segTo, isLast)
+		}(segFrom, segTo)
 	}
 
 	wg.Wait()
@@ -306,9 +305,9 @@ func (e *Engine) transferTableParallelOffset(ctx context.Context, schema adapter
 	return nil
 }
 
-// transferSegmentPK reads rows in the PK range [pkFrom, pkTo] (inclusive) in batches
+// transferSegmentPK reads rows in the PK range [pkFrom, pkTo] (both inclusive) in batches
 // and writes them to the target. Advances pkFrom past the last seen PK after each batch.
-func (e *Engine) transferSegmentPK(ctx context.Context, table, pkCol string, pkFrom, pkTo int64, isLast bool, total int64, rowsWritten *atomic.Int64, batchSize int) error {
+func (e *Engine) transferSegmentPK(ctx context.Context, table, pkCol string, pkFrom, pkTo int64, total int64, rowsWritten *atomic.Int64, batchSize int) error {
 	current := pkFrom
 	for {
 		if err := e.checkPause(ctx); err != nil {
@@ -321,7 +320,7 @@ func (e *Engine) transferSegmentPK(ctx context.Context, table, pkCol string, pkF
 			PKCol:     pkCol,
 			PKMin:     current,
 			PKMax:     pkTo,
-			PKMaxIncl: isLast,
+			PKMaxIncl: true, // always inclusive — ranges are non-overlapping by construction
 		})
 		readDur := time.Since(t0)
 		if err != nil {
