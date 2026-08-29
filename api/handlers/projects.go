@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -109,44 +110,39 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		Status string                    `json:"status"`
 	}
 
-	src, err := registry.NewSource(p.SourceConfig.Type)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "source adapter: "+err.Error())
-		return
-	}
-	if err := src.Connect(ctx, p.SourceConfig); err != nil {
-		writeError(w, http.StatusBadGateway, "connect source: "+err.Error())
-		return
-	}
-	defer src.Close()
+	result := checkResult{Status: "ready"}
 
-	tgt, err := registry.NewTarget(p.TargetConfig.Type)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "target adapter: "+err.Error())
-		return
-	}
-	if err := tgt.Connect(ctx, p.TargetConfig); err != nil {
-		writeError(w, http.StatusBadGateway, "connect target: "+err.Error())
-		return
-	}
-	defer tgt.Close()
-
-	srcCheck, _ := src.CheckPermissions(ctx)
-	tgtCheck, _ := tgt.CheckPermissions(ctx)
-
-	status := "ready"
-	if srcCheck != nil && len(srcCheck.Errors) > 0 {
-		status = "failed"
-	}
-	if tgtCheck != nil && len(tgtCheck.Errors) > 0 {
-		status = "failed"
+	// Source — capture connection errors as structured errors instead of aborting.
+	if src, err := registry.NewSource(p.SourceConfig.Type); err != nil {
+		result.Source = &adapters.PermissionCheck{Errors: []string{"unsupported adapter: " + err.Error()}}
+		result.Status = "failed"
+	} else if err := src.Connect(ctx, p.SourceConfig); err != nil {
+		result.Source = &adapters.PermissionCheck{Errors: []string{friendlyConnectError(err)}}
+		result.Status = "failed"
+	} else {
+		defer src.Close()
+		result.Source, _ = src.CheckPermissions(ctx)
+		if result.Source != nil && len(result.Source.Errors) > 0 {
+			result.Status = "failed"
+		}
 	}
 
-	writeJSON(w, http.StatusOK, checkResult{
-		Source: srcCheck,
-		Target: tgtCheck,
-		Status: status,
-	})
+	// Target — same pattern.
+	if tgt, err := registry.NewTarget(p.TargetConfig.Type); err != nil {
+		result.Target = &adapters.PermissionCheck{Errors: []string{"unsupported adapter: " + err.Error()}}
+		result.Status = "failed"
+	} else if err := tgt.Connect(ctx, p.TargetConfig); err != nil {
+		result.Target = &adapters.PermissionCheck{Errors: []string{friendlyConnectError(err)}}
+		result.Status = "failed"
+	} else {
+		defer tgt.Close()
+		result.Target, _ = tgt.CheckPermissions(ctx)
+		if result.Target != nil && len(result.Target.Errors) > 0 {
+			result.Status = "failed"
+		}
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 // Analyze handles POST /api/v1/projects/{id}/analyze.
@@ -193,6 +189,28 @@ func (h *ProjectsHandler) Analyze(w http.ResponseWriter, r *http.Request) {
 	result.TargetType = p.TargetConfig.Type
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// friendlyConnectError translates raw driver errors into actionable messages.
+func friendlyConnectError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "does not exist") && (strings.Contains(msg, "3D000") || strings.Contains(msg, "database")):
+		// Extract database name from the error if present.
+		return msg + " — create the database first: CREATE DATABASE <name>;"
+	case strings.Contains(msg, "pg_hba.conf") || strings.Contains(msg, "SSL off"):
+		return msg + " — add ?sslmode=require to the DSN"
+	case strings.Contains(msg, "authentication failed") || strings.Contains(msg, "password authentication"):
+		return msg + " — check the username and password"
+	case strings.Contains(msg, "connection refused"):
+		return msg + " — check that the host and port are correct and the server is running"
+	case strings.Contains(msg, "no such host") || strings.Contains(msg, "hostname"):
+		return msg + " — check the hostname"
+	case strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "context deadline"):
+		return msg + " — connection timed out, check firewall rules or network connectivity"
+	default:
+		return msg
+	}
 }
 
 // connectSource is a helper used by Preflight and Analyze.
