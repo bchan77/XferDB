@@ -21,10 +21,15 @@
 ## Features
 
 - **3-phase migration** — schema creation, bulk data transfer (upsert), then indexes and constraints
+- **Native schema transfer** — postgres→postgres migrations use `pg_dump`/`psql` to preserve extensions, custom types, vector indexes (`ivfflat`, `hnsw`), and exact index definitions
+- **Post-schema progress** — shows each index and constraint as it builds so the display never appears hung
 - **Parallel table migration** — migrate N tables concurrently with `--table-workers`
+- **Intra-table parallel segments** — split each table into N PK-range segments with `--segment-workers`; falls back to OFFSET for tables without an integer PK
+- **Bulk copy mode** — `--bulk-copy` uses the PostgreSQL `COPY` protocol for high-throughput writes (combine with `--truncate` or `--recreate-schema`)
 - **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
-- **Live progress display** — per-table status (done / in-progress / pending), rows, rate, and human-readable ETA for the whole migration
+- **Live progress display** — per-table status, rows/s, read/write rates, ETA, and live resource usage (goroutines, heap, CPU%)
+- **Structured server logging** — JSON log file + text stderr with configurable log level; captures project/migration lifecycle, table schemas, and per-table progress
 - **Flexible reload modes** — default upsert (delta sync), `--truncate` (wipe and reload), or `--recreate-schema` (drop and recreate)
 - **Multi-project** — named projects with their own source/target config and migration history
 - **API-first** — REST API is the core; CLI is a thin client
@@ -57,6 +62,9 @@ XferDB runs as an API server. The CLI talks to it.
 ```bash
 xferdb server
 # XferDB API server listening on :8080 (state: ~/.xferdb/state.db)
+
+# With structured logging to a file
+xferdb server --log-file /var/log/xferdb.log --log-level info
 ```
 
 ### 2. Create a project
@@ -102,19 +110,41 @@ xferdb migrate
 Migration started: 7fba746e-...
 Tracking progress (Ctrl+C to detach)...
 Phase: in_progress     Elapsed: 51s  ETA: 22m 10s
-Rows:  110,000 / 2,100,000   Rate: 1,506/s
-Read:  18,500/s   Write: 1,506/s   (target is bottleneck)
-Batch: 5,000 rows   Table workers: 3   Segment workers: 4
+Rows:  110,000 / 2,100,000   Rate: 11,959/s
+Read:  6,430/s   Write: 1,667/s
+Batch: 50,000 rows   Table workers: 5   Segment workers: 10
+Goroutines: 62     Heap: 227.8 MiB  Sys: 281.1 MiB  CPU: 312.4%  GC: 16
 ────────────────────────────────────────────────────────────
   ✓  customers                       100,000 rows
-  ●  order_items                     10,000 / 2,000,000 rows  (0%)
+  ●  order_items                     1,500,000 / 2,000,000 rows  (75%)
   ○  orders                          pending
   ○  products                        pending
+```
+
+Post-schema phase shows each object as it builds:
+
+```
+Phase: post_schema     Elapsed: 4m 12s  ETA: 0s
+  → index:           idx_orders_customer_id
+  ✓  customers                       100,000 rows
+  ✓  orders                          1,000,000 rows
+  ...
 ```
 
 ---
 
 ## CLI Reference
+
+### Server command
+
+```bash
+xferdb server \
+  [--addr :8080] \
+  [--log-file /var/log/xferdb.log] \
+  [--log-level debug|info|warn|error]
+```
+
+`--log-file` writes structured JSON logs to the given path. Text logs always go to stderr. `--log-level` applies to both outputs (default: `info`).
 
 ### Project commands
 
@@ -163,16 +193,16 @@ xferdb migrate --status
 xferdb migrate --cancel
 
 # Migrate N tables in parallel (inter-table)
-xferdb migrate --table-workers 3
+xferdb migrate --table-workers 5
 
 # Split each table into N parallel segments (intra-table, PK-range by default)
-xferdb migrate --segment-workers 4
+xferdb migrate --segment-workers 10
 
 # Force OFFSET-based segment splitting instead of PK range
 xferdb migrate --segment-workers 4 --offset-segments
 
-# Combine both: 2 tables at once, each split across 4 workers
-xferdb migrate --table-workers 2 --segment-workers 4
+# Combine both: 5 tables at once, each split across 10 workers
+xferdb migrate --table-workers 5 --segment-workers 10
 
 # Truncate target tables before loading (keeps schema)
 xferdb migrate --truncate
@@ -180,8 +210,11 @@ xferdb migrate --truncate
 # Drop and recreate target tables (schema changed on source)
 xferdb migrate --recreate-schema
 
+# Use PostgreSQL COPY protocol for faster writes (combine with --truncate or --recreate-schema)
+xferdb migrate --bulk-copy --recreate-schema
+
 # Override batch size for this run (project default is used when not set)
-xferdb migrate --batch-size 5000
+xferdb migrate --batch-size 50000
 
 # Migrate specific tables only (comma-separated; schema.table notation supported)
 xferdb migrate --tables orders,customers
@@ -191,9 +224,9 @@ xferdb migrate --tables public.orders,public.customers
 ### Other commands
 
 ```bash
-xferdb server [--addr :8080]   # Start the API server
-xferdb version                  # Print version
-xferdb list                     # List supported adapters
+xferdb server [--addr :8080] [--log-file <path>] [--log-level <level>]
+xferdb version
+xferdb list
 ```
 
 ---
@@ -205,6 +238,7 @@ xferdb list                     # List supported adapters
 | Delta sync (default) | `xferdb migrate` | Upsert — new rows inserted, changed rows updated, nothing deleted. Safe to re-run. |
 | Truncate reload | `xferdb migrate --truncate` | Wipes target table data first, then loads fresh. Schema is kept. |
 | Recreate schema | `xferdb migrate --recreate-schema` | Drops and recreates target tables, then loads. Use when source schema has changed. |
+| Bulk copy | `xferdb migrate --bulk-copy` | Uses PostgreSQL `COPY` for maximum write throughput. Requires empty target tables — combine with `--truncate` or `--recreate-schema`. |
 | Selective tables | `xferdb migrate --tables t1,t2` | Only migrate the named tables; all others are skipped. Supports `schema.table` notation. |
 | Parallel per-table | `xferdb migrate --segment-workers 4` | Split each table into N segments; workers read/write in parallel. Uses PK ranges by default (no OFFSET scan penalty); falls back to OFFSET for tables without an integer PK. Add `--offset-segments` to force OFFSET mode. |
 | Schema only | API: `schema_only: true` | Creates tables, indexes, constraints — no data transfer. |
@@ -258,6 +292,39 @@ On server restart, any interrupted migrations are automatically marked as failed
 
 ---
 
+## Native schema transfer (postgres→postgres)
+
+When both source and target are PostgreSQL (or YugabyteDB), XferDB uses `pg_dump` and `psql` instead of introspection-based `CREATE TABLE` statements. This preserves:
+
+- Extensions (`pgvector`, `PostGIS`, `pg_trgm`, etc.)
+- Custom types and enums
+- Sequences with their current values
+- Vector indexes (`ivfflat`, `hnsw`) and other extension-specific index types
+- Table storage options and tablespace assignments
+
+`pg_dump` and `psql` must be on your `PATH`. If they are not found, XferDB falls back to introspection-based schema transfer automatically.
+
+Indexes and constraints (post-data phase) are executed one at a time so that YugabyteDB's serializable DDL concurrency control is not triggered.
+
+---
+
+## Server logging
+
+The server writes two log streams simultaneously:
+
+| Stream | Format | Flag |
+|--------|--------|------|
+| stderr | Human-readable text | always on |
+| log file | Structured JSON | `--log-file <path>` |
+
+```bash
+xferdb server --log-file /var/log/xferdb.log --log-level debug
+```
+
+Logged events include: server start, project create/delete, preflight checks, migration start/pause/resume/cancel/complete/fail, table schema (column names and types), and per-table start/complete/fail with row counts and elapsed time.
+
+---
+
 ## REST API
 
 The CLI is a thin wrapper. All operations are available directly:
@@ -272,7 +339,7 @@ POST   /api/v1/projects/:id/preflight
 POST   /api/v1/projects/:id/analyze
 
 # Migrations
-POST   /api/v1/projects/:id/migrations      # body: {"table_workers":3,"segment_workers":4,"batch_size":5000,"truncate":true,"tables":["orders","public.customers"],...}
+POST   /api/v1/projects/:id/migrations      # body: {"table_workers":5,"segment_workers":10,"batch_size":50000,"truncate":true,"bulk_copy":true,"tables":["orders","customers"],...}
 GET    /api/v1/projects/:id/migrations
 GET    /api/v1/migrations/:id
 PATCH  /api/v1/migrations/:id               # body: {"action":"pause"|"resume"|"cancel"}
@@ -302,17 +369,21 @@ go build -o xferdb ./cmd/xferdb
 - [x] MySQL source and target
 - [x] SQLite source and target
 - [x] 3-phase migration (schema → data → post-schema)
+- [x] Native schema transfer via `pg_dump`/`psql` (postgres→postgres)
+- [x] Post-schema progress display (per-index / per-constraint visibility)
 - [x] Parallel table migration (`--table-workers`)
+- [x] Intra-table parallel workers (`--segment-workers`) with PK-range splitting and OFFSET fallback
+- [x] Bulk copy mode (`--bulk-copy`) using PostgreSQL `COPY` protocol
 - [x] Preflight checks with actionable error hints
 - [x] Pause / resume / cancel
 - [x] Checkpoint-based crash recovery
-- [x] Per-table live progress display
+- [x] Per-table live progress display with read/write rates
+- [x] Live resource monitoring (goroutines, heap, CPU%)
 - [x] Selective table migration (`--tables`)
-- [x] Intra-table parallel workers (`--segment-workers`) with PK-range splitting and OFFSET fallback
+- [x] Structured server logging (`--log-file`, `--log-level`)
 - [ ] MongoDB adapter
 - [ ] Web UI
 - [ ] WebSocket live progress
-- [ ] Native tool integration (pg_dump/mysqldump for same-family migrations)
 - [ ] Scheduled / repeated migrations
 - [ ] Data transformation pipeline (column mapping, type casting)
 
@@ -325,8 +396,9 @@ XferDB follows [Semantic Versioning](https://semver.org/).
 | Version | Milestone |
 |---------|-----------|
 | `v0.2.0` | Current — PostgreSQL/MySQL/SQLite, parallel migration, preflight |
-| `v0.3.0` | MongoDB adapter |
-| `v0.4.0` | Web UI |
+| `v0.3.0` | Native schema transfer, bulk copy, resource monitoring, server logging |
+| `v0.4.0` | MongoDB adapter |
+| `v0.5.0` | Web UI |
 | `v1.0.0` | Stable release |
 
 ---
