@@ -87,12 +87,23 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 		return nil, err
 	}
 
-	// Columns.
+	// Columns — use pg_catalog directly so format_type() returns the exact type
+	// string including dimensions and user-defined types (e.g. vector(1536),
+	// character varying(255)). information_schema.columns returns 'USER-DEFINED'
+	// for custom types like pgvector, which is not valid SQL.
 	colRows, err := db.QueryContext(ctx, `
-		SELECT column_name, data_type, is_nullable, column_default
-		FROM information_schema.columns
-		WHERE table_schema = 'public' AND table_name = $1
-		ORDER BY ordinal_position`, table)
+		SELECT
+			a.attname,
+			pg_catalog.format_type(a.atttypid, a.atttypmod),
+			CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END,
+			pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+		FROM pg_catalog.pg_attribute a
+		LEFT JOIN pg_catalog.pg_attrdef d
+			ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		WHERE a.attrelid = ('public.' || $1)::regclass
+		AND a.attnum > 0
+		AND NOT a.attisdropped
+		ORDER BY a.attnum`, table)
 	if err != nil {
 		return nil, fmt.Errorf("postgres schema(%s): %w", table, err)
 	}
