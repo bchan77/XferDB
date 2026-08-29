@@ -23,6 +23,7 @@ func init() {
 	projectCmd.AddCommand(projectListCmd)
 	projectCmd.AddCommand(projectUseCmd)
 	projectCmd.AddCommand(projectShowCmd)
+	projectCmd.AddCommand(projectDeleteCmd)
 }
 
 var projectCreateCmd = &cobra.Command{
@@ -157,6 +158,61 @@ var projectShowCmd = &cobra.Command{
 			}
 		}
 		return fmt.Errorf("project %q not found", name)
+	},
+}
+
+var projectDeleteCmd = &cobra.Command{
+	Use:   "delete <name>",
+	Short: "Delete a migration project",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+
+		// Resolve name → ID.
+		resp, err := http.Get(ServerAddr + "/api/v1/projects")
+		if err != nil {
+			return fmt.Errorf("API request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		var projects []map[string]any
+		json.NewDecoder(resp.Body).Decode(&projects)
+
+		var projectID string
+		for _, p := range projects {
+			if p["name"] == name {
+				projectID, _ = p["id"].(string)
+				break
+			}
+		}
+		if projectID == "" {
+			return fmt.Errorf("project %q not found", name)
+		}
+
+		req, err := http.NewRequest(http.MethodDelete, ServerAddr+"/api/v1/projects/"+projectID, nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		delResp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("API request failed: %w", err)
+		}
+		defer delResp.Body.Close()
+
+		if delResp.StatusCode != http.StatusNoContent && delResp.StatusCode != http.StatusOK {
+			var errBody map[string]any
+			json.NewDecoder(delResp.Body).Decode(&errBody)
+			return fmt.Errorf("server error %d: %v", delResp.StatusCode, errBody["error"])
+		}
+
+		fmt.Printf("Deleted project %q\n", name)
+
+		// Clear the active context if it pointed at the deleted project.
+		if current, err := currentProject(""); err == nil && current == name {
+			_ = os.WriteFile(xferdbContextPath(), []byte(""), 0o644)
+			fmt.Println("Cleared active project context.")
+		}
+		return nil
 	},
 }
 
