@@ -192,6 +192,14 @@ type SourceAdapter interface {
 	CheckPermissions(ctx context.Context) (*PermissionCheck, error)
 }
 
+// BulkCopyWriter is an optional interface for target adapters that support the
+// PostgreSQL COPY protocol for fast bulk loading. The engine enables this when
+// the target table is guaranteed clean (truncate or recreate-schema mode).
+// COPY is not safe in upsert mode because it lacks ON CONFLICT support.
+type BulkCopyWriter interface {
+	EnableCopy()
+}
+
 // TargetAdapter is implemented by any database that can act as a migration target.
 type TargetAdapter interface {
 	Connect(ctx context.Context, config ConnectionConfig) error

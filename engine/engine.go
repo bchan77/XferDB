@@ -150,6 +150,14 @@ func (e *Engine) Run(ctx context.Context) error {
 			}
 		}
 
+		// Enable COPY protocol on postgres/yugabyte targets when tables are clean.
+		// COPY is not safe in upsert mode (no ON CONFLICT support).
+		if cfg.Truncate || cfg.RecreateSchema {
+			if bw, ok := e.target.(adapters.BulkCopyWriter); ok {
+				bw.EnableCopy()
+			}
+		}
+
 		workers := cfg.TableWorkers
 		if workers < 1 {
 			workers = 1

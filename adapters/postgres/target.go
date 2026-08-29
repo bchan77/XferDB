@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/lib/pq"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
 
@@ -16,6 +17,14 @@ type Target struct {
 	db      *sql.DB
 	mu      sync.RWMutex
 	schemas map[string]*adapters.TableSchema // cached for upsert key resolution
+	useCopy bool                             // use COPY instead of INSERT; only safe when target table is clean
+}
+
+// EnableCopy switches WriteBatch to use the PostgreSQL COPY protocol instead of
+// multi-row INSERT. Implements adapters.BulkCopyWriter. Must only be called when
+// the target table is guaranteed empty (truncate or recreate-schema mode).
+func (t *Target) EnableCopy() {
+	t.useCopy = true
 }
 
 func NewTarget() adapters.TargetAdapter {
@@ -215,6 +224,9 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	if len(batch.Records) == 0 {
 		return nil
 	}
+	if t.useCopy {
+		return t.writeBatchCopy(ctx, table, batch)
+	}
 
 	schema, err := t.cachedSchema(ctx, table)
 	if err != nil {
@@ -309,6 +321,46 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		if _, err := tx.ExecContext(ctx, chunkQuery, allVals...); err != nil {
 			return fmt.Errorf("insert chunk into %s: %w", table, err)
 		}
+	}
+
+	return tx.Commit()
+}
+
+// writeBatchCopy uses the PostgreSQL COPY protocol to stream rows into the table.
+// This is 10–50x faster than multi-row INSERT but does not support ON CONFLICT,
+// so it is only valid when the target table is guaranteed empty.
+func (t *Target) writeBatchCopy(ctx context.Context, table string, batch *adapters.Batch) error {
+	cols := make([]string, 0, len(batch.Records[0]))
+	for col := range batch.Records[0] {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+
+	tx, err := t.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, pq.CopyIn(table, cols...))
+	if err != nil {
+		return fmt.Errorf("prepare copy into %s: %w", table, err)
+	}
+	defer stmt.Close()
+
+	vals := make([]interface{}, len(cols))
+	for _, rec := range batch.Records {
+		for i, col := range cols {
+			vals[i] = rec[col]
+		}
+		if _, err := stmt.ExecContext(ctx, vals...); err != nil {
+			return fmt.Errorf("copy row into %s: %w", table, err)
+		}
+	}
+
+	// Flush the buffered COPY data to the server.
+	if _, err := stmt.ExecContext(ctx); err != nil {
+		return fmt.Errorf("copy flush %s: %w", table, err)
 	}
 
 	return tx.Commit()
