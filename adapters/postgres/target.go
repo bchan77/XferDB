@@ -257,12 +257,12 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		upsertClause = "ON CONFLICT DO NOTHING"
 	}
 
-	query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s) %s`,
-		quote(table),
-		strings.Join(quotedCols, ", "),
-		strings.Join(placeholders, ", "),
-		upsertClause,
-	)
+	// PostgreSQL allows at most 65535 bind parameters per query.
+	// Chunk records so each INSERT stays under that limit.
+	maxRows := 65535 / len(cols)
+	if maxRows < 1 {
+		maxRows = 1
+	}
 
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -270,19 +270,34 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, query)
-	if err != nil {
-		return fmt.Errorf("prepare insert: %w", err)
-	}
-	defer stmt.Close()
-
-	for _, rec := range batch.Records {
-		vals := make([]interface{}, len(cols))
-		for i, col := range cols {
-			vals[i] = rec[col]
+	for start := 0; start < len(batch.Records); start += maxRows {
+		end := start + maxRows
+		if end > len(batch.Records) {
+			end = len(batch.Records)
 		}
-		if _, err := stmt.ExecContext(ctx, vals...); err != nil {
-			return fmt.Errorf("insert record into %s: %w", table, err)
+		chunk := batch.Records[start:end]
+
+		rowPlaceholders := make([]string, len(chunk))
+		allVals := make([]interface{}, 0, len(chunk)*len(cols))
+		for i, rec := range chunk {
+			ph := make([]string, len(cols))
+			for j := range cols {
+				ph[j] = fmt.Sprintf("$%d", i*len(cols)+j+1)
+			}
+			rowPlaceholders[i] = "(" + strings.Join(ph, ", ") + ")"
+			for _, col := range cols {
+				allVals = append(allVals, rec[col])
+			}
+		}
+
+		chunkQuery := fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s %s`,
+			quote(table),
+			strings.Join(quotedCols, ", "),
+			strings.Join(rowPlaceholders, ", "),
+			upsertClause,
+		)
+		if _, err := tx.ExecContext(ctx, chunkQuery, allVals...); err != nil {
+			return fmt.Errorf("insert chunk into %s: %w", table, err)
 		}
 	}
 
