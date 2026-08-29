@@ -141,7 +141,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
 
 		if e.project.SourceConfig.Type == "postgres" && e.project.TargetConfig.Type == "postgres" {
-			ok, err := pgDumpPreData(ctx, e.project.SourceConfig, e.project.TargetConfig, cfg.RecreateSchema)
+			ok, err := e.pgDumpPreData(ctx, e.project.SourceConfig, e.project.TargetConfig, cfg.RecreateSchema)
 			if err != nil {
 				return e.fail(ctx, fmt.Errorf("pg_dump pre-data: %w", err))
 			}
@@ -261,22 +261,75 @@ func (e *Engine) Run(ctx context.Context) error {
 	if !dataOnly && (!cfg.Truncate || nativeSchema) {
 		e.emit(ProgressEvent{Kind: EventPostSchemaPhase, Timestamp: time.Now()})
 
+		postWorkers := cfg.TableWorkers
+		if postWorkers < 1 {
+			postWorkers = 1
+		}
+
 		if nativeSchema {
-			if _, err := pgDumpPostData(ctx, e.project.SourceConfig, e.project.TargetConfig); err != nil {
+			if _, err := e.pgDumpPostData(ctx, e.project.SourceConfig, e.project.TargetConfig, postWorkers); err != nil {
 				return e.fail(ctx, fmt.Errorf("pg_dump post-data: %w", err))
 			}
 		} else {
+			// Run index and constraint creation in parallel across tables,
+			// using the same worker count as the data-transfer phase.
+			type postWork struct {
+				schema adapters.TableSchema
+			}
+			work := make(chan postWork, len(tables))
 			for _, schema := range tables {
-				if len(schema.Indexes) > 0 {
-					if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
-						return e.fail(ctx, fmt.Errorf("create indexes for %s: %w", schema.Name, err))
-					}
+				if len(schema.Indexes) > 0 || len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
+					work <- postWork{schema}
 				}
-				if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
-					if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
-						return e.fail(ctx, fmt.Errorf("create constraints for %s: %w", schema.Name, err))
+			}
+			close(work)
+
+			var postWg sync.WaitGroup
+			var postMu sync.Mutex
+			var postErr error
+
+			for i := 0; i < postWorkers; i++ {
+				postWg.Add(1)
+				go func() {
+					defer postWg.Done()
+					for w := range work {
+						schema := w.schema
+						if len(schema.Indexes) > 0 {
+							e.emit(ProgressEvent{
+								Kind:          EventPostSchemaItem,
+								PostSchemaMsg: fmt.Sprintf("%-16s %s (%d)", "indexes:", schema.Name, len(schema.Indexes)),
+								Timestamp:     time.Now(),
+							})
+							if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
+								postMu.Lock()
+								if postErr == nil {
+									postErr = fmt.Errorf("create indexes for %s: %w", schema.Name, err)
+								}
+								postMu.Unlock()
+								return
+							}
+						}
+						if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
+							e.emit(ProgressEvent{
+								Kind:          EventPostSchemaItem,
+								PostSchemaMsg: fmt.Sprintf("%-16s %s (%d fk, %d check)", "constraints:", schema.Name, len(schema.ForeignKeys), len(schema.Checks)),
+								Timestamp:     time.Now(),
+							})
+							if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
+								postMu.Lock()
+								if postErr == nil {
+									postErr = fmt.Errorf("create constraints for %s: %w", schema.Name, err)
+								}
+								postMu.Unlock()
+								return
+							}
+						}
 					}
-				}
+				}()
+			}
+			postWg.Wait()
+			if postErr != nil {
+				return e.fail(ctx, postErr)
 			}
 		}
 	}
