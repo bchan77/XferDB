@@ -28,9 +28,20 @@ Examples:
 		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
 		truncate, _ := cmd.Flags().GetBool("truncate")
 		workers, _ := cmd.Flags().GetInt("workers")
+		tablesFlag, _ := cmd.Flags().GetString("tables")
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
+		}
+
+		// Parse comma-separated table list; strip whitespace.
+		var tables []string
+		if tablesFlag != "" {
+			for _, t := range strings.Split(tablesFlag, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					tables = append(tables, t)
+				}
+			}
 		}
 
 		projectName, err := currentProject(projectFlag)
@@ -64,7 +75,7 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers, tables)
 		if err != nil {
 			return err
 		}
@@ -83,6 +94,7 @@ func init() {
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
 	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
 	migrateCmd.Flags().Int("workers", 1, "Number of tables to migrate concurrently")
+	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -218,12 +230,16 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, workers int) (string, error) {
-	body, _ := json.Marshal(map[string]any{
+func startMigration(projectID string, recreateSchema, truncate bool, workers int, tables []string) (string, error) {
+	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
 		"workers":         workers,
-	})
+	}
+	if len(tables) > 0 {
+		req["tables"] = tables
+	}
+	body, _ := json.Marshal(req)
 	resp, err := http.Post(
 		ServerAddr+"/api/v1/projects/"+projectID+"/migrations",
 		"application/json",

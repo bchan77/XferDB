@@ -27,14 +27,15 @@ const (
 
 // TransferConfig controls batch transfer behaviour.
 type TransferConfig struct {
-	BatchSize  int         `json:"batch_size"`
-	Workers    int         `json:"workers"`
-	Validate   bool        `json:"validate"`
-	OnError    ErrorPolicy `json:"on_error"`
-	DataOnly       bool `json:"data_only"`       // skip schema creation; target schema must already exist
-	SchemaOnly     bool `json:"schema_only"`     // create schema on target but do not transfer data
-	RecreateSchema bool `json:"recreate_schema"` // drop and recreate tables before migrating
-	Truncate       bool `json:"truncate"`        // truncate tables before loading data (keeps schema)
+	BatchSize      int         `json:"batch_size"`
+	Workers        int         `json:"workers"`
+	Validate       bool        `json:"validate"`
+	OnError        ErrorPolicy `json:"on_error"`
+	DataOnly       bool        `json:"data_only"`       // skip schema creation; target schema must already exist
+	SchemaOnly     bool        `json:"schema_only"`     // create schema on target but do not transfer data
+	RecreateSchema bool        `json:"recreate_schema"` // drop and recreate tables before migrating
+	Truncate       bool        `json:"truncate"`        // truncate tables before loading data (keeps schema)
+	Tables         []string    `json:"tables"`          // if non-empty, only migrate these tables; supports "schema.table" notation
 }
 
 // Project is a named migration project with a fixed source/target configuration.

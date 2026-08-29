@@ -168,6 +168,10 @@ xferdb migrate --truncate
 
 # Drop and recreate target tables (schema changed on source)
 xferdb migrate --recreate-schema
+
+# Migrate specific tables only (comma-separated; schema.table notation supported)
+xferdb migrate --tables orders,customers
+xferdb migrate --tables public.orders,public.customers
 ```
 
 ### Other commands
@@ -187,6 +191,7 @@ xferdb list                     # List supported adapters
 | Delta sync (default) | `xferdb migrate` | Upsert — new rows inserted, changed rows updated, nothing deleted. Safe to re-run. |
 | Truncate reload | `xferdb migrate --truncate` | Wipes target table data first, then loads fresh. Schema is kept. |
 | Recreate schema | `xferdb migrate --recreate-schema` | Drops and recreates target tables, then loads. Use when source schema has changed. |
+| Selective tables | `xferdb migrate --tables t1,t2` | Only migrate the named tables; all others are skipped. Supports `schema.table` notation. |
 | Schema only | API: `schema_only: true` | Creates tables, indexes, constraints — no data transfer. |
 | Data only | API: `data_only: true` | Skips schema creation — target schema must already exist. |
 
@@ -252,7 +257,7 @@ POST   /api/v1/projects/:id/preflight
 POST   /api/v1/projects/:id/analyze
 
 # Migrations
-POST   /api/v1/projects/:id/migrations      # body: {"workers":3,"truncate":true,...}
+POST   /api/v1/projects/:id/migrations      # body: {"workers":3,"truncate":true,"tables":["orders","public.customers"],...}
 GET    /api/v1/projects/:id/migrations
 GET    /api/v1/migrations/:id
 PATCH  /api/v1/migrations/:id               # body: {"action":"pause"|"resume"|"cancel"}
@@ -287,6 +292,7 @@ go build -o xferdb ./cmd/xferdb
 - [x] Pause / resume / cancel
 - [x] Checkpoint-based crash recovery
 - [x] Per-table live progress display
+- [x] Selective table migration (`--tables`)
 - [ ] MongoDB adapter
 - [ ] Web UI
 - [ ] WebSocket live progress

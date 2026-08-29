@@ -49,12 +49,13 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 
 	// Optional per-run TransferConfig overrides in the request body.
 	var overrides struct {
-		RecreateSchema *bool `json:"recreate_schema"`
-		Truncate       *bool `json:"truncate"`
-		DataOnly       *bool `json:"data_only"`
-		SchemaOnly     *bool `json:"schema_only"`
-		BatchSize      *int  `json:"batch_size"`
-		Workers        *int  `json:"workers"`
+		RecreateSchema *bool    `json:"recreate_schema"`
+		Truncate       *bool    `json:"truncate"`
+		DataOnly       *bool    `json:"data_only"`
+		SchemaOnly     *bool    `json:"schema_only"`
+		BatchSize      *int     `json:"batch_size"`
+		Workers        *int     `json:"workers"`
+		Tables         []string `json:"tables"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
 	if overrides.RecreateSchema != nil {
@@ -74,6 +75,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if overrides.Workers != nil && *overrides.Workers > 0 {
 		p.TransferConfig.Workers = *overrides.Workers
+	}
+	if len(overrides.Tables) > 0 {
+		p.TransferConfig.Tables = overrides.Tables
 	}
 
 	migrationID := uuid.New().String()

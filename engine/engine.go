@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,6 +86,16 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
+	cfg := e.project.TransferConfig
+
+	// Filter to only the requested tables when --tables is specified.
+	if len(cfg.Tables) > 0 {
+		tables = filterTables(tables, cfg.Tables)
+		if len(tables) == 0 {
+			return e.fail(ctx, fmt.Errorf("no matching tables found for filter: %v", cfg.Tables))
+		}
+	}
+
 	// Fetch row counts for all tables upfront so the ETA covers the whole migration.
 	tableNames := make([]string, len(tables))
 	tableCounts := make(map[string]int64, len(tables))
@@ -96,7 +107,6 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.emit(ProgressEvent{Kind: EventMigrationStart, TableNames: tableNames, TableCounts: tableCounts, Timestamp: time.Now()})
 
-	cfg := e.project.TransferConfig
 	dataOnly := cfg.DataOnly
 	schemaOnly := cfg.SchemaOnly
 
@@ -241,6 +251,29 @@ func (e *Engine) fail(ctx context.Context, err error) error {
 	e.db.SetMigrationError(ctx, e.migrationID, err) //nolint:errcheck
 	e.emit(ProgressEvent{Kind: EventError, Err: err, Timestamp: time.Now()})
 	return err
+}
+
+// filterTables returns the subset of schemas whose names match the filter list.
+// Entries in filters may be bare table names ("orders") or schema-qualified
+// ("public.orders"); the schema prefix is stripped before comparison.
+func filterTables(tables []adapters.TableSchema, filters []string) []adapters.TableSchema {
+	want := make(map[string]bool, len(filters))
+	for _, f := range filters {
+		// Normalise: strip schema prefix so "public.orders" → "orders".
+		bare := f
+		if idx := strings.LastIndex(f, "."); idx >= 0 {
+			bare = f[idx+1:]
+		}
+		want[strings.ToLower(bare)] = true
+		want[strings.ToLower(f)] = true // keep full name too for forward compat
+	}
+	out := tables[:0:0] // nil-safe empty slice
+	for _, t := range tables {
+		if want[strings.ToLower(t.Name)] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // checkPause blocks if a pause signal is pending, updating state accordingly.
