@@ -28,6 +28,8 @@ Examples:
 		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
 		truncate, _ := cmd.Flags().GetBool("truncate")
 		workers, _ := cmd.Flags().GetInt("workers")
+		batchWorkers, _ := cmd.Flags().GetInt("batch-workers")
+		offsetSegments, _ := cmd.Flags().GetBool("offset-segments")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 
 		if recreateSchema && truncate {
@@ -75,7 +77,7 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers, tables)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers, batchWorkers, offsetSegments, tables)
 		if err != nil {
 			return err
 		}
@@ -94,6 +96,8 @@ func init() {
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
 	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
 	migrateCmd.Flags().Int("workers", 1, "Number of tables to migrate concurrently")
+	migrateCmd.Flags().Int("batch-workers", 1, "Number of parallel workers per table (splits table by PK range; falls back to OFFSET when no integer PK)")
+	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --batch-workers)")
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 }
 
@@ -230,11 +234,13 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, workers int, tables []string) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool, workers, batchWorkers int, offsetSegments bool, tables []string) (string, error) {
 	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
 		"workers":         workers,
+		"batch_workers":   batchWorkers,
+		"offset_fallback": offsetSegments,
 	}
 	if len(tables) > 0 {
 		req["tables"] = tables

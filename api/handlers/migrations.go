@@ -55,6 +55,8 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		SchemaOnly     *bool    `json:"schema_only"`
 		BatchSize      *int     `json:"batch_size"`
 		Workers        *int     `json:"workers"`
+		BatchWorkers   *int     `json:"batch_workers"`
+		OffsetFallback *bool    `json:"offset_fallback"`
 		Tables         []string `json:"tables"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
@@ -75,6 +77,12 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if overrides.Workers != nil && *overrides.Workers > 0 {
 		p.TransferConfig.Workers = *overrides.Workers
+	}
+	if overrides.BatchWorkers != nil && *overrides.BatchWorkers > 0 {
+		p.TransferConfig.BatchWorkers = *overrides.BatchWorkers
+	}
+	if overrides.OffsetFallback != nil {
+		p.TransferConfig.OffsetFallback = *overrides.OffsetFallback
 	}
 	if len(overrides.Tables) > 0 {
 		p.TransferConfig.Tables = overrides.Tables

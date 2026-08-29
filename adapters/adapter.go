@@ -28,7 +28,9 @@ const (
 // TransferConfig controls batch transfer behaviour.
 type TransferConfig struct {
 	BatchSize      int         `json:"batch_size"`
-	Workers        int         `json:"workers"`
+	Workers        int         `json:"workers"`        // parallel tables (inter-table)
+	BatchWorkers   int         `json:"batch_workers"`  // parallel workers within one table (intra-table)
+	OffsetFallback bool        `json:"offset_fallback"` // force offset-based segments even when PK range is available
 	Validate       bool        `json:"validate"`
 	OnError        ErrorPolicy `json:"on_error"`
 	DataOnly       bool        `json:"data_only"`       // skip schema creation; target schema must already exist
@@ -153,12 +155,18 @@ type BatchOptions struct {
 	Offset int
 	Limit  int
 	LastPK interface{} // set on resume to continue from last checkpoint
+	// PK-range fields for intra-table parallel workers (all zero/empty when not in use):
+	PKCol      string // primary key column name; when set, use range query instead of OFFSET
+	PKMin      int64  // inclusive lower bound for the segment range
+	PKMax      int64  // upper bound for the segment range
+	PKMaxIncl  bool   // when true use <= for PKMax (last segment); otherwise use <
 }
 
 // Batch holds a set of records read from a source table.
 type Batch struct {
 	Records []map[string]interface{}
 	Size    int
+	LastPK  int64 // set by ReadBatch when PKCol is used; last PK value in this batch
 }
 
 // PermissionCheck reports what the connected credential is allowed to do.
@@ -177,6 +185,9 @@ type SourceAdapter interface {
 	ListTables(ctx context.Context) ([]TableSchema, error)
 	GetSchema(ctx context.Context, table string) (*TableSchema, error)
 	GetRowCount(ctx context.Context, table string) (int64, error)
+	// GetPKRange returns the inclusive min and max values of an integer PK column.
+	// Used to split a table into parallel segments. Returns an error when the table is empty.
+	GetPKRange(ctx context.Context, table, pkColumn string) (min, max int64, err error)
 	ReadBatch(ctx context.Context, table string, opts BatchOptions) (*Batch, error)
 	CheckPermissions(ctx context.Context) (*PermissionCheck, error)
 }

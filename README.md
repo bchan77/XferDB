@@ -160,8 +160,17 @@ xferdb migrate --status
 # Cancel the running migration (keeps history, preserves checkpoints)
 xferdb migrate --cancel
 
-# Migrate N tables in parallel
+# Migrate N tables in parallel (inter-table)
 xferdb migrate --workers 3
+
+# Split each table into N parallel segments (intra-table, PK-range by default)
+xferdb migrate --batch-workers 4
+
+# Force OFFSET-based segment splitting instead of PK range
+xferdb migrate --batch-workers 4 --offset-segments
+
+# Combine both: 2 tables at once, each split across 4 workers
+xferdb migrate --workers 2 --batch-workers 4
 
 # Truncate target tables before loading (keeps schema)
 xferdb migrate --truncate
@@ -192,6 +201,7 @@ xferdb list                     # List supported adapters
 | Truncate reload | `xferdb migrate --truncate` | Wipes target table data first, then loads fresh. Schema is kept. |
 | Recreate schema | `xferdb migrate --recreate-schema` | Drops and recreates target tables, then loads. Use when source schema has changed. |
 | Selective tables | `xferdb migrate --tables t1,t2` | Only migrate the named tables; all others are skipped. Supports `schema.table` notation. |
+| Parallel per-table | `xferdb migrate --batch-workers 4` | Split each table into N segments; workers read/write in parallel. Uses PK ranges by default (no OFFSET scan penalty); falls back to OFFSET for tables without an integer PK. Add `--offset-segments` to force OFFSET mode. |
 | Schema only | API: `schema_only: true` | Creates tables, indexes, constraints — no data transfer. |
 | Data only | API: `data_only: true` | Skips schema creation — target schema must already exist. |
 
@@ -293,6 +303,7 @@ go build -o xferdb ./cmd/xferdb
 - [x] Checkpoint-based crash recovery
 - [x] Per-table live progress display
 - [x] Selective table migration (`--tables`)
+- [x] Intra-table parallel workers (`--batch-workers`) with PK-range splitting and OFFSET fallback
 - [ ] MongoDB adapter
 - [ ] Web UI
 - [ ] WebSocket live progress
