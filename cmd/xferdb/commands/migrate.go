@@ -58,8 +58,8 @@ func resolveProjectID(name string) (string, error) {
 	defer resp.Body.Close()
 
 	var projects []struct {
-		ID   string `json:"ID"`
-		Name string `json:"Name"`
+		ID   string `json:"id"`
+		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&projects); err != nil {
 		return "", fmt.Errorf("decode projects: %w", err)
@@ -85,7 +85,7 @@ func startMigration(projectID string) (string, error) {
 	defer resp.Body.Close()
 
 	var result struct {
-		ID    string `json:"ID"`
+		ID    string `json:"id"`
 		Error string `json:"error"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
