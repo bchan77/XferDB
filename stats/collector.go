@@ -142,6 +142,16 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			s.TableDetails[idx].Transferred = ev.RowsTransferred
 		}
 
+	case engine.EventTableFailed:
+		s.Tables.InProgress--
+		s.Tables.Failed++
+		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			s.TableDetails[idx].Status = "failed"
+			if ev.Err != nil {
+				s.TableDetails[idx].Error = ev.Err.Error()
+			}
+		}
+
 	case engine.EventComplete:
 		s.Phase = "complete"
 		s.CurrentTable = ""
@@ -169,7 +179,7 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.Phase = "post_schema"
 	}
 
-	s.Tables.Pending = s.Tables.Total - s.Tables.Completed - s.Tables.InProgress
+	s.Tables.Pending = s.Tables.Total - s.Tables.Completed - s.Tables.InProgress - s.Tables.Failed
 }
 
 // totalTransferred records the latest per-table row count from the event and

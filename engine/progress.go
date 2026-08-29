@@ -10,6 +10,7 @@ const (
 	EventTableStart      EventKind = "table_start"
 	EventBatch           EventKind = "batch"
 	EventTableDone       EventKind = "table_done"
+	EventTableFailed     EventKind = "table_failed"     // table failed; migration continues
 	EventComplete        EventKind = "complete"
 	EventError           EventKind = "error"
 	EventPaused          EventKind = "paused"

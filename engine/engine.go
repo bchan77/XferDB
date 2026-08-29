@@ -170,34 +170,44 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		close(work)
 
-		workerCtx, cancelWorkers := context.WithCancel(ctx)
-		defer cancelWorkers()
-
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		var firstErr error
+		var tableErrors []error
 
 		for i := 0; i < workers; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for schema := range work {
-					if err := e.transferTable(workerCtx, schema); err != nil {
+					if err := e.transferTable(ctx, schema); err != nil {
+						// Mark only this table as failed; other tables keep going.
+						now := time.Now()
+						e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+							TableName:   schema.Name,
+							Status:      adapters.StatusFailed,
+							CompletedAt: &now,
+						})
+						e.emit(ProgressEvent{
+							Kind:      EventTableFailed,
+							TableName: schema.Name,
+							Err:       err,
+							Timestamp: now,
+						})
 						mu.Lock()
-						if firstErr == nil {
-							firstErr = err
-							cancelWorkers() // stop other workers on first error
-						}
+						tableErrors = append(tableErrors, fmt.Errorf("%s: %w", schema.Name, err))
 						mu.Unlock()
-						return
 					}
 				}
 			}()
 		}
 		wg.Wait()
 
-		if firstErr != nil {
-			return e.fail(ctx, firstErr)
+		if len(tableErrors) > 0 {
+			msgs := make([]string, len(tableErrors))
+			for i, te := range tableErrors {
+				msgs[i] = te.Error()
+			}
+			return e.fail(ctx, fmt.Errorf("%d table(s) failed: %s", len(tableErrors), strings.Join(msgs, "; ")))
 		}
 	}
 

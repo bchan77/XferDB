@@ -31,14 +31,16 @@ type TableStats struct {
 	Completed  int
 	InProgress int
 	Pending    int
+	Failed     int
 }
 
 // TableDetail holds per-table progress for display.
 type TableDetail struct {
 	Name        string
-	Status      string // "pending", "in_progress", "done"
+	Status      string // "pending", "in_progress", "done", "failed"
 	Transferred int64
 	Total       int64
+	Error       string // set when Status == "failed"
 }
 
 // RowStats tracks row-level transfer progress and throughput.

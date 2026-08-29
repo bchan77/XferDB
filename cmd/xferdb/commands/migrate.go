@@ -345,11 +345,17 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 			}
 			detail = fmt.Sprintf("%s / %s rows  (%d%%)",
 				fmtInt(t.Transferred), fmtInt(t.Total), pct)
+		case "failed":
+			marker = "✗"
+			detail = "failed"
 		default:
 			marker = "○"
 			detail = "pending"
 		}
 		lines = append(lines, fmt.Sprintf("  %s  %-30s  %s", marker, truncate(t.Name, 30), detail))
+		if t.Status == "failed" && t.Error != "" {
+			lines = append(lines, fmt.Sprintf("     └─ %s", truncate(t.Error, 72)))
+		}
 	}
 
 	for _, e := range snap.Errors {
