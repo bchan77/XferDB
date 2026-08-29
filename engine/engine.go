@@ -81,11 +81,23 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, err)
 	}
 
-	tables, err := e.source.ListTables(ctx)
+	allTables, err := e.source.ListTables(ctx)
 	if err != nil {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
+	// Register every source table in the project registry (INSERT OR IGNORE) so
+	// --status always shows the full DB picture regardless of which tables this
+	// specific migration touches.
+	{
+		names := make([]string, len(allTables))
+		for i, t := range allTables {
+			names[i] = t.Name
+		}
+		e.db.RegisterProjectTables(ctx, e.project.ID, names) //nolint:errcheck
+	}
+
+	tables := allTables
 	cfg := e.project.TransferConfig
 
 	// Filter to only the requested tables when --tables is specified.
@@ -215,9 +227,16 @@ func (e *Engine) Run(ctx context.Context) error {
 							Err:       err,
 							Timestamp: now,
 						})
+						e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
+							"failed", e.migrationID, 0, 0)
 						mu.Lock()
 						tableErrors = append(tableErrors, fmt.Errorf("%s: %w", schema.Name, err))
 						mu.Unlock()
+					} else {
+						// Persist final counts to the project registry.
+						transferred, total, _ := e.db.GetTableFinalProgress(ctx, e.migrationID, schema.Name)
+						e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
+							"done", e.migrationID, transferred, total)
 					}
 				}
 			}()

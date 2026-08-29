@@ -348,6 +348,9 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 		case "failed":
 			marker = "✗"
 			detail = "failed"
+		case "not_started":
+			marker = "·"
+			detail = "not started"
 		default:
 			marker = "○"
 			detail = "pending"

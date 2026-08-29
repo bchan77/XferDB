@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -119,7 +120,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	if effectiveSegmentWorkers < 1 {
 		effectiveSegmentWorkers = 1
 	}
-	col := stats.NewCollector(migrationID, eng.Events(), stats.MigrationConfig{
+	col := stats.NewCollector(migrationID, projectID, eng.Events(), stats.MigrationConfig{
 		BatchSize:      effectiveBatchSize,
 		TableWorkers:   effectiveTableWorkers,
 		SegmentWorkers: effectiveSegmentWorkers,
@@ -244,5 +245,33 @@ func (h *MigrationsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, col.Snapshot())
+	snap := col.Snapshot()
+
+	// Augment the snapshot with project-level table records for tables that are
+	// not part of this migration's scope (e.g. when --tables filters to a subset).
+	// This gives --status a full project-wide view across all migration runs.
+	if snap.ProjectID != "" {
+		projectTables, err := h.DB.GetProjectTables(r.Context(), snap.ProjectID)
+		if err == nil && len(projectTables) > 0 {
+			inScope := make(map[string]bool, len(snap.TableDetails))
+			for _, td := range snap.TableDetails {
+				inScope[td.Name] = true
+			}
+			for _, pt := range projectTables {
+				if !inScope[pt.TableName] {
+					snap.TableDetails = append(snap.TableDetails, stats.TableDetail{
+						Name:        pt.TableName,
+						Status:      pt.Status,
+						Transferred: pt.RowsTransferred,
+						Total:       pt.RowsTotal,
+					})
+				}
+			}
+			sort.Slice(snap.TableDetails, func(i, j int) bool {
+				return snap.TableDetails[i].Name < snap.TableDetails[j].Name
+			})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, snap)
 }

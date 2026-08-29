@@ -13,6 +13,7 @@ type MigrationConfig struct {
 // StatsSnapshot is a point-in-time view of a migration's progress.
 type StatsSnapshot struct {
 	MigrationID    string
+	ProjectID      string
 	Phase          string
 	StartedAt      time.Time
 	ElapsedSeconds float64

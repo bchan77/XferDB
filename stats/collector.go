@@ -12,6 +12,7 @@ import (
 // thread-safe rolling snapshot of the migration's current statistics.
 type Collector struct {
 	migrationID string
+	projectID   string
 	events      <-chan engine.ProgressEvent
 
 	mu        sync.RWMutex
@@ -29,16 +30,18 @@ type Collector struct {
 
 // NewCollector creates a Collector for the given migration event stream.
 // config carries the effective transfer settings (batch size, worker counts) for display.
-func NewCollector(migrationID string, events <-chan engine.ProgressEvent, config MigrationConfig) *Collector {
+func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEvent, config MigrationConfig) *Collector {
 	now := time.Now()
 	return &Collector{
 		migrationID: migrationID,
+		projectID:   projectID,
 		events:      events,
 		startedAt:   now,
 		tableIndex:  make(map[string]int),
 		tableRows:   make(map[string]int64),
 		snapshot: StatsSnapshot{
 			MigrationID: migrationID,
+			ProjectID:   projectID,
 			Phase:       "pending",
 			StartedAt:   now,
 			Config:      config,
