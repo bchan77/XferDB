@@ -246,8 +246,8 @@ func pollStats(migrationID string) error {
 
 func renderProgress(snap stats.StatsSnapshot) []string {
 	var lines []string
-	lines = append(lines, fmt.Sprintf("Phase: %-14s  Elapsed: %.0fs  ETA: %.0fs",
-		snap.Phase, snap.ElapsedSeconds, snap.ETASeconds))
+	lines = append(lines, fmt.Sprintf("Phase: %-14s  Elapsed: %s  ETA: %s",
+		snap.Phase, fmtDuration(snap.ElapsedSeconds), fmtDuration(snap.ETASeconds)))
 	lines = append(lines, fmt.Sprintf("Rows:  %s / %s   Rate: %.0f/s",
 		fmtInt(snap.Rows.Transferred), fmtInt(snap.Rows.Total), snap.Rows.RatePerSecond))
 	lines = append(lines, strings.Repeat("─", 60))
@@ -277,6 +277,20 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 		lines = append(lines, "  ERROR: "+e)
 	}
 	return lines
+}
+
+func fmtDuration(seconds float64) string {
+	s := int(seconds)
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	if s < 3600 {
+		return fmt.Sprintf("%dm %ds", s/60, s%60)
+	}
+	if s < 86400 {
+		return fmt.Sprintf("%dh %dm", s/3600, (s%3600)/60)
+	}
+	return fmt.Sprintf("%dd %dh", s/86400, (s%86400)/3600)
 }
 
 func fmtInt(n int64) string {
