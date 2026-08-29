@@ -301,16 +301,21 @@ func (t *Target) CheckPermissions(ctx context.Context) (*adapters.PermissionChec
 	}
 	check.CanRead = true
 
-	_, err := t.db.ExecContext(ctx,
-		`CREATE TEMPORARY TABLE IF NOT EXISTS _xferdb_probe (id INT PRIMARY KEY)`)
+	_, err := t.db.ExecContext(ctx, `CREATE TEMPORARY TABLE IF NOT EXISTS _xferdb_probe (id INT PRIMARY KEY)`)
 	if err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("create table check failed: %v", err))
 		return check, nil
 	}
-	t.db.ExecContext(ctx, `DROP TEMPORARY TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
-	check.CanWrite = true
 	check.CanCreateTable = true
 
+	_, err = t.db.ExecContext(ctx, `INSERT INTO _xferdb_probe (id) VALUES (1)`)
+	if err != nil {
+		check.Errors = append(check.Errors, fmt.Sprintf("write check failed: %v", err))
+	} else {
+		check.CanWrite = true
+	}
+
+	t.db.ExecContext(ctx, `DROP TEMPORARY TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
 }
 

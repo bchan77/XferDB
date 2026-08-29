@@ -292,23 +292,30 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 func (t *Target) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {
 	check := &adapters.PermissionCheck{}
 
-	if err := t.db.QueryRowContext(ctx,
-		`SELECT 1 FROM information_schema.tables LIMIT 1`).Err(); err != nil {
+	// Probe: read
+	if err := t.db.QueryRowContext(ctx, `SELECT 1 FROM information_schema.tables LIMIT 1`).Err(); err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("read check failed: %v", err))
 		return check, nil
 	}
 	check.CanRead = true
 
-	_, err := t.db.ExecContext(ctx,
-		`CREATE TEMP TABLE IF NOT EXISTS _xferdb_probe (id SERIAL PRIMARY KEY)`)
+	// Probe: create table
+	_, err := t.db.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS _xferdb_probe (id SERIAL PRIMARY KEY)`)
 	if err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("create table check failed: %v", err))
 		return check, nil
 	}
-	t.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
-	check.CanWrite = true
 	check.CanCreateTable = true
 
+	// Probe: write
+	_, err = t.db.ExecContext(ctx, `INSERT INTO _xferdb_probe DEFAULT VALUES`)
+	if err != nil {
+		check.Errors = append(check.Errors, fmt.Sprintf("write check failed: %v", err))
+	} else {
+		check.CanWrite = true
+	}
+
+	t.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
 }
 

@@ -109,10 +109,27 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 
 func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {
 	check := &adapters.PermissionCheck{}
+
 	if _, err := s.db.QueryContext(ctx, `SELECT name FROM sqlite_master LIMIT 1`); err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("read check failed: %v", err))
 		return check, nil
 	}
 	check.CanRead = true
+
+	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _xferdb_probe (id INTEGER PRIMARY KEY)`)
+	if err != nil {
+		check.Errors = append(check.Errors, fmt.Sprintf("create table check failed: %v", err))
+		return check, nil
+	}
+	check.CanCreateTable = true
+
+	_, err = s.db.ExecContext(ctx, `INSERT INTO _xferdb_probe DEFAULT VALUES`)
+	if err != nil {
+		check.Errors = append(check.Errors, fmt.Sprintf("write check failed: %v", err))
+	} else {
+		check.CanWrite = true
+	}
+
+	s.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
 }

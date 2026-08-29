@@ -104,11 +104,30 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 
 func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {
 	check := &adapters.PermissionCheck{}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM information_schema.tables LIMIT 1`).Err(); err != nil {
+
+	// Probe: read
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM information_schema.tables LIMIT 1`).Err(); err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("read check failed: %v", err))
 		return check, nil
 	}
 	check.CanRead = true
+
+	// Probe: create table (use a temp table so we leave no permanent objects)
+	_, err := s.db.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS _xferdb_probe (id SERIAL PRIMARY KEY)`)
+	if err != nil {
+		check.Errors = append(check.Errors, fmt.Sprintf("create table check failed: %v", err))
+		return check, nil
+	}
+	check.CanCreateTable = true
+
+	// Probe: write
+	_, err = s.db.ExecContext(ctx, `INSERT INTO _xferdb_probe DEFAULT VALUES`)
+	if err != nil {
+		check.Errors = append(check.Errors, fmt.Sprintf("write check failed: %v", err))
+	} else {
+		check.CanWrite = true
+	}
+
+	s.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
 }
