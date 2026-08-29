@@ -39,6 +39,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		DataOnly       *bool `json:"data_only"`
 		SchemaOnly     *bool `json:"schema_only"`
 		BatchSize      *int  `json:"batch_size"`
+		Workers        *int  `json:"workers"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
 	if overrides.RecreateSchema != nil {
@@ -55,6 +56,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if overrides.BatchSize != nil && *overrides.BatchSize > 0 {
 		p.TransferConfig.BatchSize = *overrides.BatchSize
+	}
+	if overrides.Workers != nil && *overrides.Workers > 0 {
+		p.TransferConfig.Workers = *overrides.Workers
 	}
 
 	migrationID := uuid.New().String()

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -134,13 +135,48 @@ func (e *Engine) Run(ctx context.Context) error {
 			}
 		}
 
+		workers := cfg.Workers
+		if workers < 1 {
+			workers = 1
+		}
+
+		// Feed pending tables into a work channel; workers drain it concurrently.
+		work := make(chan adapters.TableSchema, len(tables))
 		for _, schema := range tables {
-			if doneSet[schema.Name] {
-				continue
+			if !doneSet[schema.Name] {
+				work <- schema
 			}
-			if err := e.transferTable(ctx, schema); err != nil {
-				return e.fail(ctx, err)
-			}
+		}
+		close(work)
+
+		workerCtx, cancelWorkers := context.WithCancel(ctx)
+		defer cancelWorkers()
+
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var firstErr error
+
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for schema := range work {
+					if err := e.transferTable(workerCtx, schema); err != nil {
+						mu.Lock()
+						if firstErr == nil {
+							firstErr = err
+							cancelWorkers() // stop other workers on first error
+						}
+						mu.Unlock()
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+
+		if firstErr != nil {
+			return e.fail(ctx, firstErr)
 		}
 	}
 

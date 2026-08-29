@@ -26,6 +26,7 @@ Examples:
 		statusOnly, _ := cmd.Flags().GetBool("status")
 		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
 		truncate, _ := cmd.Flags().GetBool("truncate")
+		workers, _ := cmd.Flags().GetInt("workers")
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
@@ -54,7 +55,7 @@ Examples:
 			return pollStats(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers)
 		if err != nil {
 			return err
 		}
@@ -71,6 +72,7 @@ func init() {
 	migrateCmd.Flags().Bool("status", false, "Re-attach to the latest migration and show live progress")
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
 	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
+	migrateCmd.Flags().Int("workers", 1, "Number of tables to migrate concurrently")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -177,10 +179,11 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool, workers int) (string, error) {
 	body, _ := json.Marshal(map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
+		"workers":         workers,
 	})
 	resp, err := http.Post(
 		ServerAddr+"/api/v1/projects/"+projectID+"/migrations",
