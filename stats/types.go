@@ -9,6 +9,7 @@ type StatsSnapshot struct {
 	StartedAt      time.Time
 	ElapsedSeconds float64
 	Tables         TableStats
+	TableDetails   []TableDetail
 	Rows           RowStats
 	CurrentTable   string
 	ETASeconds     float64
@@ -21,6 +22,14 @@ type TableStats struct {
 	Completed  int
 	InProgress int
 	Pending    int
+}
+
+// TableDetail holds per-table progress for display.
+type TableDetail struct {
+	Name        string
+	Status      string // "pending", "in_progress", "done"
+	Transferred int64
+	Total       int64
 }
 
 // RowStats tracks row-level transfer progress and throughput.

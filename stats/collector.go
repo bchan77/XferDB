@@ -18,8 +18,9 @@ type Collector struct {
 	snapshot  StatsSnapshot
 	startedAt time.Time
 
-	// per-table row counts — summed to get the true cross-table total
-	tableRows map[string]int64
+	// per-table tracking — order preserved, status updated as events arrive
+	tableIndex map[string]int // name → index in snapshot.TableDetails
+	tableRows  map[string]int64
 
 	// rolling rate calculation
 	lastSampleTime time.Time
@@ -33,6 +34,7 @@ func NewCollector(migrationID string, events <-chan engine.ProgressEvent) *Colle
 		migrationID: migrationID,
 		events:      events,
 		startedAt:   now,
+		tableIndex:  make(map[string]int),
 		tableRows:   make(map[string]int64),
 		snapshot: StatsSnapshot{
 			MigrationID: migrationID,
@@ -84,12 +86,21 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.Rows.Total += ev.RowsTotal
 		s.Tables.Total++
 		s.Tables.InProgress++
+		idx := len(s.TableDetails)
+		s.TableDetails = append(s.TableDetails, TableDetail{
+			Name:   ev.TableName,
+			Status: "in_progress",
+			Total:  ev.RowsTotal,
+		})
+		c.tableIndex[ev.TableName] = idx
 
 	case engine.EventBatch:
 		s.CurrentTable = ev.TableName
 		s.Rows.Transferred = c.totalTransferred(ev)
 		c.updateRate(s)
-
+		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			s.TableDetails[idx].Transferred = ev.RowsTransferred
+		}
 		if s.Rows.RatePerSecond > 0 && s.Rows.Total > s.Rows.Transferred {
 			s.ETASeconds = float64(s.Rows.Total-s.Rows.Transferred) / s.Rows.RatePerSecond
 		}
@@ -98,6 +109,10 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.Tables.InProgress--
 		s.Tables.Completed++
 		s.Rows.Transferred = c.totalTransferred(ev)
+		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			s.TableDetails[idx].Status = "done"
+			s.TableDetails[idx].Transferred = ev.RowsTransferred
+		}
 
 	case engine.EventComplete:
 		s.Phase = "complete"

@@ -204,9 +204,11 @@ func startMigration(projectID string, recreateSchema, truncate bool) (string, er
 	return result.ID, nil
 }
 
-// pollStats polls the stats endpoint every second and prints progress until done.
+// pollStats polls the stats endpoint every second and prints a full table-by-table
+// progress view until the migration completes or fails.
 func pollStats(migrationID string) error {
 	url := fmt.Sprintf("%s/api/v1/migrations/%s/stats", ServerAddr, migrationID)
+	var lastLines int
 	for {
 		time.Sleep(time.Second)
 
@@ -215,30 +217,79 @@ func pollStats(migrationID string) error {
 			fmt.Printf("  [warn] stats fetch failed: %v\n", err)
 			continue
 		}
-
 		var snap stats.StatsSnapshot
 		json.NewDecoder(resp.Body).Decode(&snap)
 		resp.Body.Close()
 
-		fmt.Printf("\r  phase=%-12s  table=%-20s  rows=%d/%d  rate=%.0f/s  eta=%.0fs",
-			snap.Phase,
-			truncate(snap.CurrentTable, 20),
-			snap.Rows.Transferred,
-			snap.Rows.Total,
-			snap.Rows.RatePerSecond,
-			snap.ETASeconds,
-		)
+		// Move cursor up to overwrite previous output.
+		if lastLines > 0 {
+			fmt.Printf("\033[%dA", lastLines)
+		}
+
+		lines := renderProgress(snap)
+		for _, l := range lines {
+			fmt.Printf("\033[2K%s\n", l) // clear line then print
+		}
+		lastLines = len(lines)
 
 		switch snap.Phase {
 		case "complete":
-			fmt.Printf("\nMigration complete. Transferred %d rows in %.1fs.\n",
-				snap.Rows.Transferred, snap.ElapsedSeconds)
+			fmt.Printf("\nMigration complete. Transferred %s rows in %.1fs.\n",
+				fmtInt(snap.Rows.Transferred), snap.ElapsedSeconds)
 			return nil
 		case "failed":
 			fmt.Println()
 			return fmt.Errorf("migration failed: %s", strings.Join(snap.Errors, "; "))
 		}
 	}
+}
+
+func renderProgress(snap stats.StatsSnapshot) []string {
+	var lines []string
+	lines = append(lines, fmt.Sprintf("Phase: %-14s  Elapsed: %.0fs  ETA: %.0fs",
+		snap.Phase, snap.ElapsedSeconds, snap.ETASeconds))
+	lines = append(lines, fmt.Sprintf("Rows:  %s / %s   Rate: %.0f/s",
+		fmtInt(snap.Rows.Transferred), fmtInt(snap.Rows.Total), snap.Rows.RatePerSecond))
+	lines = append(lines, strings.Repeat("─", 60))
+
+	for _, t := range snap.TableDetails {
+		var marker, detail string
+		switch t.Status {
+		case "done":
+			marker = "✓"
+			detail = fmt.Sprintf("%s rows", fmtInt(t.Total))
+		case "in_progress":
+			marker = "●"
+			pct := 0
+			if t.Total > 0 {
+				pct = int(t.Transferred * 100 / t.Total)
+			}
+			detail = fmt.Sprintf("%s / %s rows  (%d%%)",
+				fmtInt(t.Transferred), fmtInt(t.Total), pct)
+		default:
+			marker = "○"
+			detail = "pending"
+		}
+		lines = append(lines, fmt.Sprintf("  %s  %-30s  %s", marker, truncate(t.Name, 30), detail))
+	}
+
+	for _, e := range snap.Errors {
+		lines = append(lines, "  ERROR: "+e)
+	}
+	return lines
+}
+
+func fmtInt(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	// Insert commas every 3 digits from the right.
+	out := ""
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out += ","
+		}
+		out += string(c)
+	}
+	return out
 }
 
 func truncate(s string, n int) string {
