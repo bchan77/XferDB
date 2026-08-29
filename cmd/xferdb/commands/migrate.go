@@ -31,6 +31,7 @@ Examples:
 		segmentWorkers, _ := cmd.Flags().GetInt("segment-workers")
 		offsetSegments, _ := cmd.Flags().GetBool("offset-segments")
 		batchSize, _ := cmd.Flags().GetInt("batch-size")
+		bulkCopy, _ := cmd.Flags().GetBool("bulk-copy")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 
 		if recreateSchema && truncate {
@@ -78,7 +79,7 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, tables)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, tables)
 		if err != nil {
 			return err
 		}
@@ -100,6 +101,7 @@ func init() {
 	migrateCmd.Flags().Int("segment-workers", 1, "Number of parallel workers per table (splits by PK range; falls back to OFFSET when no integer PK)")
 	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --segment-workers)")
 	migrateCmd.Flags().Int("batch-size", 0, "Rows per batch (overrides the project default; 0 = use project default)")
+	migrateCmd.Flags().Bool("bulk-copy", false, "Use PostgreSQL COPY protocol for writes (faster; requires target table to be empty — combine with --truncate or --recreate-schema)")
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 }
 
@@ -236,13 +238,14 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments bool, tables []string) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments, bulkCopy bool, tables []string) (string, error) {
 	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
 		"table_workers":   tableWorkers,
 		"segment_workers": segmentWorkers,
 		"offset_fallback": offsetSegments,
+		"bulk_copy":       bulkCopy,
 	}
 	if batchSize > 0 {
 		req["batch_size"] = batchSize

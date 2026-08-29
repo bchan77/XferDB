@@ -57,6 +57,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		TableWorkers   *int     `json:"table_workers"`
 		SegmentWorkers *int     `json:"segment_workers"`
 		OffsetFallback *bool    `json:"offset_fallback"`
+		BulkCopy       *bool    `json:"bulk_copy"`
 		Tables         []string `json:"tables"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
@@ -83,6 +84,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if overrides.OffsetFallback != nil {
 		p.TransferConfig.OffsetFallback = *overrides.OffsetFallback
+	}
+	if overrides.BulkCopy != nil {
+		p.TransferConfig.BulkCopy = *overrides.BulkCopy
 	}
 	if len(overrides.Tables) > 0 {
 		p.TransferConfig.Tables = overrides.Tables

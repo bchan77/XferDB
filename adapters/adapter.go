@@ -38,6 +38,7 @@ type TransferConfig struct {
 	RecreateSchema bool        `json:"recreate_schema"` // drop and recreate tables before migrating
 	Truncate       bool        `json:"truncate"`        // truncate tables before loading data (keeps schema)
 	Tables         []string    `json:"tables"`          // if non-empty, only migrate these tables; supports "schema.table" notation
+	BulkCopy       bool        `json:"bulk_copy"`       // use COPY protocol instead of INSERT; requires target table to be empty
 }
 
 // Project is a named migration project with a fixed source/target configuration.
