@@ -27,8 +27,8 @@ Examples:
 		cancelOnly, _ := cmd.Flags().GetBool("cancel")
 		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
 		truncate, _ := cmd.Flags().GetBool("truncate")
-		workers, _ := cmd.Flags().GetInt("workers")
-		batchWorkers, _ := cmd.Flags().GetInt("batch-workers")
+		tableWorkers, _ := cmd.Flags().GetInt("table-workers")
+		segmentWorkers, _ := cmd.Flags().GetInt("segment-workers")
 		offsetSegments, _ := cmd.Flags().GetBool("offset-segments")
 		batchSize, _ := cmd.Flags().GetInt("batch-size")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
@@ -78,7 +78,7 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, workers, batchWorkers, batchSize, offsetSegments, tables)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, tables)
 		if err != nil {
 			return err
 		}
@@ -96,9 +96,9 @@ func init() {
 	migrateCmd.Flags().Bool("cancel", false, "Cancel the currently running migration")
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
 	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
-	migrateCmd.Flags().Int("workers", 1, "Number of tables to migrate concurrently")
-	migrateCmd.Flags().Int("batch-workers", 1, "Number of parallel workers per table (splits table by PK range; falls back to OFFSET when no integer PK)")
-	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --batch-workers)")
+	migrateCmd.Flags().Int("table-workers", 1, "Number of tables to migrate concurrently")
+	migrateCmd.Flags().Int("segment-workers", 1, "Number of parallel workers per table (splits by PK range; falls back to OFFSET when no integer PK)")
+	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --segment-workers)")
 	migrateCmd.Flags().Int("batch-size", 0, "Rows per batch (overrides the project default; 0 = use project default)")
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 }
@@ -236,12 +236,12 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, workers, batchWorkers, batchSize int, offsetSegments bool, tables []string) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments bool, tables []string) (string, error) {
 	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
-		"workers":         workers,
-		"batch_workers":   batchWorkers,
+		"table_workers":   tableWorkers,
+		"segment_workers": segmentWorkers,
 		"offset_fallback": offsetSegments,
 	}
 	if batchSize > 0 {
@@ -319,6 +319,9 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 		snap.Phase, fmtDuration(snap.ElapsedSeconds), fmtDuration(snap.ETASeconds)))
 	lines = append(lines, fmt.Sprintf("Rows:  %s / %s   Rate: %.0f/s",
 		fmtInt(snap.Rows.Transferred), fmtInt(snap.Rows.Total), snap.Rows.RatePerSecond))
+	cfg := snap.Config
+	lines = append(lines, fmt.Sprintf("Batch: %s rows   Table workers: %d   Segment workers: %d",
+		fmtInt(int64(cfg.BatchSize)), cfg.TableWorkers, cfg.SegmentWorkers))
 	lines = append(lines, strings.Repeat("─", 60))
 
 	for _, t := range snap.TableDetails {

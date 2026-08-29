@@ -13,10 +13,10 @@ import (
 
 const defaultBatchSize = 1000
 
-// transferTable is the dispatcher: sequential for BatchWorkers<=1, parallel otherwise.
+// transferTable is the dispatcher: sequential for SegmentWorkers<=1, parallel otherwise.
 func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableSchema) error {
 	cfg := e.project.TransferConfig
-	bw := cfg.BatchWorkers
+	bw := cfg.SegmentWorkers
 	if bw <= 1 {
 		return e.transferTableSequential(ctx, sourceSchema)
 	}

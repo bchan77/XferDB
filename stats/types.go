@@ -2,12 +2,21 @@ package stats
 
 import "time"
 
+// MigrationConfig captures the effective settings used for a migration run.
+// Shown in the --status display so the user can confirm what is actually running.
+type MigrationConfig struct {
+	BatchSize      int `json:"batch_size"`
+	TableWorkers   int `json:"table_workers"`
+	SegmentWorkers int `json:"segment_workers"`
+}
+
 // StatsSnapshot is a point-in-time view of a migration's progress.
 type StatsSnapshot struct {
 	MigrationID    string
 	Phase          string
 	StartedAt      time.Time
 	ElapsedSeconds float64
+	Config         MigrationConfig
 	Tables         TableStats
 	TableDetails   []TableDetail
 	Rows           RowStats

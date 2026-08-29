@@ -54,8 +54,8 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		DataOnly       *bool    `json:"data_only"`
 		SchemaOnly     *bool    `json:"schema_only"`
 		BatchSize      *int     `json:"batch_size"`
-		Workers        *int     `json:"workers"`
-		BatchWorkers   *int     `json:"batch_workers"`
+		TableWorkers   *int     `json:"table_workers"`
+		SegmentWorkers *int     `json:"segment_workers"`
 		OffsetFallback *bool    `json:"offset_fallback"`
 		Tables         []string `json:"tables"`
 	}
@@ -75,11 +75,11 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	if overrides.BatchSize != nil && *overrides.BatchSize > 0 {
 		p.TransferConfig.BatchSize = *overrides.BatchSize
 	}
-	if overrides.Workers != nil && *overrides.Workers > 0 {
-		p.TransferConfig.Workers = *overrides.Workers
+	if overrides.TableWorkers != nil && *overrides.TableWorkers > 0 {
+		p.TransferConfig.TableWorkers = *overrides.TableWorkers
 	}
-	if overrides.BatchWorkers != nil && *overrides.BatchWorkers > 0 {
-		p.TransferConfig.BatchWorkers = *overrides.BatchWorkers
+	if overrides.SegmentWorkers != nil && *overrides.SegmentWorkers > 0 {
+		p.TransferConfig.SegmentWorkers = *overrides.SegmentWorkers
 	}
 	if overrides.OffsetFallback != nil {
 		p.TransferConfig.OffsetFallback = *overrides.OffsetFallback
@@ -101,7 +101,25 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 
 	eng := engine.New(migrationID, p, h.DB)
-	col := stats.NewCollector(migrationID, eng.Events())
+
+	// Normalise effective config values so the display reflects what the engine will use.
+	effectiveBatchSize := p.TransferConfig.BatchSize
+	if effectiveBatchSize <= 0 {
+		effectiveBatchSize = 1000 // engine defaultBatchSize
+	}
+	effectiveTableWorkers := p.TransferConfig.TableWorkers
+	if effectiveTableWorkers < 1 {
+		effectiveTableWorkers = 1
+	}
+	effectiveSegmentWorkers := p.TransferConfig.SegmentWorkers
+	if effectiveSegmentWorkers < 1 {
+		effectiveSegmentWorkers = 1
+	}
+	col := stats.NewCollector(migrationID, eng.Events(), stats.MigrationConfig{
+		BatchSize:      effectiveBatchSize,
+		TableWorkers:   effectiveTableWorkers,
+		SegmentWorkers: effectiveSegmentWorkers,
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 

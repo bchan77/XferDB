@@ -28,8 +28,8 @@ const (
 // TransferConfig controls batch transfer behaviour.
 type TransferConfig struct {
 	BatchSize      int         `json:"batch_size"`
-	Workers        int         `json:"workers"`        // parallel tables (inter-table)
-	BatchWorkers   int         `json:"batch_workers"`  // parallel workers within one table (intra-table)
+	TableWorkers   int         `json:"table_workers"`   // tables to migrate concurrently (inter-table)
+	SegmentWorkers int         `json:"segment_workers"` // workers per table, splitting by PK range (intra-table)
 	OffsetFallback bool        `json:"offset_fallback"` // force offset-based segments even when PK range is available
 	Validate       bool        `json:"validate"`
 	OnError        ErrorPolicy `json:"on_error"`

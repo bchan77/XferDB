@@ -21,7 +21,7 @@
 ## Features
 
 - **3-phase migration** — schema creation, bulk data transfer (upsert), then indexes and constraints
-- **Parallel table migration** — migrate N tables concurrently with `--workers`
+- **Parallel table migration** — migrate N tables concurrently with `--table-workers`
 - **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
 - **Live progress display** — per-table status (done / in-progress / pending), rows, rate, and human-readable ETA for the whole migration
@@ -67,7 +67,7 @@ xferdb project create \
   --source postgres://user:pass@source-host:5432/mydb?sslmode=require \
   --target postgres://user:pass@target-host:5432/mydb?sslmode=require \
   --batch-size 5000 \
-  --workers 3
+  --table-workers 3
 ```
 
 ### 3. Run preflight
@@ -103,6 +103,7 @@ Migration started: 7fba746e-...
 Tracking progress (Ctrl+C to detach)...
 Phase: in_progress     Elapsed: 51s  ETA: 22m 10s
 Rows:  110,000 / 2,100,000   Rate: 1,506/s
+Batch: 5,000 rows   Table workers: 3   Segment workers: 4
 ────────────────────────────────────────────────────────────
   ✓  customers                       100,000 rows
   ●  order_items                     10,000 / 2,000,000 rows  (0%)
@@ -124,7 +125,7 @@ xferdb project create \
   --target <dsn> \
   [--description <desc>] \
   [--batch-size 1000] \
-  [--workers 1]
+  [--table-workers 1]
 
 # List all projects
 xferdb project list
@@ -161,16 +162,16 @@ xferdb migrate --status
 xferdb migrate --cancel
 
 # Migrate N tables in parallel (inter-table)
-xferdb migrate --workers 3
+xferdb migrate --table-workers 3
 
 # Split each table into N parallel segments (intra-table, PK-range by default)
-xferdb migrate --batch-workers 4
+xferdb migrate --segment-workers 4
 
 # Force OFFSET-based segment splitting instead of PK range
-xferdb migrate --batch-workers 4 --offset-segments
+xferdb migrate --segment-workers 4 --offset-segments
 
 # Combine both: 2 tables at once, each split across 4 workers
-xferdb migrate --workers 2 --batch-workers 4
+xferdb migrate --table-workers 2 --segment-workers 4
 
 # Truncate target tables before loading (keeps schema)
 xferdb migrate --truncate
@@ -204,7 +205,7 @@ xferdb list                     # List supported adapters
 | Truncate reload | `xferdb migrate --truncate` | Wipes target table data first, then loads fresh. Schema is kept. |
 | Recreate schema | `xferdb migrate --recreate-schema` | Drops and recreates target tables, then loads. Use when source schema has changed. |
 | Selective tables | `xferdb migrate --tables t1,t2` | Only migrate the named tables; all others are skipped. Supports `schema.table` notation. |
-| Parallel per-table | `xferdb migrate --batch-workers 4` | Split each table into N segments; workers read/write in parallel. Uses PK ranges by default (no OFFSET scan penalty); falls back to OFFSET for tables without an integer PK. Add `--offset-segments` to force OFFSET mode. |
+| Parallel per-table | `xferdb migrate --segment-workers 4` | Split each table into N segments; workers read/write in parallel. Uses PK ranges by default (no OFFSET scan penalty); falls back to OFFSET for tables without an integer PK. Add `--offset-segments` to force OFFSET mode. |
 | Schema only | API: `schema_only: true` | Creates tables, indexes, constraints — no data transfer. |
 | Data only | API: `data_only: true` | Skips schema creation — target schema must already exist. |
 
@@ -270,7 +271,7 @@ POST   /api/v1/projects/:id/preflight
 POST   /api/v1/projects/:id/analyze
 
 # Migrations
-POST   /api/v1/projects/:id/migrations      # body: {"workers":3,"truncate":true,"tables":["orders","public.customers"],...}
+POST   /api/v1/projects/:id/migrations      # body: {"table_workers":3,"segment_workers":4,"batch_size":5000,"truncate":true,"tables":["orders","public.customers"],...}
 GET    /api/v1/projects/:id/migrations
 GET    /api/v1/migrations/:id
 PATCH  /api/v1/migrations/:id               # body: {"action":"pause"|"resume"|"cancel"}
@@ -300,13 +301,13 @@ go build -o xferdb ./cmd/xferdb
 - [x] MySQL source and target
 - [x] SQLite source and target
 - [x] 3-phase migration (schema → data → post-schema)
-- [x] Parallel table migration (`--workers`)
+- [x] Parallel table migration (`--table-workers`)
 - [x] Preflight checks with actionable error hints
 - [x] Pause / resume / cancel
 - [x] Checkpoint-based crash recovery
 - [x] Per-table live progress display
 - [x] Selective table migration (`--tables`)
-- [x] Intra-table parallel workers (`--batch-workers`) with PK-range splitting and OFFSET fallback
+- [x] Intra-table parallel workers (`--segment-workers`) with PK-range splitting and OFFSET fallback
 - [ ] MongoDB adapter
 - [ ] Web UI
 - [ ] WebSocket live progress

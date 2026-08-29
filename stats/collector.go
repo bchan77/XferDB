@@ -28,7 +28,8 @@ type Collector struct {
 }
 
 // NewCollector creates a Collector for the given migration event stream.
-func NewCollector(migrationID string, events <-chan engine.ProgressEvent) *Collector {
+// config carries the effective transfer settings (batch size, worker counts) for display.
+func NewCollector(migrationID string, events <-chan engine.ProgressEvent, config MigrationConfig) *Collector {
 	now := time.Now()
 	return &Collector{
 		migrationID: migrationID,
@@ -40,6 +41,7 @@ func NewCollector(migrationID string, events <-chan engine.ProgressEvent) *Colle
 			MigrationID: migrationID,
 			Phase:       "pending",
 			StartedAt:   now,
+			Config:      config,
 		},
 		lastSampleTime: now,
 	}

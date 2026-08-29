@@ -145,7 +145,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			}
 		}
 
-		workers := cfg.Workers
+		workers := cfg.TableWorkers
 		if workers < 1 {
 			workers = 1
 		}

@@ -36,7 +36,7 @@ var projectCreateCmd = &cobra.Command{
 		tgtDSN, _ := cmd.Flags().GetString("target")
 		desc, _ := cmd.Flags().GetString("description")
 		batchSize, _ := cmd.Flags().GetInt("batch-size")
-		workers, _ := cmd.Flags().GetInt("workers")
+		tableWorkers, _ := cmd.Flags().GetInt("table-workers")
 
 		if name == "" || srcDSN == "" || tgtDSN == "" {
 			return fmt.Errorf("--name, --source, and --target are required")
@@ -57,9 +57,9 @@ var projectCreateCmd = &cobra.Command{
 				DSN:  tgtDSN,
 			},
 			"transfer_config": adapters.TransferConfig{
-				BatchSize: batchSize,
-				Workers:   workers,
-				OnError:   adapters.ErrorPolicyAbort,
+				BatchSize:    batchSize,
+				TableWorkers: tableWorkers,
+				OnError:      adapters.ErrorPolicyAbort,
 			},
 		}
 
@@ -87,7 +87,7 @@ func init() {
 	projectCreateCmd.Flags().String("target", "", "Target database DSN")
 	projectCreateCmd.Flags().StringP("description", "d", "", "Project description")
 	projectCreateCmd.Flags().Int("batch-size", 1000, "Rows per batch (higher = faster, more memory)")
-	projectCreateCmd.Flags().Int("workers", 1, "Number of tables to migrate concurrently")
+	projectCreateCmd.Flags().Int("table-workers", 1, "Default number of tables to migrate concurrently")
 }
 
 var projectListCmd = &cobra.Command{
