@@ -178,80 +178,11 @@ var projectPreflightCmd = &cobra.Command{
 			}
 		}
 
-		// Resolve name → ID.
-		resp, err := http.Get(ServerAddr + "/api/v1/projects")
+		projectID, err := resolveProjectID(name)
 		if err != nil {
-			return fmt.Errorf("API request failed: %w", err)
+			return err
 		}
-		defer resp.Body.Close()
-
-		var projects []map[string]any
-		json.NewDecoder(resp.Body).Decode(&projects)
-
-		var projectID string
-		for _, p := range projects {
-			if p["name"] == name {
-				projectID, _ = p["id"].(string)
-				break
-			}
-		}
-		if projectID == "" {
-			return fmt.Errorf("project %q not found", name)
-		}
-
-		preResp, err := http.Post(ServerAddr+"/api/v1/projects/"+projectID+"/preflight", "application/json", nil)
-		if err != nil {
-			return fmt.Errorf("API request failed: %w", err)
-		}
-		defer preResp.Body.Close()
-
-		var result struct {
-			Status string `json:"status"`
-			Source *struct {
-				CanRead        bool     `json:"can_read"`
-				CanWrite       bool     `json:"can_write"`
-				CanCreateTable bool     `json:"can_create_table"`
-				Errors         []string `json:"errors"`
-			} `json:"source"`
-			Target *struct {
-				CanRead        bool     `json:"can_read"`
-				CanWrite       bool     `json:"can_write"`
-				CanCreateTable bool     `json:"can_create_table"`
-				Errors         []string `json:"errors"`
-			} `json:"target"`
-			Error string `json:"error"`
-		}
-		json.NewDecoder(preResp.Body).Decode(&result)
-
-		if preResp.StatusCode != http.StatusOK {
-			return fmt.Errorf("preflight failed: %s", result.Error)
-		}
-
-		fmt.Printf("Project:  %s\n", name)
-		fmt.Printf("Status:   %s\n", result.Status)
-		if result.Source != nil {
-			fmt.Printf("\nSource:\n")
-			fmt.Printf("  can_read:         %v\n", result.Source.CanRead)
-			fmt.Printf("  can_write:        %v\n", result.Source.CanWrite)
-			fmt.Printf("  can_create_table: %v\n", result.Source.CanCreateTable)
-			for _, e := range result.Source.Errors {
-				fmt.Printf("  ERROR: %s\n", e)
-			}
-		}
-		if result.Target != nil {
-			fmt.Printf("\nTarget:\n")
-			fmt.Printf("  can_read:         %v\n", result.Target.CanRead)
-			fmt.Printf("  can_write:        %v\n", result.Target.CanWrite)
-			fmt.Printf("  can_create_table: %v\n", result.Target.CanCreateTable)
-			for _, e := range result.Target.Errors {
-				fmt.Printf("  ERROR: %s\n", e)
-			}
-		}
-
-		if result.Status != "ready" {
-			return fmt.Errorf("preflight check failed — fix the errors above before migrating")
-		}
-		return nil
+		return runPreflight(name, projectID)
 	},
 }
 

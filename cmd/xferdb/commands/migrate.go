@@ -21,15 +21,20 @@ Examples:
   xferdb migrate --project prod-to-staging`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectFlag, _ := cmd.Flags().GetString("project")
+		preflightOnly, _ := cmd.Flags().GetBool("preflight")
+
 		projectName, err := currentProject(projectFlag)
 		if err != nil {
 			return err
 		}
 
-		// Resolve project name → ID via the API.
 		projectID, err := resolveProjectID(projectName)
 		if err != nil {
 			return err
+		}
+
+		if preflightOnly {
+			return runPreflight(projectName, projectID)
 		}
 
 		// Start the migration.
@@ -40,13 +45,70 @@ Examples:
 		fmt.Printf("Migration started: %s\n", migrationID)
 		fmt.Println("Tracking progress (Ctrl+C to detach)...")
 
-		// Poll stats until complete or failed.
 		return pollStats(migrationID)
 	},
 }
 
 func init() {
 	migrateCmd.Flags().StringP("project", "p", "", "Project name (overrides current context)")
+	migrateCmd.Flags().Bool("preflight", false, "Check connectivity and permissions without migrating")
+}
+
+// runPreflight calls the preflight API and prints a human-readable result.
+func runPreflight(name, projectID string) error {
+	resp, err := http.Post(ServerAddr+"/api/v1/projects/"+projectID+"/preflight", "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Status string `json:"status"`
+		Source *struct {
+			CanRead        bool     `json:"can_read"`
+			CanWrite       bool     `json:"can_write"`
+			CanCreateTable bool     `json:"can_create_table"`
+			Errors         []string `json:"errors"`
+		} `json:"source"`
+		Target *struct {
+			CanRead        bool     `json:"can_read"`
+			CanWrite       bool     `json:"can_write"`
+			CanCreateTable bool     `json:"can_create_table"`
+			Errors         []string `json:"errors"`
+		} `json:"target"`
+		Error string `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("preflight failed: %s", result.Error)
+	}
+
+	fmt.Printf("Project:  %s\n", name)
+	fmt.Printf("Status:   %s\n", result.Status)
+	if result.Source != nil {
+		fmt.Printf("\nSource:\n")
+		fmt.Printf("  can_read:         %v\n", result.Source.CanRead)
+		fmt.Printf("  can_write:        %v\n", result.Source.CanWrite)
+		fmt.Printf("  can_create_table: %v\n", result.Source.CanCreateTable)
+		for _, e := range result.Source.Errors {
+			fmt.Printf("  ERROR: %s\n", e)
+		}
+	}
+	if result.Target != nil {
+		fmt.Printf("\nTarget:\n")
+		fmt.Printf("  can_read:         %v\n", result.Target.CanRead)
+		fmt.Printf("  can_write:        %v\n", result.Target.CanWrite)
+		fmt.Printf("  can_create_table: %v\n", result.Target.CanCreateTable)
+		for _, e := range result.Target.Errors {
+			fmt.Printf("  ERROR: %s\n", e)
+		}
+	}
+
+	if result.Status != "ready" {
+		return fmt.Errorf("preflight check failed — fix the errors above before migrating")
+	}
+	return nil
 }
 
 // resolveProjectID fetches the project list and returns the ID for the given name.
