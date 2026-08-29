@@ -11,13 +11,14 @@ import (
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	ph := &handlers.ProjectsHandler{DB: s.db}
+	ph := &handlers.ProjectsHandler{DB: s.db, Log: s.log}
 	mh := &handlers.MigrationsHandler{
 		DB:         s.db,
 		Mu:         &s.mu,
 		Engines:    s.engines,
 		Collectors: s.collectors,
 		Cancels:    s.cancels,
+		Log:        s.log,
 	}
 
 	// Health
@@ -43,5 +44,5 @@ func (s *Server) routes() http.Handler {
 
 	// TODO: WebSocket live progress at GET /api/v1/migrations/{id}/ws
 
-	return middleware.Logging(middleware.Recovery(mux))
+	return middleware.Logging(s.log, middleware.Recovery(s.log, mux))
 }

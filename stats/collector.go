@@ -2,6 +2,9 @@ package stats
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,14 +20,16 @@ type Collector struct {
 	migrationID string
 	projectID   string
 	events      <-chan engine.ProgressEvent
+	log         *slog.Logger
 
 	mu        sync.RWMutex
 	snapshot  StatsSnapshot
 	startedAt time.Time
 
 	// per-table tracking — order preserved, status updated as events arrive
-	tableIndex map[string]int // name → index in snapshot.TableDetails
-	tableRows  map[string]int64
+	tableIndex    map[string]int // name → index in snapshot.TableDetails
+	tableRows     map[string]int64
+	tableStarted  map[string]time.Time // for per-table elapsed logging
 
 	// rolling rate calculation
 	lastSampleTime time.Time
@@ -33,15 +38,20 @@ type Collector struct {
 
 // NewCollector creates a Collector for the given migration event stream.
 // config carries the effective transfer settings (batch size, worker counts) for display.
-func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEvent, config MigrationConfig) *Collector {
+func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEvent, config MigrationConfig, log *slog.Logger) *Collector {
 	now := time.Now()
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Collector{
-		migrationID: migrationID,
-		projectID:   projectID,
-		events:      events,
-		startedAt:   now,
-		tableIndex:  make(map[string]int),
-		tableRows:   make(map[string]int64),
+		migrationID:  migrationID,
+		projectID:    projectID,
+		events:       events,
+		log:          log.With("migration_id", migrationID),
+		startedAt:    now,
+		tableIndex:   make(map[string]int),
+		tableRows:    make(map[string]int64),
+		tableStarted: make(map[string]time.Time),
 		snapshot: StatsSnapshot{
 			MigrationID: migrationID,
 			ProjectID:   projectID,
@@ -57,7 +67,6 @@ func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEv
 // events channel is closed or ctx is cancelled.
 func (c *Collector) Start(ctx context.Context) {
 	go func() {
-		// Drain the events channel.
 		for {
 			select {
 			case <-ctx.Done():
@@ -125,15 +134,28 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 				c.tableIndex[name] = idx
 			}
 		}
+		// Log schema for each table.
+		for _, schema := range ev.TableSchemas {
+			cols := make([]string, len(schema.Columns))
+			for i, col := range schema.Columns {
+				cols[i] = col.Name + ":" + col.Type
+			}
+			c.log.Info("migration.table_schema",
+				"table", schema.Name,
+				"columns", len(schema.Columns),
+				"schema", strings.Join(cols, ", "),
+				"indexes", len(schema.Indexes),
+				"foreign_keys", len(schema.ForeignKeys),
+			)
+		}
 
 	case engine.EventTableStart:
 		s.Phase = "in_progress"
 		s.CurrentTable = ev.TableName
 		s.Tables.Total++
 		s.Tables.InProgress++
+		c.tableStarted[ev.TableName] = time.Now()
 		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			// Already pre-populated from EventMigrationStart; just update status.
-			// Only add to total if it wasn't counted upfront (count was 0/unknown).
 			if s.TableDetails[idx].Total == 0 && ev.RowsTotal > 0 {
 				s.Rows.Total += ev.RowsTotal
 				s.TableDetails[idx].Total = ev.RowsTotal
@@ -149,6 +171,10 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			})
 			c.tableIndex[ev.TableName] = idx
 		}
+		c.log.Info("migration.table_started",
+			"table", ev.TableName,
+			"rows_total", ev.RowsTotal,
+		)
 
 	case engine.EventBatch:
 		s.CurrentTable = ev.TableName
@@ -170,6 +196,12 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			s.TableDetails[idx].Status = "done"
 			s.TableDetails[idx].Transferred = ev.RowsTransferred
 		}
+		elapsed := time.Since(c.tableStarted[ev.TableName])
+		c.log.Info("migration.table_completed",
+			"table", ev.TableName,
+			"rows_transferred", ev.RowsTransferred,
+			"elapsed", fmt.Sprintf("%.1fs", elapsed.Seconds()),
+		)
 
 	case engine.EventTableFailed:
 		s.Tables.InProgress--
@@ -180,26 +212,43 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 				s.TableDetails[idx].Error = ev.Err.Error()
 			}
 		}
+		c.log.Error("migration.table_failed",
+			"table", ev.TableName,
+			"error", ev.Err,
+		)
 
 	case engine.EventComplete:
 		s.Phase = "complete"
 		s.CurrentTable = ""
 		s.ETASeconds = 0
+		elapsed := time.Since(c.startedAt)
+		c.log.Info("migration.completed",
+			"rows_transferred", s.Rows.Transferred,
+			"elapsed", fmt.Sprintf("%.1fs", elapsed.Seconds()),
+			"tables_completed", s.Tables.Completed,
+			"tables_failed", s.Tables.Failed,
+		)
 
 	case engine.EventError:
 		s.Phase = "failed"
 		if ev.Err != nil {
 			s.Errors = append(s.Errors, ev.Err.Error())
 		}
+		elapsed := time.Since(c.startedAt)
+		c.log.Error("migration.failed",
+			"error", ev.Err,
+			"elapsed", fmt.Sprintf("%.1fs", elapsed.Seconds()),
+		)
 
 	case engine.EventPaused:
 		s.Phase = "paused"
+		c.log.Info("migration.paused")
 
 	case engine.EventResumed:
 		s.Phase = "in_progress"
-		// Reset rate sample so we don't compute a stale rate over the pause gap.
 		c.lastSampleTime = time.Now()
 		c.lastSampleRows = s.Rows.Transferred
+		c.log.Info("migration.resumed")
 
 	case engine.EventSchemaPhase:
 		s.Phase = "schema"
@@ -224,8 +273,7 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 }
 
 // totalTransferred records the latest per-table row count from the event and
-// returns the sum across all tables. Each engine event carries a cumulative
-// per-table value, so we track them separately and sum to get the true total.
+// returns the sum across all tables.
 func (c *Collector) totalTransferred(ev engine.ProgressEvent) int64 {
 	c.tableRows[ev.TableName] = ev.RowsTransferred
 	var total int64
@@ -235,9 +283,7 @@ func (c *Collector) totalTransferred(ev engine.ProgressEvent) int64 {
 	return total
 }
 
-// updateReadWriteRates computes per-batch EMA read and write rates from the timing
-// data attached to each EventBatch. Each batch carries its own ReadDuration and
-// WriteDuration so the rates reflect actual source/target throughput independently.
+// updateReadWriteRates computes per-batch EMA read and write rates from timing data.
 func (c *Collector) updateReadWriteRates(s *StatsSnapshot, ev engine.ProgressEvent) {
 	if ev.BatchRows <= 0 {
 		return
@@ -274,7 +320,6 @@ func (c *Collector) updateRate(s *StatsSnapshot) {
 		if s.Rows.RatePerSecond == 0 {
 			s.Rows.RatePerSecond = instant
 		} else {
-			// Smooth with α=0.3
 			s.Rows.RatePerSecond = 0.3*instant + 0.7*s.Rows.RatePerSecond
 		}
 	}

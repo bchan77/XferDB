@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 
@@ -13,18 +13,23 @@ import (
 
 // Server is the XferDB REST API server.
 type Server struct {
-	db *state.MetaDB
+	db  *state.MetaDB
+	log *slog.Logger
 
 	mu         sync.Mutex
-	engines    map[string]*engine.Engine          // keyed by migration ID
-	collectors map[string]*stats.Collector        // keyed by migration ID
-	cancels    map[string]context.CancelFunc      // keyed by migration ID
+	engines    map[string]*engine.Engine
+	collectors map[string]*stats.Collector
+	cancels    map[string]context.CancelFunc
 }
 
 // NewServer creates a Server backed by the given state database.
-func NewServer(db *state.MetaDB) *Server {
+func NewServer(db *state.MetaDB, log *slog.Logger) *Server {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Server{
 		db:         db,
+		log:        log,
 		engines:    make(map[string]*engine.Engine),
 		collectors: make(map[string]*stats.Collector),
 		cancels:    make(map[string]context.CancelFunc),
@@ -33,13 +38,13 @@ func NewServer(db *state.MetaDB) *Server {
 
 // ListenAndServe starts the HTTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
-	// Clean up any migrations that were running when the server last stopped.
 	if n, err := s.db.MarkInterruptedMigrations(context.Background()); err != nil {
-		log.Printf("warn: could not mark interrupted migrations: %v", err)
+		s.log.Warn("could not mark interrupted migrations", "error", err)
 	} else if n > 0 {
-		log.Printf("Marked %d interrupted migration(s) as failed (server was restarted)", n)
+		s.log.Warn("marked interrupted migrations as failed", "count", n)
 	}
 
+	s.log.Info("server.started", "addr", addr)
 	mux := s.routes()
 	return http.ListenAndServe(addr, mux)
 }

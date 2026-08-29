@@ -4,6 +4,8 @@ import (
 	"runtime"
 	"runtime/metrics"
 	"time"
+
+	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
 
 // EventKind classifies a progress event.
@@ -39,8 +41,9 @@ type ProgressEvent struct {
 	MigrationID     string
 	Kind            EventKind
 	TableName       string
-	TableNames      []string         // set only for EventMigrationStart
-	TableCounts     map[string]int64 // set only for EventMigrationStart: table → row count
+	TableNames      []string                  // set only for EventMigrationStart
+	TableCounts     map[string]int64          // set only for EventMigrationStart: table → row count
+	TableSchemas    []adapters.TableSchema    // set only for EventMigrationStart: full column info
 	RowsTransferred int64
 	RowsTotal       int64
 	Timestamp       time.Time

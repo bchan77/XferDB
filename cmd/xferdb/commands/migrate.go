@@ -343,7 +343,7 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 		switch t.Status {
 		case "done":
 			marker = "✓"
-			detail = fmt.Sprintf("%s rows", fmtInt(t.Total))
+			detail = fmt.Sprintf("%s rows", fmtInt(t.Transferred))
 		case "in_progress":
 			marker = "●"
 			pct := 0

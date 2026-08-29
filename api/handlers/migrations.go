@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"sync"
@@ -23,6 +24,7 @@ type MigrationsHandler struct {
 	Engines    map[string]*engine.Engine
 	Collectors map[string]*stats.Collector
 	Cancels    map[string]context.CancelFunc
+	Log        *slog.Logger
 }
 
 // StartMigration handles POST /api/v1/projects/{id}/migrations.
@@ -120,11 +122,12 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	if effectiveSegmentWorkers < 1 {
 		effectiveSegmentWorkers = 1
 	}
+	migLog := h.Log.With("migration_id", migrationID, "project", p.Name, "project_id", projectID)
 	col := stats.NewCollector(migrationID, projectID, eng.Events(), stats.MigrationConfig{
 		BatchSize:      effectiveBatchSize,
 		TableWorkers:   effectiveTableWorkers,
 		SegmentWorkers: effectiveSegmentWorkers,
-	})
+	}, migLog)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -133,6 +136,22 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	h.Collectors[migrationID] = col
 	h.Cancels[migrationID] = cancel
 	h.Mu.Unlock()
+
+	cfg := p.TransferConfig
+	tables := cfg.Tables
+	if len(tables) == 0 {
+		tables = []string{"(all)"}
+	}
+	migLog.Info("migration.started",
+		"tables", tables,
+		"table_workers", effectiveTableWorkers,
+		"segment_workers", effectiveSegmentWorkers,
+		"batch_size", effectiveBatchSize,
+		"recreate_schema", cfg.RecreateSchema,
+		"truncate", cfg.Truncate,
+		"bulk_copy", cfg.BulkCopy,
+		"data_only", cfg.DataOnly,
+	)
 
 	col.Start(ctx)
 	go func() {
@@ -195,8 +214,10 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 	switch body.Action {
 	case "pause":
 		eng.Pause()
+		h.Log.Info("migration.paused", "migration_id", id)
 	case "resume":
 		eng.Resume()
+		h.Log.Info("migration.resumed", "migration_id", id)
 	case "cancel":
 		h.Mu.Lock()
 		cancel, hasCancel := h.Cancels[id]
@@ -205,6 +226,7 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 			cancel()
 		}
 		h.DB.SetMigrationError(r.Context(), id, fmt.Errorf("cancelled by user"))
+		h.Log.Info("migration.cancelled", "migration_id", id)
 	default:
 		writeError(w, http.StatusBadRequest, "action must be 'pause', 'resume', or 'cancel'")
 		return

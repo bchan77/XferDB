@@ -122,7 +122,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			tableCounts[t.Name] = n
 		}
 	}
-	e.emit(ProgressEvent{Kind: EventMigrationStart, TableNames: tableNames, TableCounts: tableCounts, Timestamp: time.Now()})
+	e.emit(ProgressEvent{Kind: EventMigrationStart, TableNames: tableNames, TableCounts: tableCounts, TableSchemas: tables, Timestamp: time.Now()})
 
 	dataOnly := cfg.DataOnly
 	schemaOnly := cfg.SchemaOnly
