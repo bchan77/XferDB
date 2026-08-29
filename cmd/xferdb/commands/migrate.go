@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,6 +23,12 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectFlag, _ := cmd.Flags().GetString("project")
 		preflightOnly, _ := cmd.Flags().GetBool("preflight")
+		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
+		truncate, _ := cmd.Flags().GetBool("truncate")
+
+		if recreateSchema && truncate {
+			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
+		}
 
 		projectName, err := currentProject(projectFlag)
 		if err != nil {
@@ -37,8 +44,7 @@ Examples:
 			return runPreflight(projectName, projectID)
 		}
 
-		// Start the migration.
-		migrationID, err := startMigration(projectID)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate)
 		if err != nil {
 			return err
 		}
@@ -52,6 +58,8 @@ Examples:
 func init() {
 	migrateCmd.Flags().StringP("project", "p", "", "Project name (overrides current context)")
 	migrateCmd.Flags().Bool("preflight", false, "Check connectivity and permissions without migrating")
+	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
+	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -135,11 +143,15 @@ func resolveProjectID(name string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"recreate_schema": recreateSchema,
+		"truncate":        truncate,
+	})
 	resp, err := http.Post(
 		ServerAddr+"/api/v1/projects/"+projectID+"/migrations",
 		"application/json",
-		strings.NewReader("{}"),
+		bytes.NewReader(body),
 	)
 	if err != nil {
 		return "", fmt.Errorf("start migration: %w", err)

@@ -31,8 +31,10 @@ type TransferConfig struct {
 	Workers    int         `json:"workers"`
 	Validate   bool        `json:"validate"`
 	OnError    ErrorPolicy `json:"on_error"`
-	DataOnly   bool        `json:"data_only"`   // skip schema creation; target schema must already exist
-	SchemaOnly bool        `json:"schema_only"` // create schema on target but do not transfer data
+	DataOnly       bool `json:"data_only"`       // skip schema creation; target schema must already exist
+	SchemaOnly     bool `json:"schema_only"`     // create schema on target but do not transfer data
+	RecreateSchema bool `json:"recreate_schema"` // drop and recreate tables before migrating
+	Truncate       bool `json:"truncate"`        // truncate tables before loading data (keeps schema)
 }
 
 // Project is a named migration project with a fixed source/target configuration.
@@ -186,6 +188,8 @@ type TargetAdapter interface {
 	ListTables(ctx context.Context) ([]TableSchema, error)
 	GetSchema(ctx context.Context, table string) (*TableSchema, error)
 	CreateTable(ctx context.Context, schema *TableSchema) error
+	DropTable(ctx context.Context, table string) error
+	TruncateTable(ctx context.Context, table string) error
 	AlterTable(ctx context.Context, table string, changes []SchemaChange) error
 	// CreateIndexes creates non-primary-key indexes. Called after all data is transferred
 	// so bulk inserts are faster and FK checks don't fire during the copy.

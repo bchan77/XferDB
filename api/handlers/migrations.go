@@ -32,6 +32,31 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Optional per-run TransferConfig overrides in the request body.
+	var overrides struct {
+		RecreateSchema *bool `json:"recreate_schema"`
+		Truncate       *bool `json:"truncate"`
+		DataOnly       *bool `json:"data_only"`
+		SchemaOnly     *bool `json:"schema_only"`
+		BatchSize      *int  `json:"batch_size"`
+	}
+	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
+	if overrides.RecreateSchema != nil {
+		p.TransferConfig.RecreateSchema = *overrides.RecreateSchema
+	}
+	if overrides.Truncate != nil {
+		p.TransferConfig.Truncate = *overrides.Truncate
+	}
+	if overrides.DataOnly != nil {
+		p.TransferConfig.DataOnly = *overrides.DataOnly
+	}
+	if overrides.SchemaOnly != nil {
+		p.TransferConfig.SchemaOnly = *overrides.SchemaOnly
+	}
+	if overrides.BatchSize != nil && *overrides.BatchSize > 0 {
+		p.TransferConfig.BatchSize = *overrides.BatchSize
+	}
+
 	migrationID := uuid.New().String()
 	mig := &adapters.Migration{
 		ID:        migrationID,

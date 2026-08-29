@@ -84,14 +84,19 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
-	dataOnly := e.project.TransferConfig.DataOnly
-	schemaOnly := e.project.TransferConfig.SchemaOnly
+	cfg := e.project.TransferConfig
+	dataOnly := cfg.DataOnly
+	schemaOnly := cfg.SchemaOnly
 
 	// Phase 1: Schema — create all target tables before any data is transferred.
-	// CreateTable uses IF NOT EXISTS so this is safe to re-run on resume.
 	if !dataOnly {
 		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
 		for _, schema := range tables {
+			if cfg.RecreateSchema {
+				if err := e.target.DropTable(ctx, schema.Name); err != nil {
+					return e.fail(ctx, fmt.Errorf("drop table %s: %w", schema.Name, err))
+				}
+			}
 			if err := e.target.CreateTable(ctx, &schema); err != nil {
 				return e.fail(ctx, fmt.Errorf("create table %s: %w", schema.Name, err))
 			}
@@ -105,6 +110,18 @@ func (e *Engine) Run(ctx context.Context) error {
 			return e.fail(ctx, err)
 		}
 		doneSet := completedTableSet(existingProgress)
+
+		// Truncate requested: clear existing data before loading.
+		// Skip when RecreateSchema is set — the table was just recreated, already empty.
+		if cfg.Truncate && !cfg.RecreateSchema {
+			for _, schema := range tables {
+				if !doneSet[schema.Name] {
+					if err := e.target.TruncateTable(ctx, schema.Name); err != nil {
+						return e.fail(ctx, fmt.Errorf("truncate table %s: %w", schema.Name, err))
+					}
+				}
+			}
+		}
 
 		for _, schema := range tables {
 			if doneSet[schema.Name] {
