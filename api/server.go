@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"sync"
 
@@ -32,6 +33,13 @@ func NewServer(db *state.MetaDB) *Server {
 
 // ListenAndServe starts the HTTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
+	// Clean up any migrations that were running when the server last stopped.
+	if n, err := s.db.MarkInterruptedMigrations(context.Background()); err != nil {
+		log.Printf("warn: could not mark interrupted migrations: %v", err)
+	} else if n > 0 {
+		log.Printf("Marked %d interrupted migration(s) as failed (server was restarted)", n)
+	}
+
 	mux := s.routes()
 	return http.ListenAndServe(addr, mux)
 }

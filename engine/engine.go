@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -84,14 +86,44 @@ func (e *Engine) Run(ctx context.Context) error {
 		return e.fail(ctx, fmt.Errorf("list source tables: %w", err))
 	}
 
-	dataOnly := e.project.TransferConfig.DataOnly
-	schemaOnly := e.project.TransferConfig.SchemaOnly
+	cfg := e.project.TransferConfig
+
+	// Filter to only the requested tables when --tables is specified.
+	if len(cfg.Tables) > 0 {
+		filtered := filterTables(tables, cfg.Tables)
+		// Fail fast if any requested name has no match in the source.
+		if missing := missingRequestedTables(filtered, cfg.Tables); len(missing) > 0 {
+			return e.fail(ctx, fmt.Errorf("tables not found in source: %s", strings.Join(missing, ", ")))
+		}
+		if len(filtered) == 0 {
+			return e.fail(ctx, fmt.Errorf("no matching tables found for filter: %v", cfg.Tables))
+		}
+		tables = filtered
+	}
+
+	// Fetch row counts for all tables upfront so the ETA covers the whole migration.
+	tableNames := make([]string, len(tables))
+	tableCounts := make(map[string]int64, len(tables))
+	for i, t := range tables {
+		tableNames[i] = t.Name
+		if n, err := e.source.GetRowCount(ctx, t.Name); err == nil {
+			tableCounts[t.Name] = n
+		}
+	}
+	e.emit(ProgressEvent{Kind: EventMigrationStart, TableNames: tableNames, TableCounts: tableCounts, Timestamp: time.Now()})
+
+	dataOnly := cfg.DataOnly
+	schemaOnly := cfg.SchemaOnly
 
 	// Phase 1: Schema — create all target tables before any data is transferred.
-	// CreateTable uses IF NOT EXISTS so this is safe to re-run on resume.
 	if !dataOnly {
 		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
 		for _, schema := range tables {
+			if cfg.RecreateSchema {
+				if err := e.target.DropTable(ctx, schema.Name); err != nil {
+					return e.fail(ctx, fmt.Errorf("drop table %s: %w", schema.Name, err))
+				}
+			}
 			if err := e.target.CreateTable(ctx, &schema); err != nil {
 				return e.fail(ctx, fmt.Errorf("create table %s: %w", schema.Name, err))
 			}
@@ -106,13 +138,60 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		doneSet := completedTableSet(existingProgress)
 
+		// Truncate requested: clear existing data before loading.
+		// Skip when RecreateSchema is set — the table was just recreated, already empty.
+		if cfg.Truncate && !cfg.RecreateSchema {
+			for _, schema := range tables {
+				if !doneSet[schema.Name] {
+					if err := e.target.TruncateTable(ctx, schema.Name); err != nil {
+						return e.fail(ctx, fmt.Errorf("truncate table %s: %w", schema.Name, err))
+					}
+				}
+			}
+		}
+
+		workers := cfg.TableWorkers
+		if workers < 1 {
+			workers = 1
+		}
+
+		// Feed pending tables into a work channel; workers drain it concurrently.
+		work := make(chan adapters.TableSchema, len(tables))
 		for _, schema := range tables {
-			if doneSet[schema.Name] {
-				continue
+			if !doneSet[schema.Name] {
+				work <- schema
 			}
-			if err := e.transferTable(ctx, schema); err != nil {
-				return e.fail(ctx, err)
-			}
+		}
+		close(work)
+
+		workerCtx, cancelWorkers := context.WithCancel(ctx)
+		defer cancelWorkers()
+
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var firstErr error
+
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for schema := range work {
+					if err := e.transferTable(workerCtx, schema); err != nil {
+						mu.Lock()
+						if firstErr == nil {
+							firstErr = err
+							cancelWorkers() // stop other workers on first error
+						}
+						mu.Unlock()
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+
+		if firstErr != nil {
+			return e.fail(ctx, firstErr)
 		}
 	}
 
@@ -177,6 +256,49 @@ func (e *Engine) fail(ctx context.Context, err error) error {
 	e.db.SetMigrationError(ctx, e.migrationID, err) //nolint:errcheck
 	e.emit(ProgressEvent{Kind: EventError, Err: err, Timestamp: time.Now()})
 	return err
+}
+
+// filterTables returns the subset of schemas whose names match the filter list.
+// Entries in filters may be bare table names ("orders") or schema-qualified
+// ("public.orders"); the schema prefix is stripped before comparison.
+func filterTables(tables []adapters.TableSchema, filters []string) []adapters.TableSchema {
+	want := make(map[string]bool, len(filters))
+	for _, f := range filters {
+		// Normalise: strip schema prefix so "public.orders" → "orders".
+		bare := f
+		if idx := strings.LastIndex(f, "."); idx >= 0 {
+			bare = f[idx+1:]
+		}
+		want[strings.ToLower(bare)] = true
+		want[strings.ToLower(f)] = true // keep full name too for forward compat
+	}
+	out := tables[:0:0] // nil-safe empty slice
+	for _, t := range tables {
+		if want[strings.ToLower(t.Name)] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// missingRequestedTables returns the names from the requested filter list that
+// have no corresponding entry in the found (post-filter) tables slice.
+func missingRequestedTables(found []adapters.TableSchema, requested []string) []string {
+	foundSet := make(map[string]bool, len(found))
+	for _, t := range found {
+		foundSet[strings.ToLower(t.Name)] = true
+	}
+	var missing []string
+	for _, req := range requested {
+		bare := req
+		if idx := strings.LastIndex(req, "."); idx >= 0 {
+			bare = req[idx+1:]
+		}
+		if !foundSet[strings.ToLower(bare)] && !foundSet[strings.ToLower(req)] {
+			missing = append(missing, req)
+		}
+	}
+	return missing
 }
 
 // checkPause blocks if a pause signal is pending, updating state accordingly.

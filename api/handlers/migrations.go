@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -32,6 +33,61 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Prevent concurrent migrations for the same project.
+	existing, err := h.DB.ListMigrations(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, m := range existing {
+		if m.Status == adapters.StatusPending || m.Status == adapters.StatusInProgress {
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("migration %s is already %s for this project — wait for it to finish or delete it first", m.ID, m.Status))
+			return
+		}
+	}
+
+	// Optional per-run TransferConfig overrides in the request body.
+	var overrides struct {
+		RecreateSchema *bool    `json:"recreate_schema"`
+		Truncate       *bool    `json:"truncate"`
+		DataOnly       *bool    `json:"data_only"`
+		SchemaOnly     *bool    `json:"schema_only"`
+		BatchSize      *int     `json:"batch_size"`
+		TableWorkers   *int     `json:"table_workers"`
+		SegmentWorkers *int     `json:"segment_workers"`
+		OffsetFallback *bool    `json:"offset_fallback"`
+		Tables         []string `json:"tables"`
+	}
+	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
+	if overrides.RecreateSchema != nil {
+		p.TransferConfig.RecreateSchema = *overrides.RecreateSchema
+	}
+	if overrides.Truncate != nil {
+		p.TransferConfig.Truncate = *overrides.Truncate
+	}
+	if overrides.DataOnly != nil {
+		p.TransferConfig.DataOnly = *overrides.DataOnly
+	}
+	if overrides.SchemaOnly != nil {
+		p.TransferConfig.SchemaOnly = *overrides.SchemaOnly
+	}
+	if overrides.BatchSize != nil && *overrides.BatchSize > 0 {
+		p.TransferConfig.BatchSize = *overrides.BatchSize
+	}
+	if overrides.TableWorkers != nil && *overrides.TableWorkers > 0 {
+		p.TransferConfig.TableWorkers = *overrides.TableWorkers
+	}
+	if overrides.SegmentWorkers != nil && *overrides.SegmentWorkers > 0 {
+		p.TransferConfig.SegmentWorkers = *overrides.SegmentWorkers
+	}
+	if overrides.OffsetFallback != nil {
+		p.TransferConfig.OffsetFallback = *overrides.OffsetFallback
+	}
+	if len(overrides.Tables) > 0 {
+		p.TransferConfig.Tables = overrides.Tables
+	}
+
 	migrationID := uuid.New().String()
 	mig := &adapters.Migration{
 		ID:        migrationID,
@@ -45,7 +101,25 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 
 	eng := engine.New(migrationID, p, h.DB)
-	col := stats.NewCollector(migrationID, eng.Events())
+
+	// Normalise effective config values so the display reflects what the engine will use.
+	effectiveBatchSize := p.TransferConfig.BatchSize
+	if effectiveBatchSize <= 0 {
+		effectiveBatchSize = 1000 // engine defaultBatchSize
+	}
+	effectiveTableWorkers := p.TransferConfig.TableWorkers
+	if effectiveTableWorkers < 1 {
+		effectiveTableWorkers = 1
+	}
+	effectiveSegmentWorkers := p.TransferConfig.SegmentWorkers
+	if effectiveSegmentWorkers < 1 {
+		effectiveSegmentWorkers = 1
+	}
+	col := stats.NewCollector(migrationID, eng.Events(), stats.MigrationConfig{
+		BatchSize:      effectiveBatchSize,
+		TableWorkers:   effectiveTableWorkers,
+		SegmentWorkers: effectiveSegmentWorkers,
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -118,8 +192,16 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 		eng.Pause()
 	case "resume":
 		eng.Resume()
+	case "cancel":
+		h.Mu.Lock()
+		cancel, hasCancel := h.Cancels[id]
+		h.Mu.Unlock()
+		if hasCancel {
+			cancel()
+		}
+		h.DB.SetMigrationError(r.Context(), id, fmt.Errorf("cancelled by user"))
 	default:
-		writeError(w, http.StatusBadRequest, "action must be 'pause' or 'resume'")
+		writeError(w, http.StatusBadRequest, "action must be 'pause', 'resume', or 'cancel'")
 		return
 	}
 

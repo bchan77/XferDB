@@ -129,6 +129,16 @@ func (t *Target) CreateConstraints(_ context.Context, _ string, _ []adapters.For
 	return nil
 }
 
+func (t *Target) DropTable(ctx context.Context, table string) error {
+	_, err := t.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s`, quote(table)))
+	return err
+}
+
+func (t *Target) TruncateTable(ctx context.Context, table string) error {
+	_, err := t.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s`, quote(table)))
+	return err
+}
+
 func (t *Target) AlterTable(ctx context.Context, table string, changes []adapters.SchemaChange) error {
 	for _, change := range changes {
 		switch change.Type {

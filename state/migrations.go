@@ -102,6 +102,23 @@ func (m *MetaDB) ListMigrations(ctx context.Context, projectID string) ([]adapte
 	return migs, nil
 }
 
+// MarkInterruptedMigrations marks any pending or in_progress migrations as failed.
+// Called on server startup to clean up migrations that were running when the server last stopped.
+func (m *MetaDB) MarkInterruptedMigrations(ctx context.Context) (int, error) {
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE migrations SET status = ?, completed_at = ?, error = ?
+		 WHERE status IN (?, ?)`,
+		string(adapters.StatusFailed), time.Now(),
+		"interrupted by server restart",
+		string(adapters.StatusPending), string(adapters.StatusInProgress),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark interrupted migrations: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // SetMigrationStatus updates the status and optional timestamps of a migration.
 func (m *MetaDB) SetMigrationStatus(ctx context.Context, id string, status adapters.MigrationStatus) error {
 	var err error
