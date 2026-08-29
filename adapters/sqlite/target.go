@@ -212,12 +212,18 @@ func (t *Target) CheckPermissions(ctx context.Context) (*adapters.PermissionChec
 	// Probe write access by creating and immediately dropping a sentinel table.
 	_, err := t.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _xferdb_probe (id INTEGER PRIMARY KEY)`)
 	if err != nil {
-		check.Errors = append(check.Errors, fmt.Sprintf("write check failed: %v", err))
+		check.Errors = append(check.Errors, fmt.Sprintf("create table check failed: %v", err))
 		return check, nil
 	}
-	t.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
-	check.CanWrite = true
 	check.CanCreateTable = true
 
+	_, err = t.db.ExecContext(ctx, `INSERT INTO _xferdb_probe DEFAULT VALUES`)
+	if err != nil {
+		check.Errors = append(check.Errors, fmt.Sprintf("write check failed: %v", err))
+	} else {
+		check.CanWrite = true
+	}
+
+	t.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
 }

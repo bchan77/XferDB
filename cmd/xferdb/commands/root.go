@@ -26,7 +26,8 @@ Then use projects and migrations:
   xferdb project create --name myproject --source sqlite:///src.db --target sqlite:///dst.db
   xferdb project use myproject
   xferdb migrate`,
-	Version: "0.2.0",
+	Version:      "0.2.0",
+	SilenceUsage: true,
 }
 
 func Execute() error {
