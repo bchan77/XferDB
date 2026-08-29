@@ -71,7 +71,7 @@ var projectCreateCmd = &cobra.Command{
 		if resp.StatusCode != http.StatusCreated {
 			return fmt.Errorf("server error %d: %v", resp.StatusCode, result["error"])
 		}
-		fmt.Printf("Created project %q (id: %v)\n", name, result["ID"])
+		fmt.Printf("Created project %q (id: %v)\n", name, result["id"])
 		return nil
 	},
 }
@@ -94,10 +94,10 @@ var projectListCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		var projects []struct {
-			ID          string    `json:"ID"`
-			Name        string    `json:"Name"`
-			Description string    `json:"Description"`
-			CreatedAt   time.Time `json:"CreatedAt"`
+			ID          string    `json:"id"`
+			Name        string    `json:"name"`
+			Description string    `json:"description"`
+			CreatedAt   time.Time `json:"created_at"`
 		}
 		json.NewDecoder(resp.Body).Decode(&projects)
 
@@ -150,7 +150,7 @@ var projectShowCmd = &cobra.Command{
 		json.NewDecoder(resp.Body).Decode(&projects)
 
 		for _, p := range projects {
-			if p["Name"] == name {
+			if p["name"] == name {
 				data, _ := json.MarshalIndent(p, "", "  ")
 				fmt.Println(string(data))
 				return nil
