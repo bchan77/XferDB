@@ -24,6 +24,7 @@ type StatsSnapshot struct {
 	CurrentTable   string
 	ETASeconds     float64
 	Errors         []string
+	Resource       *ResourceStats `json:"resource,omitempty"`
 }
 
 // TableStats counts tables by state.
@@ -51,4 +52,13 @@ type RowStats struct {
 	RatePerSecond float64 // overall throughput (rows written/s), time-windowed
 	ReadRate      float64 // source read throughput (rows/s), per-batch EMA
 	WriteRate     float64 // target write throughput (rows/s), per-batch EMA
+}
+
+// ResourceStats holds point-in-time process resource consumption for a migration.
+type ResourceStats struct {
+	Goroutines int     // current goroutine count
+	MemAllocMB float64 // heap allocation (MiB)
+	MemSysMB   float64 // total OS memory obtained (MiB)
+	GCNum      uint32  // completed GC cycles
+	CPUPercent  float64 // fraction of one CPU; multiply by GOMAXPROCS for total
 }

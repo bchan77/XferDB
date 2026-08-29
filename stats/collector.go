@@ -8,6 +8,9 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/engine"
 )
 
+// resourceSampleInterval is how often the collector samples process resource usage.
+const resourceSampleInterval = 3 * time.Second
+
 // Collector consumes a stream of engine.ProgressEvents and maintains a
 // thread-safe rolling snapshot of the migration's current statistics.
 type Collector struct {
@@ -54,6 +57,7 @@ func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEv
 // events channel is closed or ctx is cancelled.
 func (c *Collector) Start(ctx context.Context) {
 	go func() {
+		// Drain the events channel.
 		for {
 			select {
 			case <-ctx.Done():
@@ -63,6 +67,28 @@ func (c *Collector) Start(ctx context.Context) {
 					return
 				}
 				c.apply(ev)
+			}
+		}
+	}()
+
+	// Periodically sample resource usage in the background.
+	go func() {
+		ticker := time.NewTicker(resourceSampleInterval)
+		defer ticker.Stop()
+		// Fire immediately so the first stats snapshot already has resource data.
+		c.apply(engine.ProgressEvent{
+			Kind:     engine.EventResourceSample,
+			Resource: engine.SampleResource(),
+		})
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.apply(engine.ProgressEvent{
+					Kind:     engine.EventResourceSample,
+					Resource: engine.SampleResource(),
+				})
 			}
 		}
 	}()
@@ -180,6 +206,18 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 
 	case engine.EventPostSchemaPhase:
 		s.Phase = "post_schema"
+
+	case engine.EventResourceSample:
+		if ev.Resource == nil {
+			break
+		}
+		s.Resource = &ResourceStats{
+			Goroutines: ev.Resource.Goroutines,
+			MemAllocMB: ev.Resource.MemAllocMB,
+			MemSysMB:   ev.Resource.MemSysMB,
+			GCNum:      ev.Resource.GCNum,
+			CPUPercent: ev.Resource.CPUPercent,
+		}
 	}
 
 	s.Tables.Pending = s.Tables.Total - s.Tables.Completed - s.Tables.InProgress - s.Tables.Failed

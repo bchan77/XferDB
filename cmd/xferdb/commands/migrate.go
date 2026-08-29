@@ -329,7 +329,14 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 	cfg := snap.Config
 	lines = append(lines, fmt.Sprintf("Batch: %s rows   Table workers: %d   Segment workers: %d",
 		fmtInt(int64(cfg.BatchSize)), cfg.TableWorkers, cfg.SegmentWorkers))
-	lines = append(lines, strings.Repeat("─", 60))
+	if snap.Resource != nil {
+		r := snap.Resource
+		lines = append(lines, fmt.Sprintf("Goroutines: %-5d  Heap: %.1f MiB  Sys: %.1f MiB  CPU: %.1f%%  GC: %d",
+			r.Goroutines, r.MemAllocMB, r.MemSysMB, r.CPUPercent, r.GCNum))
+		lines = append(lines, strings.Repeat("─", 60))
+	} else {
+		lines = append(lines, strings.Repeat("─", 60))
+	}
 
 	for _, t := range snap.TableDetails {
 		var marker, detail string
