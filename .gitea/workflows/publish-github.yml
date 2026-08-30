@@ -21,6 +21,8 @@ jobs:
 
       - name: Fetch main and tags
         shell: bash
+        env:
+          GIT_SSL_NO_VERIFY: "true"
         run: |
           set -euo pipefail
           git fetch origin main:refs/remotes/origin/main
