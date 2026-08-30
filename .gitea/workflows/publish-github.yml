@@ -1,0 +1,48 @@
+name: Publish to GitHub
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (for example, v0.2.0)"
+        required: true
+
+jobs:
+  publish:
+    runs-on: rocky9.8
+
+    steps:
+      - name: Checkout Gitea repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+        env:
+          GIT_SSL_NO_VERIFY: "true"
+
+      - name: Fetch main and tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main:refs/remotes/origin/main
+          git fetch origin '+refs/tags/*:refs/tags/*'
+
+      - name: Verify release tag exists
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/tags/${RELEASE_TAG}"
+          git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"
+
+      - name: Push main and release tag to GitHub
+        shell: bash
+        env:
+          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git push \
+            "https://x-access-token:${GH_MIRROR_TOKEN}@github.com/bchan77/XferDB.git" \
+            origin/main:refs/heads/main \
+            "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
