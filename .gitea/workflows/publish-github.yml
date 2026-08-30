@@ -9,7 +9,7 @@ on:
 
 jobs:
   publish:
-    runs-on: rocky9.8
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Gitea repository
