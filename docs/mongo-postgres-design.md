@@ -40,7 +40,11 @@ xferdb migrate          ← uses saved schema plan; no re-sampling at runtime
 ```
 
 The schema plan is a prerequisite for migration. `xferdb migrate` will fail fast if no
-plan exists for a mongo→postgres project.
+plan exists for a collection included in the run.
+
+`analyze` **persists the recommended plan as a draft** immediately. `project schema --set`
+only overrides individual fields. The user does not have to `--set` every field before
+migrating.
 
 ---
 
@@ -55,7 +59,16 @@ db.collection.aggregate([{ $sample: { size: N } }])
 ```
 
 Default sample size: **2,000 documents**. Configurable via `--sample-size` on the
-`analyze` command. Larger samples improve accuracy at the cost of analysis time.
+`analyze` command only (not a global project setting). Larger samples improve accuracy
+at the cost of analysis time. Rare fields the sample never saw are handled at transfer
+time (see Runtime extras), not by raising the default N.
+
+Read preference: `secondaryPreferred` for both sampling and `ReadBatch`, so analysis
+and migration do not contend with the application's primary.
+
+`ListTables` / sampling skip: `system.*` collections, views, time-series collections,
+and GridFS (`*.files` / `*.chunks`). Compound `_id` (document-typed) is out of scope
+for v1 — analysis fails that collection with a clear error.
 
 For each document in the sample, walk every key recursively and record:
 - Field name (dot-notation for nested: `address.city`)
@@ -107,7 +120,19 @@ Flattening rules:
 - Arrays of documents are never flattened — stored as `jsonb`.
 
 Per-field decision: the user can set `address=flatten` and `metadata=jsonb` independently.
-The default for any nested document field is `jsonb`.
+The default for any nested document field is `jsonb`. Flatten is one level only — never
+recurse. Normalizing arrays-of-documents into child tables is out of scope.
+
+### Column names
+
+Inference sanitizes every `pg_column`:
+- Invalid identifier characters → `_`
+- Leading digit → prefix `_`
+- Truncate to 63 bytes (Postgres identifier limit)
+- On collision (`address.city` flatten → `address_city` vs a top-level `address_city`),
+  suffix `_2`, `_3`, …
+
+The original Mongo field path is always preserved in `schema_plans.field_name`.
 
 ---
 
@@ -158,8 +183,8 @@ output flags every polymorphic field as a warning so the user can review the dec
 | `String`          | `text`         | none |
 | `UUID` (Binary subtype 4) | `uuid` | `text` |
 
-The column is always named `_id` in the target by default. Rename is supported via the
-schema plan (`_id → id`) but creates a mismatch the user must be aware of.
+The column is always named `_id` in the target by default. Rename to `id` is a
+schema-plan override, not the default. `_id` cannot be skipped — it is the resume key.
 
 ---
 
@@ -167,26 +192,54 @@ schema plan (`_id → id`) but creates a mismatch the user must be aware of.
 
 ### What It Stores
 
-The schema plan is the authoritative record of user-approved field decisions for a
-project. It is persisted in the state DB and read by the Mongo source adapter at
-migration time.
+The schema plan is the authoritative record of field decisions for a project. `analyze`
+writes the inferred recommendation. User `--set` marks those rows `overridden`.
+Re-running `analyze` without `--reset` refreshes non-overridden rows only.
 
-One row per field per collection:
+One row per field per collection. A parent with `strategy = flatten` is **not** a
+target column: `pg_column` and `pg_type` are empty, and each child key has its own row.
 
 ```sql
 CREATE TABLE schema_plans (
     project_id   TEXT     NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     collection   TEXT     NOT NULL,
     field_name   TEXT     NOT NULL,   -- dot-notation for nested: "address.city"
-    pg_column    TEXT     NOT NULL,   -- target column name (may differ from field_name)
-    pg_type      TEXT     NOT NULL,   -- e.g. "text", "bigint", "jsonb", "timestamptz"
+    pg_column    TEXT     NOT NULL DEFAULT '',  -- empty when strategy is flatten or skip
+    pg_type      TEXT     NOT NULL DEFAULT '',  -- empty when strategy is flatten or skip
     strategy     TEXT     NOT NULL,   -- "direct" | "flatten" | "as_jsonb" | "skip"
     is_pk        BOOLEAN  NOT NULL DEFAULT FALSE,
     nullable     BOOLEAN  NOT NULL DEFAULT TRUE,
+    overridden   BOOLEAN  NOT NULL DEFAULT FALSE, -- true after user --set; analyze will not clobber
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (project_id, collection, field_name)
 );
 ```
+
+### Plan injection (required)
+
+`SourceAdapter` only receives `ConnectionConfig` today. The Mongo adapter cannot see
+the state DB. The engine loads the plan after `Connect` and injects it:
+
+```go
+type PlanConsumer interface {
+    SetPlan(plan []state.SchemaPlanRow) error
+}
+```
+
+`ListTables` / `GetSchema` then return `TableSchema` built from the plan (Postgres column
+names and types, plus btree indexes that survived translation), plus a nullable
+`_extra jsonb` column that is not a plan row. If a source field is already named
+`_extra`, the sanitizer suffixes it (`_extra_2`). Phase 1 `CreateTable` uses that
+schema unchanged.
+
+If a collection in the run has no plan rows, the engine fails before Phase 1.
+
+### Frozen copy on the migration
+
+At migration start, the engine copies the project plan onto the migration record
+(`migrations.schema_plan JSON`). Resume and `ReadBatch` conversion use the frozen copy,
+not the live `schema_plans` table, so a `--set` during a run cannot change conversion
+mid-flight.
 
 ### Strategies
 
@@ -200,6 +253,31 @@ CREATE TABLE schema_plans (
 ---
 
 ## Phase 2 — Data Transfer
+
+### Engine change — sequential keyset resume (blocker)
+
+Today `transferTableSequential` always calls `ReadBatch` with `Offset`/`Limit` and
+resumes as `offset = rowsTransferred`. Checkpoints have `last_pk TEXT` but the
+sequential path never writes or reads it. `Batch.LastPK` is `int64` and is only used
+by integer PK-range workers.
+
+Mongo OFFSET is a collection scan. Sequential keyset is not optional for this adapter.
+
+Required engine/adapter type changes:
+
+1. Add `LastKey string` to `Batch` (opaque resume token). Keep `LastPK int64` for
+   integer segment workers — do not overload it.
+2. Sequential loop: on resume, if the last checkpoint `LastPK` is non-empty, pass it as
+   `BatchOptions.LastPK` and do **not** use OFFSET. After each successful write, store
+   `batch.LastKey` into `checkpoints.last_pk`.
+3. SQL adapters keep current OFFSET sequential behaviour: they leave `LastKey` empty,
+   so resume stays offset-based for Postgres/MySQL/SQLite.
+4. Mongo `ReadBatch` ignores `Offset` and uses `LastPK` exclusively.
+5. `GetPKRange` on Mongo returns "not supported". `_id` as `text` fails
+   `detectIntegerPK`, so `--segment-workers` will not take the integer PK path. Table-level
+   `--table-workers` still works (collections are independent; no FKs).
+
+This is task **M0**. The Mongo adapter cannot be used without it.
 
 ### ReadBatch (Mongo Source)
 
@@ -233,23 +311,41 @@ By the time `Batch.Records` is returned from `ReadBatch`, every value is a plain
 that any target adapter can handle. The Mongo adapter reads the schema plan to know what
 type each field should become and applies the mapping:
 
+Do **not** `json.Marshal` `bson.D` / `bson.M` directly. `bson.D` encodes as
+`[{"Key":"city","Value":"NYC"}]`, not `{"city":"NYC"}`. Conversion walks the value and
+produces a `map[string]interface{}` (or `[]interface{}` for arrays), converting nested
+ObjectId / DateTime / Decimal128 / Binary along the way, then `json.Marshal`s that.
+
 ```
-primitive.ObjectID  → string  (hex)
-primitive.DateTime  → time.Time
-primitive.Decimal128 → string  (then target parses as numeric)
-bson.D / bson.M     → json.Marshal → []byte  (target receives as jsonb)
-primitive.A (array) → json.Marshal → []byte
-int32               → int64
-int64               → int64
-float64             → float64
-bool                → bool
-[]byte              → []byte
-nil                 → nil
+primitive.ObjectID   → string (hex)
+primitive.DateTime   → time.Time
+primitive.Decimal128 → string  (lib/pq sends text; INSERT column type is numeric)
+bson.D / bson.M      → recursive map → json.Marshal → []byte
+primitive.A          → recursive slice → json.Marshal → []byte
+int32                → int64
+int64                → int64
+float64              → float64
+bool                 → bool
+[]byte               → []byte
+nil                  → nil
 ```
+
+Unmapped BSON types (MinKey, MaxKey, JavaScript, DBPointer, Timestamp, CodeWithScope)
+become `jsonb` via Extended JSON, and analysis warns.
 
 Fields with strategy `skip` are omitted from the record map entirely.
 Fields with strategy `flatten` are expanded: `{"address": {"city":"NYC","zip":"10001"}}`
 becomes `{"address_city": "NYC", "address_zip": "10001"}` in the record map.
+
+### Runtime extras and type mismatches
+
+Sampling will miss rare fields. Every target table gets an `_extra jsonb` column.
+
+| Situation | Default |
+|-----------|---------|
+| Field not in the plan | Stash `{field_path: value}` into `_extra`. Do not fail. |
+| Planned field, value BSON type does not convert to `pg_type` | `on_error=abort` (default): fail the batch. `on_error=skip`: skip the document. |
+| Field in plan with strategy `skip` | Dropped. |
 
 ### Segment Workers
 
@@ -268,27 +364,23 @@ performs poorly on large collections. We use the keyset cursor exclusively.
 
 After all documents are transferred, create indexes on the target Postgres table.
 
-Source: the Mongo source adapter's `GetSchema` (reading from the schema plan) returns a
-`TableSchema` with an `Indexes []IndexDef` field populated from MongoDB's `listIndexes`
-output — translated to Postgres index definitions.
+`IndexDef` today is `{Name, Columns, Unique}` — no DESC, no `WHERE`, no expression
+indexes. v1 only translates what that struct can express:
 
-MongoDB → Postgres index translation:
+| MongoDB index type       | v1 behaviour | Notes |
+|--------------------------|--------------|-------|
+| Single field ascending   | `CREATE INDEX` on the mapped `pg_column` | Direct |
+| Compound of mapped columns | `CREATE INDEX (col1, col2)` | Direct |
+| Unique                   | `CREATE UNIQUE INDEX` | Warn: Mongo unique-on-missing ≠ Postgres (Postgres allows multiple NULLs) |
+| Nested path on a `jsonb` column (`address.city`) | Skip + warn | Needs an expression index `IndexDef` cannot represent |
+| Descending               | Create as btree (direction ignored) + warn | `IndexDef` has no DESC |
+| Text / 2dsphere / TTL / hashed / wildcard / partial | Skip + warn | Deferred |
 
-| MongoDB index type       | Postgres equivalent        | Notes |
-|--------------------------|---------------------------|-------|
-| Single field ascending   | `CREATE INDEX ... (col ASC)` | Direct |
-| Single field descending  | `CREATE INDEX ... (col DESC)` | Direct |
-| Compound                 | `CREATE INDEX ... (col1, col2)` | Direct |
-| Unique                   | `CREATE UNIQUE INDEX ...` | Direct |
-| Text index               | `CREATE INDEX ... USING gin(to_tsvector(...))` | Approximate |
-| 2dsphere / geo           | Skip + warn | No Postgres equivalent without PostGIS |
-| TTL index                | Skip + warn | Postgres has no native TTL |
-| Hashed                   | Skip + warn | No equivalent |
-| Wildcard                 | Skip + warn | No equivalent |
-| Partial                  | `CREATE INDEX ... WHERE ...` | If filter expression is simple equality |
+Indexes on skipped fields are skipped. Nested-path indexes on `jsonb` columns are
+**not** turned into `(col->>'path')` expression indexes in v1.
 
-Indexes on skipped fields or flattened-but-absent columns are automatically skipped.
-The analysis output warns the user about any indexes that cannot be translated.
+Text→GIN tsvector and partial-filter translation are explicitly out of v1. Analysis
+lists them as warnings so the user can create them by hand.
 
 ---
 
@@ -301,8 +393,9 @@ The existing `analyzer/ai/` stub is extended for Mongo→Postgres schema analysi
 Per collection, a structured prompt containing:
 - Collection name and estimated document count
 - Field frequency table (name, coverage %, observed BSON types)
-- Two or three anonymized sample documents (actual field structure, values redacted)
 - Current inferred type decisions and any ambiguous fields flagged
+- Sample documents **only** when `--ai-include-samples` is set (values redacted).
+  Default prompt is the frequency table only — no PII in the prompt.
 
 ### What the AI returns
 
@@ -341,15 +434,15 @@ structure; the `AIReasoning` fields are empty.
 ```
 adapters/mongo/
     source.go         Connect, Close, Ping, ListTables, GetSchema, GetRowCount,
-                      ReadBatch, CheckPermissions
-    convert.go        BSON → Go type conversion using schema plan
-    checkpoint.go     _id encode/decode for checkpoint storage
+                      GetPKRange (unsupported), ReadBatch, CheckPermissions, SetPlan
+    convert.go        BSON → Go type conversion using schema plan (recursive; no bson.D marshal)
+    checkpoint.go     _id encode/decode for checkpoint LastKey
 
 analyzer/mongo/
-    sampler.go        Connect to MongoDB, run $sample aggregation, build frequency table
-    infer.go          Frequency table → field options + recommended TableSchema
-    translate.go      MongoDB index definitions → Postgres IndexDef equivalents
-    ai.go             Feed inference results to AI provider, merge recommendations
+    sampler.go        Connect to MongoDB, $sample, frequency table
+    infer.go          Frequency table → field options + recommended TableSchema + name sanitizer
+    translate.go      MongoDB index definitions → btree IndexDef (v1 subset) + warnings
+    ai.go             Optional: feed inference to AI provider, merge recommendations
 
 state/
     schema_plan.go    CRUD: SavePlan, GetPlan, DeletePlan, ListPlanCollections
@@ -358,22 +451,36 @@ state/
 ### Changes to existing packages
 
 ```
-registry/registry.go        Register "mongodb" source adapter; add mongodb:// DSN parser
-state/metadb.go             Add schema_plans table to migration; add schema_plan.go CRUD
-api/handlers/projects.go    Extend /analyze for mongo source; add /schema-plan endpoints
-cmd/xferdb/commands/        Add `project analyze` and `project schema` subcommands
+engine/table.go             Sequential keyset: pass/save Batch.LastKey (M0)
+adapters/adapter.go         Add Batch.LastKey string
+registry/registry.go        Register "mongodb"; parse mongodb:// and mongodb+srv://
+                            Keep the raw DSN (authSource, replicaSet, tls). Alias mongodb+srv → mongodb.
+state/metadb.go             schema_plans table; migrations.schema_plan JSON snapshot
+api/handlers/projects.go    Branch /analyze for mongo source; schema-plan endpoints
+cmd/xferdb/commands/        project analyze + project schema
 ```
+
+`GetRowCount` uses `estimatedDocumentCount` (fast, approximate). Exact counts on large
+collections are too expensive for ETA.
 
 ---
 
 ## New API Endpoints
 
+Existing `POST /analyze` is a source-vs-target **diff** (`Analysis` JSON). Mongo inference
+is a different shape. Same URL, branched on source type, with a discriminator so current
+clients do not parse the wrong struct:
+
 ```
-POST   /api/v1/projects/:id/analyze        (enhanced — detects mongo source, runs sampling)
+POST   /api/v1/projects/:id/analyze        relational: existing diff
+                                       mongo source: sample + infer; persist draft plan
 GET    /api/v1/projects/:id/schema-plan    return saved schema plan per collection
-PUT    /api/v1/projects/:id/schema-plan    save user's field decisions
+PUT    /api/v1/projects/:id/schema-plan    save/override field decisions (sets overridden)
 DELETE /api/v1/projects/:id/schema-plan    wipe plan (force re-analyze)
 ```
+
+Re-analyze without DELETE / `--reset` refreshes inferred rows and leaves `overridden`
+rows intact. `DELETE` (CLI `--reset`) wipes the collection's plan first.
 
 `POST /analyze` response shape (mongo source):
 
@@ -436,7 +543,8 @@ DELETE /api/v1/projects/:id/schema-plan    wipe plan (force re-analyze)
 # Sample collections and infer schema (prints proposed Postgres schema)
 xferdb project analyze
 xferdb project analyze --sample-size 5000
-xferdb project analyze --ai                      # include AI annotations
+xferdb project analyze --ai                      # include AI annotations (frequency table only)
+xferdb project analyze --ai --ai-include-samples   # opt-in: redacted sample docs in the prompt
 
 # Review saved schema plan
 xferdb project schema
@@ -458,35 +566,31 @@ Tasks are numbered; each is blocked by the ones listed.
 
 | # | Task | Package | Blocked by |
 |---|------|---------|-----------|
-| M1 | Schema plan state table + CRUD | `state/schema_plan.go` | — |
-| M2 | MongoDB DSN parser | `registry/registry.go` | — |
+| M0 | Sequential keyset resume (`Batch.LastKey`) | `engine/table.go`, `adapters/adapter.go` | — |
+| M1 | Schema plan state table + CRUD + migration snapshot | `state/schema_plan.go` | — |
+| M2 | MongoDB DSN parser (`mongodb://`, `mongodb+srv://`) | `registry/registry.go` | — |
 | M3 | Document sampler + frequency table | `analyzer/mongo/sampler.go` | M2 |
-| M4 | Schema inference + field options | `analyzer/mongo/infer.go` | M3 |
-| M5 | MongoDB index → Postgres translation | `analyzer/mongo/translate.go` | M4 |
-| M6 | AI integration for mongo schema | `analyzer/mongo/ai.go` | M4 |
-| M7 | API: extend /analyze + schema-plan endpoints | `api/handlers/` | M1, M4, M6 |
+| M4 | Schema inference + field options + name sanitizer | `analyzer/mongo/infer.go` | M3 |
+| M5 | Index translation (v1 btree subset) + warnings | `analyzer/mongo/translate.go` | M4 |
+| M6 | AI integration for mongo schema (optional) | `analyzer/mongo/ai.go` | M4 |
+| M7 | API: mongo `/analyze` branch + schema-plan endpoints | `api/handlers/` | M1, M4 |
 | M8 | CLI: `project analyze` + `project schema` | `cmd/xferdb/commands/` | M7 |
-| M9 | BSON → Go type converter | `adapters/mongo/convert.go` | M1 |
-| M10 | Mongo source adapter | `adapters/mongo/source.go` | M9, M5 |
+| M9 | BSON → Go converter (recursive, no `bson.D` marshal) | `adapters/mongo/convert.go` | M1 |
+| M10 | Mongo source adapter + `SetPlan` | `adapters/mongo/source.go` | M0, M9 |
 | M11 | Register mongo adapter | `registry/registry.go` | M10 |
 | M12 | End-to-end test: mongo → postgres | — | M11, M8 |
 
+M5 and M6 are not blockers for M7/M10. Indexes can ship as "none + warnings" and AI can
+stay no-op until a provider key is configured.
+
 ---
 
-## Open Questions
+## Decisions (was: open questions)
 
-These are not yet decided and should be confirmed before implementing the affected tasks.
-
-1. **Sample size default** — 2,000 documents is a guess. Does it need to be larger for typical collections? Is it configurable globally in the project config or only per-analyze run?
-
-2. **Flatten depth** — Design says one level only. Do we ever need two levels? Keeping it at one avoids a recursive explosion of columns.
-
-3. **`_id` column rename** — Default keeps `_id` as the column name. Should we default to `id` instead since `_id` is a MongoDB convention that looks odd in Postgres?
-
-4. **Re-analysis after plan exists** — If the user runs `analyze` again after a plan is saved, do we overwrite the plan or require `--reset` first?
-
-5. **Partial plans** — Can the user save a partial plan (some collections decided, others not) and still run a migration for only the decided collections?
-
-6. **AI provider** — Anthropic (Claude) or OpenAI first? The stub supports both. Recommendation: Anthropic since that's the natural fit for this project.
-
-7. **Sample documents in AI prompt** — Should we include actual sample documents (with potential PII) or only the field frequency table? Safest default: frequency table only, with an opt-in flag (`--ai-include-samples`) that the user explicitly enables.
+1. **Sample size default** — 2,000. Per-run `--sample-size` only.
+2. **Flatten depth** — One level. No recursion. No array-of-documents → child tables.
+3. **`_id` column name** — Keep `_id`. Rename is an override.
+4. **Re-analysis** — Refreshes inferred rows; does not clobber `overridden`. `--reset` / DELETE wipes first.
+5. **Partial plans** — Yes. Fail only for collections that are in the run (`--tables` or all) and have no plan.
+6. **AI provider** — Whichever key is configured. Do not block M7 on M6.
+7. **AI samples** — Frequency table only by default. `--ai-include-samples` is opt-in.
