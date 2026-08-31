@@ -15,9 +15,16 @@ jobs:
         env:
           GIT_SSL_NO_VERIFY: "true"
 
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          dnf install -y gcc
+
       - name: Build and test
         id: build
         shell: bash
+        env:
+          CGO_ENABLED: "1"
         run: |
           set -eu
           go version
