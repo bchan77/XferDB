@@ -167,7 +167,8 @@ type BatchOptions struct {
 type Batch struct {
 	Records []map[string]interface{}
 	Size    int
-	LastPK  int64 // set by ReadBatch when PKCol is used; last PK value in this batch
+	LastPK  int64  // set by ReadBatch when PKCol is used; last PK value in this batch (integer PK-range workers)
+	LastKey string // opaque resume token for keyset adapters (e.g. MongoDB _id as hex); empty for SQL adapters
 }
 
 // PermissionCheck reports what the connected credential is allowed to do.
