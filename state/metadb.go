@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
@@ -85,6 +86,36 @@ func (m *MetaDB) migrate() error {
 			created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (migration_id, table_name, batch_id)
 		);
+
+		CREATE TABLE IF NOT EXISTS schema_plans (
+			project_id  TEXT     NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			collection  TEXT     NOT NULL,
+			field_name  TEXT     NOT NULL,
+			pg_column   TEXT     NOT NULL DEFAULT '',
+			pg_type     TEXT     NOT NULL DEFAULT '',
+			strategy    TEXT     NOT NULL,
+			is_pk       INTEGER  NOT NULL DEFAULT 0,
+			nullable    INTEGER  NOT NULL DEFAULT 1,
+			overridden  INTEGER  NOT NULL DEFAULT 0,
+			created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (project_id, collection, field_name)
+		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// schema_plan is a nullable JSON column added to an existing table.
+	// ALTER TABLE in SQLite does not support IF NOT EXISTS, so we swallow
+	// "duplicate column name" when the column already exists.
+	return m.addColumnIfMissing("migrations", "schema_plan TEXT NOT NULL DEFAULT ''")
+}
+
+// addColumnIfMissing runs ALTER TABLE … ADD COLUMN and ignores the error when
+// the column already exists (SQLite returns "duplicate column name: <col>").
+func (m *MetaDB) addColumnIfMissing(table, colDef string) error {
+	_, err := m.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", table, colDef))
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }
