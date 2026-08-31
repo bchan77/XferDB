@@ -583,6 +583,31 @@ Tasks are numbered; each is blocked by the ones listed.
 M5 and M6 are not blockers for M7/M10. Indexes can ship as "none + warnings" and AI can
 stay no-op until a provider key is configured.
 
+### Dependency diagram
+
+```
+M0  (engine: Batch.LastKey — touches existing code, do first)
+     │
+     ├─────────────────────────────────────────┐
+     │                                         │
+M1 (schema_plans table)   M2 (DSN parser)      │
+     │                         │               │
+     ├──── M9 (converter)      M3 (sampler)    │
+     │         │               │               │
+     │         └──────── M10 ──┘← M4 (infer)  │
+     │              (adapter)   │    ├── M5    │
+     │                  │       │    └── M6    │
+     │                  │       └──── M7 (API) │
+     │                  │              │       │
+     │                  └──── M11      M8 (CLI)│
+     │                          │       │     │
+     └──────────────────────── M12 ────┘─────┘
+              (end-to-end test)
+```
+
+**Start here:** M0 first (existing code, lowest risk to land early), then M1 and M2 in
+parallel, then proceed down the two tracks (analysis pipeline and adapter) concurrently.
+
 ---
 
 ## Decisions (was: open questions)
