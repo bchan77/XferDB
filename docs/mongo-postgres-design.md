@@ -453,12 +453,47 @@ state/
 ```
 engine/table.go             Sequential keyset: pass/save Batch.LastKey (M0)
 adapters/adapter.go         Add Batch.LastKey string
-registry/registry.go        Register "mongodb"; parse mongodb:// and mongodb+srv://
-                            Keep the raw DSN (authSource, replicaSet, tls). Alias mongodb+srv → mongodb.
+registry/registry.go        Detect mongodb:// and mongodb+srv:// scheme; set Type="mongodb";
+                            store full URI in ConnectionConfig.DSN unchanged.
+                            Register "mongodb" source adapter constructor.
 state/metadb.go             schema_plans table; migrations.schema_plan JSON snapshot
 api/handlers/projects.go    Branch /analyze for mongo source; schema-plan endpoints
 cmd/xferdb/commands/        project analyze + project schema
 ```
+
+### M2 — Why we detect but do not parse the MongoDB DSN
+
+The existing `ParseDSN` for Postgres and MySQL breaks the URI into individual fields
+(`Host`, `Port`, `Database`, `Username`, `Password`, `SSLMode`) because those adapters
+reconstruct a driver-specific string from those fields later.
+
+MongoDB connection strings cannot be safely decomposed this way. A typical URI carries
+options that have no field in `ConnectionConfig`:
+
+```
+mongodb://user:pass@host1:27017,host2:27017/mydb?replicaSet=rs0&authSource=admin&tls=true
+mongodb+srv://user:pass@cluster.mongodb.net/mydb?retryWrites=true&w=majority
+```
+
+- Multiple hosts (replica set members) — no place in `ConnectionConfig`
+- `replicaSet`, `authSource`, `readPreference`, `w`, `tls` — all lost if we only keep
+  `Host`/`Port`/`Database`
+- `mongodb+srv://` triggers a DNS SRV lookup in the driver — the scheme itself is
+  meaningful and must not be rewritten
+
+The MongoDB Go driver (`go.mongodb.org/mongo-driver`) accepts the full URI directly via
+`options.Client().ApplyURI(uri)` and handles all of this natively. Parsing it ourselves
+would only introduce loss.
+
+`ConnectionConfig` already has a `DSN string` field for exactly this case: "raw DSN;
+overrides individual fields when set." The Mongo adapter reads `cfg.DSN` directly and
+passes it to `ApplyURI`. No field reconstruction needed.
+
+M2 therefore only needs to:
+1. Detect the `mongodb://` or `mongodb+srv://` scheme in `ParseDSN`
+2. Set `cfg.Type = "mongodb"` and `cfg.DSN = <full original URI>`
+3. Optionally extract `cfg.Database` from the URI path for display in `project list`
+4. Register `"mongodb"` in the source adapter registry
 
 `GetRowCount` uses `estimatedDocumentCount` (fast, approximate). Exact counts on large
 collections are too expensive for ETA.
@@ -568,7 +603,7 @@ Tasks are numbered; each is blocked by the ones listed.
 |---|------|---------|-----------|
 | M0 | Sequential keyset resume (`Batch.LastKey`) | `engine/table.go`, `adapters/adapter.go` | — |
 | M1 | Schema plan state table + CRUD + migration snapshot | `state/schema_plan.go` | — |
-| M2 | MongoDB DSN parser (`mongodb://`, `mongodb+srv://`) | `registry/registry.go` | — |
+| M2 | MongoDB DSN scheme detection + registry registration | `registry/registry.go` | — |
 | M3 | Document sampler + frequency table | `analyzer/mongo/sampler.go` | M2 |
 | M4 | Schema inference + field options + name sanitizer | `analyzer/mongo/infer.go` | M3 |
 | M5 | Index translation (v1 btree subset) + warnings | `analyzer/mongo/translate.go` | M4 |

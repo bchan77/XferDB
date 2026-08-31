@@ -20,12 +20,14 @@ var sourceFactories = map[string]func() adapters.SourceAdapter{
 	"postgres": postgres.NewSource,
 	"mysql":    mysql.NewSource,
 	"sqlite":   sqlite.NewSource,
+	// "mongodb": mongo.NewSource  ← registered in M11 once adapters/mongo/ exists
 }
 
 var targetFactories = map[string]func() adapters.TargetAdapter{
 	"postgres": postgres.NewTarget,
 	"mysql":    mysql.NewTarget,
 	"sqlite":   sqlite.NewTarget,
+	// MongoDB is source-only for this feature; no mongo target adapter planned
 }
 
 // NewSource returns a SourceAdapter for the given adapter type string.
@@ -55,7 +57,21 @@ func NewTarget(adapterType string) (adapters.TargetAdapter, error) {
 //	postgres://user:pass@host:5432/dbname?sslmode=require
 //	mysql://user:pass@host:3306/dbname
 //	sqlite:///absolute/path/to/file.db
+//	mongodb://user:pass@host:27017/dbname?replicaSet=rs0&authSource=admin
+//	mongodb+srv://user:pass@cluster.example.net/dbname
+//
+// MongoDB URIs are stored verbatim in ConnectionConfig.DSN and are never
+// decomposed into individual fields. See parseMongoDBConnectionString for
+// the rationale.
 func ParseConnectionString(dsn string) (adapters.ConnectionConfig, error) {
+	// MongoDB URIs must be detected before the generic factory-scheme check
+	// because (a) mongodb+srv is not a registered type name and (b) these
+	// URIs must not be decomposed — see parseMongoDBConnectionString.
+	lower := strings.ToLower(dsn)
+	if strings.HasPrefix(lower, "mongodb://") || strings.HasPrefix(lower, "mongodb+srv://") {
+		return parseMongoDBConnectionString(dsn)
+	}
+
 	u, err := url.Parse(dsn)
 	if err != nil {
 		return adapters.ConnectionConfig{}, fmt.Errorf("invalid connection string: %w", err)
@@ -94,6 +110,43 @@ func ParseConnectionString(dsn string) (adapters.ConnectionConfig, error) {
 		if sslMode := u.Query().Get("sslmode"); sslMode != "" {
 			cfg.SSLMode = sslMode
 		}
+	}
+
+	return cfg, nil
+}
+
+// parseMongoDBConnectionString handles mongodb:// and mongodb+srv:// URIs.
+//
+// Why we do not decompose the URI:
+//
+// MongoDB connection strings carry options that have no equivalent field in
+// ConnectionConfig: multiple hosts (replica sets), replicaSet, authSource,
+// readPreference, write concern, and the mongodb+srv scheme which triggers a
+// DNS SRV lookup inside the driver. Breaking the URI apart and reassembling it
+// later would silently drop these options.
+//
+// The MongoDB Go driver accepts the full URI directly via
+// options.Client().ApplyURI(uri), so the adapter reads cfg.DSN and passes it
+// straight through — no reconstruction needed.
+//
+// We only extract Database from the URI path so that commands like
+// `xferdb project list` can display a human-readable database name without
+// exposing the full URI (which may contain credentials).
+func parseMongoDBConnectionString(dsn string) (adapters.ConnectionConfig, error) {
+	cfg := adapters.ConnectionConfig{
+		Type: "mongodb",
+		DSN:  dsn, // full URI passed to the driver unchanged via ApplyURI
+	}
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return adapters.ConnectionConfig{}, fmt.Errorf("invalid mongodb connection string: %w", err)
+	}
+
+	// Extract database name from the path for display only.
+	// Path is "/dbname" for mongodb:// and "/dbname?opts" for mongodb+srv://.
+	if db := strings.TrimPrefix(u.Path, "/"); db != "" {
+		cfg.Database = db
 	}
 
 	return cfg, nil
