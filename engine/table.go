@@ -30,7 +30,16 @@ func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableS
 	return e.transferTableParallelOffset(ctx, sourceSchema, bw)
 }
 
-// transferTableSequential is the existing single-goroutine batch loop with checkpoint resume.
+// transferTableSequential is the single-goroutine batch loop with checkpoint resume.
+//
+// It supports two resume modes:
+//   - Keyset (used by MongoDB and other adapters that set Batch.LastKey): resumes by
+//     passing the last token back as BatchOptions.LastPK; no OFFSET scan.
+//   - Offset (used by all SQL adapters): resumes via LIMIT/OFFSET using rowsTransferred
+//     as the offset; Batch.LastKey is always empty for these adapters.
+//
+// Which mode is active is determined entirely by whether the last checkpoint has a
+// non-empty LastPK. SQL adapters never write LastKey so they always use offset mode.
 func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapters.TableSchema) error {
 	table := sourceSchema.Name
 
@@ -39,7 +48,7 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 		return fmt.Errorf("row count(%s): %w", table, err)
 	}
 
-	offset, rowsTransferred := e.resumeOffset(ctx, table)
+	offset, rowsTransferred, lastKey := e.resumeState(ctx, table)
 
 	batchSize := e.project.TransferConfig.BatchSize
 	if batchSize <= 0 {
@@ -72,14 +81,20 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 			return err
 		}
 
+		// Build read options. Keyset mode when we have a resume token from the
+		// last checkpoint; offset mode otherwise (SQL adapters).
+		var opts adapters.BatchOptions
+		if lastKey != "" {
+			opts = adapters.BatchOptions{LastPK: lastKey, Limit: batchSize}
+		} else {
+			opts = adapters.BatchOptions{Offset: offset, Limit: batchSize}
+		}
+
 		t0 := time.Now()
-		batch, err := e.source.ReadBatch(ctx, table, adapters.BatchOptions{
-			Offset: offset,
-			Limit:  batchSize,
-		})
+		batch, err := e.source.ReadBatch(ctx, table, opts)
 		readDur := time.Since(t0)
 		if err != nil {
-			return fmt.Errorf("read batch %s offset %d: %w", table, offset, err)
+			return fmt.Errorf("read batch %s: %w", table, err)
 		}
 		if batch.Size == 0 {
 			break
@@ -87,18 +102,25 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 
 		t1 := time.Now()
 		if err := e.target.WriteBatch(ctx, table, batch); err != nil {
-			return fmt.Errorf("write batch %s offset %d: %w", table, offset, err)
+			return fmt.Errorf("write batch %s: %w", table, err)
 		}
 		writeDur := time.Since(t1)
 
-		offset += batch.Size
 		rowsTransferred += int64(batch.Size)
 		batchID++
+
+		// Advance the resume cursor. Keyset adapters set LastKey; SQL adapters do not.
+		if batch.LastKey != "" {
+			lastKey = batch.LastKey
+		} else {
+			offset += batch.Size
+		}
 
 		if err := e.db.SaveCheckpoint(ctx, adapters.Checkpoint{
 			MigrationID: e.migrationID,
 			TableName:   table,
 			BatchID:     batchID,
+			LastPK:      lastKey, // empty string for SQL adapters; keyset token for others
 			RowsInBatch: batch.Size,
 			CreatedAt:   time.Now(),
 		}); err != nil {
@@ -408,21 +430,30 @@ func (e *Engine) transferSegmentOffset(ctx context.Context, table string, startO
 	return nil
 }
 
-// resumeOffset returns the offset to start reading from and the rows already
-// transferred, based on persisted table progress from a previous run.
-func (e *Engine) resumeOffset(ctx context.Context, table string) (offset int, rowsTransferred int64) {
+// resumeState returns the offset, rows already transferred, and keyset resume token
+// for a table in the current migration.
+//
+// lastKey is non-empty only when the last checkpoint was written by a keyset adapter
+// (e.g. MongoDB). SQL adapters always leave it empty, so offset mode is used instead.
+func (e *Engine) resumeState(ctx context.Context, table string) (offset int, rowsTransferred int64, lastKey string) {
 	progress, err := e.db.GetTableProgress(ctx, e.migrationID)
 	if err != nil {
-		return 0, 0
+		return 0, 0, ""
 	}
 	for _, tp := range progress {
 		if tp.TableName == table {
 			rowsTransferred = tp.RowsTransferred
 			offset = int(rowsTransferred)
-			return
+			break
 		}
 	}
-	return 0, 0
+	// Load the keyset token from the most recent checkpoint, if any.
+	cp, err := e.db.GetLastCheckpoint(ctx, e.migrationID, table)
+	if err == nil && cp != nil && cp.LastPK != "" {
+		lastKey = cp.LastPK
+		offset = 0 // keyset mode — offset is irrelevant
+	}
+	return
 }
 
 // detectIntegerPK returns the name of a single-column integer primary key, or ""
