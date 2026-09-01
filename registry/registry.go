@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	mongoadapter "gitea.homelab.local/nextdevops/XferDB/adapters/mongo"
 	"gitea.homelab.local/nextdevops/XferDB/adapters/mysql"
 	"gitea.homelab.local/nextdevops/XferDB/adapters/postgres"
 	"gitea.homelab.local/nextdevops/XferDB/adapters/sqlite"
@@ -20,7 +21,7 @@ var sourceFactories = map[string]func() adapters.SourceAdapter{
 	"postgres": postgres.NewSource,
 	"mysql":    mysql.NewSource,
 	"sqlite":   sqlite.NewSource,
-	// "mongodb": mongo.NewSource  ← registered in M11 once adapters/mongo/ exists
+	"mongodb":  mongoadapter.NewSource,
 }
 
 var targetFactories = map[string]func() adapters.TargetAdapter{
