@@ -177,11 +177,19 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 }
 
 // Analyze handles POST /api/v1/projects/{id}/analyze.
+// When the source type is "mongodb" the request is delegated to AnalyzeMongo
+// which samples documents and infers a schema plan. All other source types
+// use the existing relational diff path.
 func (h *ProjectsHandler) Analyze(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	p, err := h.DB.GetProject(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	if p.SourceConfig.Type == "mongodb" {
+		h.AnalyzeMongo(w, r, p.ID, p.SourceConfig.DSN)
 		return
 	}
 
