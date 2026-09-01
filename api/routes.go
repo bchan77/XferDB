@@ -31,6 +31,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/projects/{id}", ph.DeleteProject)
 	mux.HandleFunc("POST /api/v1/projects/{id}/preflight", ph.Preflight)
 	mux.HandleFunc("POST /api/v1/projects/{id}/analyze", ph.Analyze)
+	mux.HandleFunc("GET /api/v1/projects/{id}/schema-plan", ph.GetSchemaPlan)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/schema-plan", ph.OverrideSchemaPlan)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}/schema-plan", ph.DeleteSchemaPlan)
 
 	// Migrations (nested under project for creation/listing)
 	mux.HandleFunc("POST /api/v1/projects/{id}/migrations", mh.StartMigration)
