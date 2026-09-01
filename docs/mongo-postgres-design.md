@@ -4,7 +4,7 @@
 
 ## Current Status
 
-_Last updated: 2026-08-31. Update this section at the end of every session._
+_Last updated: 2026-09-01. Update this section at the end of every session._
 
 ### Milestones
 
@@ -14,35 +14,41 @@ _Last updated: 2026-08-31. Update this section at the end of every session._
 | M1 | Schema plan state table + CRUD + migration snapshot | ✅ Merged to main | PR #29 |
 | M2 | MongoDB DSN scheme detection + registry | ✅ Merged to main | PR #28 |
 | M3 | Document sampler + frequency table | 🔄 PR open, needs merge | `feature/m3-mongo-sampler` |
-| M4 | Schema inference + field options + name sanitizer | ⬜ Not started | blocked by M3 merge |
-| M5 | Index translation (v1 btree subset) | ⬜ Not started | blocked by M4 |
-| M6 | AI integration for mongo schema (optional) | ⬜ Not started | blocked by M4 |
-| M7 | API: `/analyze` mongo branch + schema-plan endpoints | ⬜ Not started | blocked by M1 ✓, M4 |
-| M8 | CLI: `project analyze` + `project schema` | ⬜ Not started | blocked by M7 |
-| M9 | BSON → Go converter (recursive, no `bson.D` marshal) | ⬜ Not started | blocked by M1 ✓ |
-| M10 | Mongo source adapter + `SetPlan` | ⬜ Not started | blocked by M0 ✓, M9 |
-| M11 | Register mongo adapter in registry | ⬜ Not started | blocked by M10 |
-| M12 | End-to-end test: mongo → postgres | ⬜ Not started | blocked by M11, M8 |
+| M4 | Schema inference + field options + name sanitizer | 🔄 PR open, needs merge | `feature/m4-schema-inference` |
+| M5 | Index translation (v1 btree subset) | 🔄 PR open, needs merge | `feature/m5-index-translation` |
+| M6 | AI integration for mongo schema (optional) | 🔄 PR open, needs merge | `feature/m6-ai-integration` |
+| M7 | API: `/analyze` mongo branch + schema-plan endpoints | 🔄 PR open, needs merge | `feature/m7-api-schema-plan` |
+| M8 | CLI: `project analyze` + `project schema` | 🔄 PR open, needs merge | `feature/m8-cli-schema-commands` |
+| M9 | BSON → Go converter (recursive, no `bson.D` marshal) | 🔄 PR open, needs merge | `feature/m9-bson-converter` |
+| M10 | Mongo source adapter + `SetPlan` | 🔄 PR open, needs merge | `feature/m10-mongo-source-adapter` |
+| M11 | Register mongo adapter in registry | 🔄 PR open, needs merge | `feature/m11-register-mongo-adapter` |
+| M12 | End-to-end test: mongo → postgres | 🔄 PR open, needs merge | `feature/m12-e2e-test` |
 
 ### Next session starting point
 
-1. **Merge M3 PR** (`feature/m3-mongo-sampler`) on Gitea first.
-2. **Start M4** — schema inference (`analyzer/mongo/infer.go`). This is the critical path blocker for M7 and the M9→M10→M11 adapter chain.
+All milestones are implemented and all branches have been pushed. The remaining
+work is merging PRs in dependency order on Gitea:
 
-### M4 implementation notes
+1. Merge M3 first (sampler, no deps beyond M0–M2 which are on main)
+2. Merge M4 (inference, depends on M3)
+3. Merge M9 (converter, depends on M1 on main)
+4. Merge M5 (index translation, depends on M4)
+5. Merge M10 (adapter, depends on M9 + M5)
+6. Merge M6 (AI stub, depends on M4)
+7. Merge M11 (registry wiring, depends on M10)
+8. Merge M7 (API, depends on M11 + M6 + M1)
+9. Merge M8 (CLI, depends on M7)
+10. Merge M12 (e2e test, depends on M8 + M11)
 
-Takes a `CollectionSample` (from M3 `SampleCollection`) and produces:
-- `[]SchemaPlanRow` — recommended decisions ready to pass to `state.SavePlan`
-- `TableSchema` — what the target Postgres table should look like (for `CreateTable`)
-- Per-field `options []FieldOption` — alternatives the user can choose during schema review
+Each PR's base branch should be the previous milestone's branch so the diff is
+scoped. After merging the chain, `main` will have the full MongoDB pipeline.
 
-Key logic:
-- **Type mapping** — per the table in §Type Mapping below (ObjectId→text, Int32→integer, Int64→bigint, Double→double precision, Decimal128→numeric, Boolean→boolean, Date→timestamptz, Array→jsonb, Document→jsonb, Binary→bytea)
-- **Polymorphic widening** — Double+Decimal128→numeric, Int32+Int64→bigint, any+String→text, any+Document→jsonb; fall back to jsonb if no clean widening
-- **`_id` field** — always `is_pk=true`, strategy `direct`, column name `_id`, not nullable
-- **Name sanitizer** — invalid identifier chars→`_`, leading digit→prefix `_`, truncate to 63 bytes, suffix `_2`/`_3` on collision
-- **Nesting default** — Documents default to `as_jsonb`; options list includes `flatten` and `skip` as alternatives
-- **Nullable** — `absentCount > 0 || nullCount > 0` → `nullable=true`
+To run the e2e test once PRs are merged:
+```
+XFERDB_TEST_MONGO_DSN=mongodb://localhost:27017/testdb \
+XFERDB_TEST_PG_DSN="postgres://user:pass@localhost/testdb?sslmode=disable" \
+go test ./e2e/... -v -timeout 120s
+```
 
 ### Process rule
 
