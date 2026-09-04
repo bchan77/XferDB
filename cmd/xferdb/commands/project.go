@@ -127,6 +127,10 @@ var projectUseCmd = &cobra.Command{
 	Short: "Set the current project context",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := resolveProjectID(args[0]); err != nil {
+			return err
+		}
+
 		ctx := xferdbContextPath()
 		if err := os.MkdirAll(xferdbDir(), 0o755); err != nil {
 			return err
