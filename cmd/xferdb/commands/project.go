@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/registry"
+	"github.com/spf13/cobra"
 )
 
 var projectCmd = &cobra.Command{
@@ -42,20 +43,20 @@ var projectCreateCmd = &cobra.Command{
 			return fmt.Errorf("--name, --source, and --target are required")
 		}
 
-		srcType := schemeOf(srcDSN)
-		tgtType := schemeOf(tgtDSN)
+		srcCfg, err := registry.ParseConnectionString(srcDSN)
+		if err != nil {
+			return fmt.Errorf("parse --source: %w", err)
+		}
+		tgtCfg, err := registry.ParseConnectionString(tgtDSN)
+		if err != nil {
+			return fmt.Errorf("parse --target: %w", err)
+		}
 
 		body := map[string]any{
-			"name":        name,
-			"description": desc,
-			"source_config": adapters.ConnectionConfig{
-				Type: srcType,
-				DSN:  srcDSN,
-			},
-			"target_config": adapters.ConnectionConfig{
-				Type: tgtType,
-				DSN:  tgtDSN,
-			},
+			"name":          name,
+			"description":   desc,
+			"source_config": srcCfg,
+			"target_config": tgtCfg,
 			"transfer_config": adapters.TransferConfig{
 				BatchSize:    batchSize,
 				TableWorkers: tableWorkers,
@@ -244,14 +245,6 @@ var projectDeleteCmd = &cobra.Command{
 		}
 		return nil
 	},
-}
-
-// schemeOf extracts the scheme (adapter type) from a DSN.
-func schemeOf(dsn string) string {
-	if idx := strings.Index(dsn, "://"); idx >= 0 {
-		return dsn[:idx]
-	}
-	return dsn
 }
 
 // xferdbDir returns the ~/.xferdb directory path.
