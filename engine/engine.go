@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/adapters/mongo"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 )
@@ -350,6 +351,21 @@ func (e *Engine) connect(ctx context.Context) error {
 	if err := src.Connect(ctx, e.project.SourceConfig); err != nil {
 		return fmt.Errorf("connect source: %w", err)
 	}
+
+	// MongoDB adapters need the schema plan injected after connect.
+	if mongoSrc, ok := src.(*mongo.Source); ok {
+		plan, err := e.db.GetPlanForProject(ctx, e.project.ID)
+		if err != nil {
+			return fmt.Errorf("load schema plan: %w", err)
+		}
+		if len(plan) == 0 {
+			return fmt.Errorf("no schema plan found — run 'xferdb project analyze' first")
+		}
+		if err := mongoSrc.SetPlan(plan); err != nil {
+			return fmt.Errorf("set schema plan: %w", err)
+		}
+	}
+
 	e.source = src
 
 	tgt, err := registry.NewTarget(e.project.TargetConfig.Type)
