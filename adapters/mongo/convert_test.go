@@ -94,12 +94,13 @@ func TestConvertDocument_AsJsonbStrategy(t *testing.T) {
 		t.Fatalf("ConvertDocument: %v", err)
 	}
 
-	raw, ok := result["address"].([]byte)
+	// as_jsonb now returns string (not []byte) for PostgreSQL COPY compatibility.
+	raw, ok := result["address"].(string)
 	if !ok {
-		t.Fatalf("address is %T, want []byte", result["address"])
+		t.Fatalf("address is %T, want string", result["address"])
 	}
 	var m map[string]interface{}
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("address JSON invalid: %v", err)
 	}
 	if m["city"] != "NYC" {
@@ -152,12 +153,13 @@ func TestConvertDocument_UnknownFieldGoesToExtra(t *testing.T) {
 		t.Fatalf("ConvertDocument: %v", err)
 	}
 
-	raw, ok := result["_extra"].([]byte)
+	// _extra now returns string (not []byte) for PostgreSQL COPY compatibility.
+	raw, ok := result["_extra"].(string)
 	if !ok {
-		t.Fatalf("_extra is %T, want []byte", result["_extra"])
+		t.Fatalf("_extra is %T, want string", result["_extra"])
 	}
 	var m map[string]interface{}
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("_extra JSON invalid: %v", err)
 	}
 	if m["surprise"] != "unexpected" {
