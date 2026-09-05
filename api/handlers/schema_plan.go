@@ -14,18 +14,21 @@ import (
 // returns the full InferredSchema list for review.
 func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, projectID string, dsn string) {
 	var req struct {
-		SampleSize int  `json:"sample_size"`
-		AI         bool `json:"ai"`
+		SampleSize      int     `json:"sample_size"`
+		SamplePct       float64 `json:"sample_pct"`
+		SampleThreshold int64   `json:"sample_threshold"`
+		AI              bool    `json:"ai"`
 	}
 	// Decode optional body; ignore errors (all fields have safe defaults).
 	json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-	if req.SampleSize <= 0 {
-		req.SampleSize = mongoanalyzer.DefaultSampleSize
-	}
 
 	ctx := r.Context()
 
-	sampler, err := mongoanalyzer.NewSampler(ctx, dsn, req.SampleSize)
+	sampler, err := mongoanalyzer.NewSampler(ctx, dsn, mongoanalyzer.SamplerOptions{
+		SampleSize: req.SampleSize,
+		Threshold:  req.SampleThreshold,
+		SamplePct:  req.SamplePct,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "connect to MongoDB: "+err.Error())
 		return
