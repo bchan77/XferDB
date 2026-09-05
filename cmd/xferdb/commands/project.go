@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/registry"
+	"github.com/spf13/cobra"
 )
 
 var projectCmd = &cobra.Command{
@@ -42,20 +43,20 @@ var projectCreateCmd = &cobra.Command{
 			return fmt.Errorf("--name, --source, and --target are required")
 		}
 
-		srcType := schemeOf(srcDSN)
-		tgtType := schemeOf(tgtDSN)
+		srcCfg, err := registry.ParseConnectionString(srcDSN)
+		if err != nil {
+			return fmt.Errorf("parse --source: %w", err)
+		}
+		tgtCfg, err := registry.ParseConnectionString(tgtDSN)
+		if err != nil {
+			return fmt.Errorf("parse --target: %w", err)
+		}
 
 		body := map[string]any{
-			"name":        name,
-			"description": desc,
-			"source_config": adapters.ConnectionConfig{
-				Type: srcType,
-				DSN:  srcDSN,
-			},
-			"target_config": adapters.ConnectionConfig{
-				Type: tgtType,
-				DSN:  tgtDSN,
-			},
+			"name":          name,
+			"description":   desc,
+			"source_config": srcCfg,
+			"target_config": tgtCfg,
 			"transfer_config": adapters.TransferConfig{
 				BatchSize:    batchSize,
 				TableWorkers: tableWorkers,
@@ -108,14 +109,29 @@ var projectListCmd = &cobra.Command{
 		}
 		json.NewDecoder(resp.Body).Decode(&projects)
 
+		// Get current project (ignore error if none set).
+		currentProj, _ := currentProject("")
+
 		if len(projects) == 0 {
 			fmt.Println("No projects found.")
+			if currentProj != "" {
+				fmt.Printf("\nActive project context: %s (not found)\n", currentProj)
+			}
 			return nil
 		}
-		fmt.Printf("%-36s  %-20s  %s\n", "ID", "Name", "Created")
-		fmt.Println(strings.Repeat("-", 72))
+
+		fmt.Printf("     %-36s  %-20s  %s\n", "ID", "Name", "Created")
+		fmt.Println(strings.Repeat("-", 77))
 		for _, p := range projects {
-			fmt.Printf("%-36s  %-20s  %s\n", p.ID, p.Name, p.CreatedAt.Format("2006-01-02 15:04"))
+			marker := "   "
+			if p.Name == currentProj {
+				marker = " → "
+			}
+			fmt.Printf("%s%-36s  %-20s  %s\n", marker, p.ID, p.Name, p.CreatedAt.Format("2006-01-02 15:04"))
+		}
+
+		if currentProj == "" {
+			fmt.Println("\nNo active project. Run 'xferdb project use <name>' to set one.")
 		}
 		return nil
 	},
@@ -126,6 +142,10 @@ var projectUseCmd = &cobra.Command{
 	Short: "Set the current project context",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := resolveProjectID(args[0]); err != nil {
+			return err
+		}
+
 		ctx := xferdbContextPath()
 		if err := os.MkdirAll(xferdbDir(), 0o755); err != nil {
 			return err
@@ -244,14 +264,6 @@ var projectDeleteCmd = &cobra.Command{
 		}
 		return nil
 	},
-}
-
-// schemeOf extracts the scheme (adapter type) from a DSN.
-func schemeOf(dsn string) string {
-	if idx := strings.Index(dsn, "://"); idx >= 0 {
-		return dsn[:idx]
-	}
-	return dsn
 }
 
 // xferdbDir returns the ~/.xferdb directory path.

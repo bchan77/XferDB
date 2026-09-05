@@ -109,6 +109,15 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	defer c.mu.RUnlock()
 	s := c.snapshot
 	s.ElapsedSeconds = time.Since(c.startedAt).Seconds()
+	// Recompute Rows.Total and Rows.Transferred from per-table values.
+	// This is more robust than tracking increments across multiple event handlers.
+	var totalRows, totalTransferred int64
+	for _, t := range s.TableDetails {
+		totalRows += t.Total
+		totalTransferred += t.Transferred
+	}
+	s.Rows.Total = totalRows
+	s.Rows.Transferred = totalTransferred
 	return s
 }
 
@@ -152,17 +161,25 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 	case engine.EventTableStart:
 		s.Phase = "in_progress"
 		s.CurrentTable = ev.TableName
-		s.Tables.Total++
-		s.Tables.InProgress++
 		c.tableStarted[ev.TableName] = time.Now()
 		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			// Table already registered from EventMigrationStart.
+			// Only update total if it was zero (GetRowCount failed earlier).
 			if s.TableDetails[idx].Total == 0 && ev.RowsTotal > 0 {
 				s.Rows.Total += ev.RowsTotal
 				s.TableDetails[idx].Total = ev.RowsTotal
 			}
+			// Only count as new in-progress if not already in progress.
+			if s.TableDetails[idx].Status != "in_progress" {
+				s.Tables.Total++
+				s.Tables.InProgress++
+			}
 			s.TableDetails[idx].Status = "in_progress"
 		} else {
+			// Table not yet registered (EventMigrationStart was dropped).
 			s.Rows.Total += ev.RowsTotal
+			s.Tables.Total++
+			s.Tables.InProgress++
 			idx = len(s.TableDetails)
 			s.TableDetails = append(s.TableDetails, TableDetail{
 				Name:   ev.TableName,
@@ -181,20 +198,59 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.Rows.Transferred = c.totalTransferred(ev)
 		c.updateRate(s)
 		c.updateReadWriteRates(s, ev)
-		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			s.TableDetails[idx].Transferred = ev.RowsTransferred
+		// Ensure table is in tableIndex (EventTableStart may have been dropped).
+		idx, ok := c.tableIndex[ev.TableName]
+		if !ok {
+			// Table not registered yet. Add it but DON'T add to Rows.Total here —
+			// it may have been counted in EventMigrationStart already. We'll fix
+			// the total below if transferred exceeds it.
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:   ev.TableName,
+				Status: "in_progress",
+				Total:  ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+		}
+		s.TableDetails[idx].Transferred = ev.RowsTransferred
+		s.TableDetails[idx].Status = "in_progress"
+		// Update total if transferred exceeds it (MongoDB estimates can be low).
+		if ev.RowsTransferred > s.TableDetails[idx].Total {
+			diff := ev.RowsTransferred - s.TableDetails[idx].Total
+			s.TableDetails[idx].Total = ev.RowsTransferred
+			s.Rows.Total += diff
 		}
 		if s.Rows.RatePerSecond > 0 && s.Rows.Total > s.Rows.Transferred {
 			s.ETASeconds = float64(s.Rows.Total-s.Rows.Transferred) / s.Rows.RatePerSecond
 		}
 
 	case engine.EventTableDone:
-		s.Tables.InProgress--
-		s.Tables.Completed++
 		s.Rows.Transferred = c.totalTransferred(ev)
-		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			s.TableDetails[idx].Status = "done"
-			s.TableDetails[idx].Transferred = ev.RowsTransferred
+		// Ensure table is in tableIndex (earlier events may have been dropped).
+		idx, ok := c.tableIndex[ev.TableName]
+		if !ok {
+			// Table not registered yet. Don't add to Rows.Total here — it may
+			// have been counted in EventMigrationStart.
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:  ev.TableName,
+				Total: ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+		} else {
+			// Only decrement InProgress if we previously counted it.
+			if s.TableDetails[idx].Status == "in_progress" {
+				s.Tables.InProgress--
+			}
+		}
+		s.Tables.Completed++
+		s.TableDetails[idx].Status = "done"
+		s.TableDetails[idx].Transferred = ev.RowsTransferred
+		// Update total if transferred exceeds it (MongoDB estimates can be low).
+		if ev.RowsTransferred > s.TableDetails[idx].Total {
+			diff := ev.RowsTransferred - s.TableDetails[idx].Total
+			s.TableDetails[idx].Total = ev.RowsTransferred
+			s.Rows.Total += diff
 		}
 		elapsed := time.Since(c.tableStarted[ev.TableName])
 		c.log.Info("migration.table_completed",
@@ -204,13 +260,26 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		)
 
 	case engine.EventTableFailed:
-		s.Tables.InProgress--
-		s.Tables.Failed++
-		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			s.TableDetails[idx].Status = "failed"
-			if ev.Err != nil {
-				s.TableDetails[idx].Error = ev.Err.Error()
+		// Ensure table is in tableIndex (earlier events may have been dropped).
+		idx, ok := c.tableIndex[ev.TableName]
+		if !ok {
+			// Table not registered yet. Don't add to Rows.Total here — it may
+			// have been counted in EventMigrationStart.
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:  ev.TableName,
+				Total: ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+		} else {
+			if s.TableDetails[idx].Status == "in_progress" {
+				s.Tables.InProgress--
 			}
+		}
+		s.Tables.Failed++
+		s.TableDetails[idx].Status = "failed"
+		if ev.Err != nil {
+			s.TableDetails[idx].Error = ev.Err.Error()
 		}
 		c.log.Error("migration.table_failed",
 			"table", ev.TableName,

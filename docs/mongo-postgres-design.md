@@ -4,45 +4,50 @@
 
 ## Current Status
 
-_Last updated: 2026-08-31. Update this section at the end of every session._
+_Last updated: 2026-09-01. Update this section at the end of every session._
 
 ### Milestones
 
-| # | Task | Status | Branch / PR |
-|---|------|--------|-------------|
-| M0 | Sequential keyset resume (`Batch.LastKey`) | ✅ Merged to main | — |
-| M1 | Schema plan state table + CRUD + migration snapshot | ✅ Merged to main | PR #29 |
-| M2 | MongoDB DSN scheme detection + registry | ✅ Merged to main | PR #28 |
-| M3 | Document sampler + frequency table | 🔄 PR open, needs merge | `feature/m3-mongo-sampler` |
-| M4 | Schema inference + field options + name sanitizer | ⬜ Not started | blocked by M3 merge |
-| M5 | Index translation (v1 btree subset) | ⬜ Not started | blocked by M4 |
-| M6 | AI integration for mongo schema (optional) | ⬜ Not started | blocked by M4 |
-| M7 | API: `/analyze` mongo branch + schema-plan endpoints | ⬜ Not started | blocked by M1 ✓, M4 |
-| M8 | CLI: `project analyze` + `project schema` | ⬜ Not started | blocked by M7 |
-| M9 | BSON → Go converter (recursive, no `bson.D` marshal) | ⬜ Not started | blocked by M1 ✓ |
-| M10 | Mongo source adapter + `SetPlan` | ⬜ Not started | blocked by M0 ✓, M9 |
-| M11 | Register mongo adapter in registry | ⬜ Not started | blocked by M10 |
-| M12 | End-to-end test: mongo → postgres | ⬜ Not started | blocked by M11, M8 |
+| # | Task | Status | PR |
+|---|------|--------|----|
+| M0 | Sequential keyset resume (`Batch.LastKey`) | ✅ Merged to main | #27 |
+| M1 | Schema plan state table + CRUD + migration snapshot | ✅ Merged to main | #29 |
+| M2 | MongoDB DSN scheme detection + registry | ✅ Merged to main | #28 |
+| M3 | Document sampler + frequency table | ✅ Merged to main | #30 |
+| M4 | Schema inference + field options + name sanitizer | ✅ Merged to main | #31 |
+| M5 | Index translation (v1 btree subset) | ✅ Merged to main | #33 |
+| M6 | AI integration for mongo schema (optional) | ✅ Merged to main | #35 |
+| M7 | API: `/analyze` mongo branch + schema-plan endpoints | ✅ Merged to main | #37 |
+| M8 | CLI: `project analyze` + `project schema` | ✅ Merged to main | #38 |
+| M9 | BSON → Go converter (recursive, no `bson.D` marshal) | ✅ Merged to main | #32 |
+| M10 | Mongo source adapter + `SetPlan` | ✅ Merged to main | #34 |
+| M11 | Register mongo adapter in registry | ✅ Merged to main | #36 |
+| M12 | End-to-end test: mongo → postgres | ✅ Merged to main | #39 |
 
-### Next session starting point
+### Current state
 
-1. **Merge M3 PR** (`feature/m3-mongo-sampler`) on Gitea first.
-2. **Start M4** — schema inference (`analyzer/mongo/infer.go`). This is the critical path blocker for M7 and the M9→M10→M11 adapter chain.
+**The full MongoDB → PostgreSQL pipeline is on main.** `go build ./...` and
+`go test ./...` are both clean.
 
-### M4 implementation notes
+To try the analyze workflow:
+```bash
+xferdb server &
+xferdb project create --name myproject \
+  --source mongodb://localhost:27017/mydb \
+  --target postgres://user:pass@localhost/targetdb?sslmode=disable
+xferdb project use myproject
+xferdb project analyze          # sample + infer schema
+xferdb project schema           # review field decisions
+xferdb project schema --set orders.amount=numeric   # override a type
+xferdb migrate                  # run the migration
+```
 
-Takes a `CollectionSample` (from M3 `SampleCollection`) and produces:
-- `[]SchemaPlanRow` — recommended decisions ready to pass to `state.SavePlan`
-- `TableSchema` — what the target Postgres table should look like (for `CreateTable`)
-- Per-field `options []FieldOption` — alternatives the user can choose during schema review
-
-Key logic:
-- **Type mapping** — per the table in §Type Mapping below (ObjectId→text, Int32→integer, Int64→bigint, Double→double precision, Decimal128→numeric, Boolean→boolean, Date→timestamptz, Array→jsonb, Document→jsonb, Binary→bytea)
-- **Polymorphic widening** — Double+Decimal128→numeric, Int32+Int64→bigint, any+String→text, any+Document→jsonb; fall back to jsonb if no clean widening
-- **`_id` field** — always `is_pk=true`, strategy `direct`, column name `_id`, not nullable
-- **Name sanitizer** — invalid identifier chars→`_`, leading digit→prefix `_`, truncate to 63 bytes, suffix `_2`/`_3` on collision
-- **Nesting default** — Documents default to `as_jsonb`; options list includes `flatten` and `skip` as alternatives
-- **Nullable** — `absentCount > 0 || nullCount > 0` → `nullable=true`
+To run the e2e integration test:
+```bash
+XFERDB_TEST_MONGO_DSN=mongodb://localhost:27017/testdb \
+XFERDB_TEST_PG_DSN="postgres://user:pass@localhost/testdb?sslmode=disable" \
+go test ./e2e/... -v -timeout 120s
+```
 
 ### Process rule
 
@@ -103,7 +108,15 @@ Sample N documents per collection using MongoDB's `$sample` aggregation stage:
 db.collection.aggregate([{ $sample: { size: N } }])
 ```
 
-Default sample size: **2,000 documents**. Configurable via `--sample-size` on the
+Default sample size: **2,000 documents**, but this only applies below a document-count
+**threshold** (default **100,000** estimated documents per collection). At or above the
+threshold, sampling switches to a **percentage** of the collection (default **1%**),
+capped at a maximum document count (default **50,000**) so analysis stays fast even on
+collections with hundreds of millions of documents. This keeps the sample proportional
+to collection size instead of a fixed 2,000-document slice being 20% of one collection
+and 0.001% of another.
+
+Configurable via `--sample-size`, `--sample-threshold`, and `--sample-pct` on the
 `analyze` command only (not a global project setting). Larger samples improve accuracy
 at the cost of analysis time. Rare fields the sample never saw are handled at transfer
 time (see Runtime extras), not by raising the default N.
@@ -571,7 +584,7 @@ rows intact. `DELETE` (CLI `--reset`) wipes the collection's plan first.
     {
       "name": "orders",
       "estimated_count": 1247893,
-      "sample_size": 2000,
+      "sample_size": 12478,
       "fields": [
         {
           "name": "_id",
@@ -622,7 +635,8 @@ rows intact. `DELETE` (CLI `--reset`) wipes the collection's plan first.
 ```bash
 # Sample collections and infer schema (prints proposed Postgres schema)
 xferdb project analyze
-xferdb project analyze --sample-size 5000
+xferdb project analyze --sample-size 5000        # fixed count, below --sample-threshold
+xferdb project analyze --sample-pct 2 --sample-threshold 50000  # 2% sample once a collection hits 50k docs
 xferdb project analyze --ai                      # include AI annotations (frequency table only)
 xferdb project analyze --ai --ai-include-samples   # opt-in: redacted sample docs in the prompt
 
@@ -692,7 +706,8 @@ parallel, then proceed down the two tracks (analysis pipeline and adapter) concu
 
 ## Decisions (was: open questions)
 
-1. **Sample size default** — 2,000. Per-run `--sample-size` only.
+1. **Sample size default** — 2,000 below a 100,000-document threshold; 1% (capped at 50,000)
+   at or above it. Per-run `--sample-size`, `--sample-threshold`, `--sample-pct` overrides.
 2. **Flatten depth** — One level. No recursion. No array-of-documents → child tables.
 3. **`_id` column name** — Keep `_id`. Rename is an override.
 4. **Re-analysis** — Refreshes inferred rows; does not clobber `overridden`. `--reset` / DELETE wipes first.

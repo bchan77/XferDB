@@ -11,7 +11,7 @@
 | PostgreSQL / YugabyteDB | ✅ | ✅ | Tested against YugabyteDB 2024.2 |
 | MySQL | ✅ | ✅ | Implemented, pending live DB testing |
 | SQLite | ✅ | ✅ | Fully working |
-| MongoDB | 🔜 | 🔜 | Coming soon |
+| MongoDB | ✅ | 🔜 | Source with schema inference; target coming soon |
 | Cassandra | 🔜 | 🔜 | Coming soon |
 
 > ✅ = Working &nbsp;|&nbsp; 🔜 = Planned
@@ -174,6 +174,53 @@ xferdb project preflight [name]
 xferdb project delete <name>
 ```
 
+### Schema analysis (MongoDB → PostgreSQL)
+
+When migrating from MongoDB to PostgreSQL, XferDB can sample your collections and infer a schema plan.
+
+```bash
+# Analyze collections and infer Postgres schema
+xferdb project analyze [name]
+
+# With options
+xferdb project analyze \
+  --sample-size 5000 \         # docs to sample per collection (default 2000)
+  --sample-pct 1.0 \           # percentage for large collections (default 1%)
+  --sample-threshold 100000 \  # switch to percentage above this count
+  --ai                         # enable AI annotations for ambiguous fields
+```
+
+Review and override the inferred schema:
+
+```bash
+# View the inferred schema plan
+xferdb project schema
+
+# View a single collection
+xferdb project schema --collection users
+
+# Override a field's Postgres type
+xferdb project schema --set users.age=integer
+xferdb project schema --set orders.total=numeric
+
+# Override field strategy (direct, skip, flatten, as_jsonb)
+xferdb project schema --set users.metadata=as_jsonb
+xferdb project schema --set users.internal_flags=skip
+
+# Reset schema plan and re-analyze
+xferdb project schema --reset
+xferdb project schema --reset --collection users  # reset one collection
+```
+
+**Field strategies:**
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `direct` | Map to a Postgres column (default for scalar types) |
+| `as_jsonb` | Store as JSONB (for nested objects/arrays) |
+| `flatten` | Flatten nested object fields into separate columns |
+| `skip` | Exclude field from migration |
+
 ### Migration commands
 
 ```bash
@@ -259,9 +306,14 @@ mysql://user:pass@host:3306/dbname
 # SQLite
 sqlite:///absolute/path/to/file.db
 sqlite://relative/path.db
+
+# MongoDB
+mongodb://user:pass@host:27017/dbname
+mongodb://user:pass@host:27017/dbname?authSource=admin
+mongodb+srv://user:pass@cluster.mongodb.net/dbname  # Atlas SRV format
 ```
 
-> **Tip:** If your password contains `!`, use single quotes or `set +H` in zsh to avoid history expansion.
+> **Tip:** If your password contains special characters (`!`, `@`, `#`, etc.), URL-encode them: `!` → `%21`, `@` → `%40`. Use single quotes around the DSN to prevent shell expansion.
 
 ---
 
@@ -381,7 +433,8 @@ go build -o xferdb ./cmd/xferdb
 - [x] Live resource monitoring (goroutines, heap, CPU%)
 - [x] Selective table migration (`--tables`)
 - [x] Structured server logging (`--log-file`, `--log-level`)
-- [ ] MongoDB adapter
+- [x] MongoDB source adapter with schema inference
+- [ ] MongoDB target adapter
 - [ ] Web UI
 - [ ] WebSocket live progress
 - [ ] Scheduled / repeated migrations
@@ -397,7 +450,7 @@ XferDB follows [Semantic Versioning](https://semver.org/).
 |---------|-----------|
 | `v0.2.0` | Current — PostgreSQL/MySQL/SQLite, parallel migration, preflight |
 | `v0.3.0` | Native schema transfer, bulk copy, resource monitoring, server logging |
-| `v0.4.0` | MongoDB adapter |
+| `v0.4.0` | MongoDB source adapter with schema inference |
 | `v0.5.0` | Web UI |
 | `v1.0.0` | Stable release |
 

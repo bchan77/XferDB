@@ -36,6 +36,11 @@ func NewServer(db *state.MetaDB, log *slog.Logger) *Server {
 	}
 }
 
+// Handler returns the HTTP handler for the server, useful for testing.
+func (s *Server) Handler() http.Handler {
+	return s.routes()
+}
+
 // ListenAndServe starts the HTTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
 	if n, err := s.db.MarkInterruptedMigrations(context.Background()); err != nil {

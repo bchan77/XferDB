@@ -130,6 +130,25 @@ func (m *MetaDB) GetPlan(ctx context.Context, projectID, collection string) ([]S
 	return out, nil
 }
 
+// GetPlanForProject returns all schema plan rows for a project (all collections),
+// ordered by collection then field_name.
+func (m *MetaDB) GetPlanForProject(ctx context.Context, projectID string) ([]SchemaPlanRow, error) {
+	var rows []schemaPlanDBRow
+	if err := m.db.SelectContext(ctx, &rows, `
+		SELECT project_id, collection, field_name, pg_column, pg_type, strategy,
+		       is_pk, nullable, overridden, created_at
+		FROM schema_plans
+		WHERE project_id = ?
+		ORDER BY collection, field_name`, projectID); err != nil {
+		return nil, fmt.Errorf("get plan for project %s: %w", projectID, err)
+	}
+	out := make([]SchemaPlanRow, len(rows))
+	for i, r := range rows {
+		out[i] = r.toRow()
+	}
+	return out, nil
+}
+
 // ListPlanCollections returns the distinct collection names that have a saved plan
 // for the given project.
 func (m *MetaDB) ListPlanCollections(ctx context.Context, projectID string) ([]string, error) {
