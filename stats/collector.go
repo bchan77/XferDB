@@ -109,6 +109,13 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	defer c.mu.RUnlock()
 	s := c.snapshot
 	s.ElapsedSeconds = time.Since(c.startedAt).Seconds()
+	// Recompute Rows.Total from per-table totals to ensure consistency.
+	// This is more robust than tracking increments across multiple event handlers.
+	var total int64
+	for _, t := range s.TableDetails {
+		total += t.Total
+	}
+	s.Rows.Total = total
 	return s
 }
 
