@@ -370,6 +370,10 @@ func (e *Engine) connect(ctx context.Context) error {
 		if err := mongoSrc.SetPlan(plan); err != nil {
 			return fmt.Errorf("set schema plan: %w", err)
 		}
+		// Enable accurate counts if requested (slower but reliable).
+		if e.project.TransferConfig.AccurateCounts {
+			mongoSrc.SetAccurateCounts(true)
+		}
 	}
 
 	e.source = src
