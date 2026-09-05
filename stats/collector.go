@@ -181,21 +181,43 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.Rows.Transferred = c.totalTransferred(ev)
 		c.updateRate(s)
 		c.updateReadWriteRates(s, ev)
-		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			s.TableDetails[idx].Transferred = ev.RowsTransferred
+		// Ensure table is in tableIndex (EventTableStart may have been dropped).
+		idx, ok := c.tableIndex[ev.TableName]
+		if !ok {
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:   ev.TableName,
+				Status: "in_progress",
+				Total:  ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+			s.Rows.Total += ev.RowsTotal
 		}
+		s.TableDetails[idx].Transferred = ev.RowsTransferred
+		s.TableDetails[idx].Status = "in_progress"
 		if s.Rows.RatePerSecond > 0 && s.Rows.Total > s.Rows.Transferred {
 			s.ETASeconds = float64(s.Rows.Total-s.Rows.Transferred) / s.Rows.RatePerSecond
 		}
 
 	case engine.EventTableDone:
-		s.Tables.InProgress--
-		s.Tables.Completed++
 		s.Rows.Transferred = c.totalTransferred(ev)
-		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			s.TableDetails[idx].Status = "done"
-			s.TableDetails[idx].Transferred = ev.RowsTransferred
+		// Ensure table is in tableIndex (earlier events may have been dropped).
+		idx, ok := c.tableIndex[ev.TableName]
+		if !ok {
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:  ev.TableName,
+				Total: ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+			s.Rows.Total += ev.RowsTotal
+		} else {
+			// Only decrement InProgress if we previously counted it.
+			s.Tables.InProgress--
 		}
+		s.Tables.Completed++
+		s.TableDetails[idx].Status = "done"
+		s.TableDetails[idx].Transferred = ev.RowsTransferred
 		elapsed := time.Since(c.tableStarted[ev.TableName])
 		c.log.Info("migration.table_completed",
 			"table", ev.TableName,
@@ -204,13 +226,23 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		)
 
 	case engine.EventTableFailed:
-		s.Tables.InProgress--
+		// Ensure table is in tableIndex (earlier events may have been dropped).
+		idx, ok := c.tableIndex[ev.TableName]
+		if !ok {
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:  ev.TableName,
+				Total: ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+			s.Rows.Total += ev.RowsTotal
+		} else {
+			s.Tables.InProgress--
+		}
 		s.Tables.Failed++
-		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			s.TableDetails[idx].Status = "failed"
-			if ev.Err != nil {
-				s.TableDetails[idx].Error = ev.Err.Error()
-			}
+		s.TableDetails[idx].Status = "failed"
+		if ev.Err != nil {
+			s.TableDetails[idx].Error = ev.Err.Error()
 		}
 		c.log.Error("migration.table_failed",
 			"table", ev.TableName,

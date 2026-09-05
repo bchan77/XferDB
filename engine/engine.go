@@ -354,6 +354,12 @@ func (e *Engine) connect(ctx context.Context) error {
 
 	// MongoDB adapters need the schema plan injected after connect.
 	if mongoSrc, ok := src.(*mongo.Source); ok {
+		// MongoDB uses keyset pagination, not offset-based. Segment workers
+		// split tables by offset ranges which doesn't work with MongoDB.
+		if e.project.TransferConfig.SegmentWorkers > 1 {
+			return fmt.Errorf("--segment-workers is not supported for MongoDB sources (use --table-workers instead)")
+		}
+
 		plan, err := e.db.GetPlanForProject(ctx, e.project.ID)
 		if err != nil {
 			return fmt.Errorf("load schema plan: %w", err)
