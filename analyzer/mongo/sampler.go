@@ -14,7 +14,26 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
-const DefaultSampleSize = 2000
+const (
+	// DefaultSampleSize is the fixed number of documents sampled from a
+	// collection whose estimated document count is below DefaultSampleThreshold.
+	DefaultSampleSize = 2000
+
+	// DefaultSampleThreshold is the estimated document count at or above which
+	// sampling switches from a fixed DefaultSampleSize to DefaultSamplePct of
+	// the collection, so large collections get a proportionally larger and
+	// more representative sample instead of a vanishingly small fixed slice.
+	DefaultSampleThreshold = 100_000
+
+	// DefaultSamplePct is the percentage of documents sampled once a
+	// collection's estimated count reaches the threshold.
+	DefaultSamplePct = 1.0
+
+	// DefaultMaxSampled caps the number of documents sampled under the
+	// percentage rule, regardless of collection size, so analyze stays fast
+	// even on collections with hundreds of millions of documents.
+	DefaultMaxSampled = 50_000
+)
 
 // TypeCount records how many documents had a given BSON type for a field.
 type TypeCount struct {
@@ -51,21 +70,48 @@ type CollectionSample struct {
 	Fields         []FieldFrequency `json:"fields"`
 }
 
+// SamplerOptions configures how many documents Sampler draws from each
+// collection. Below Threshold estimated documents, SampleSize is used as a
+// fixed count. At or above Threshold, SamplePct of the collection is used
+// instead (capped at MaxSampled), so large collections get a proportionally
+// larger sample rather than the same fixed slice as a tiny one. Zero-valued
+// fields fall back to the Default* constants.
+type SamplerOptions struct {
+	SampleSize int
+	Threshold  int64
+	SamplePct  float64
+	MaxSampled int
+}
+
+func (o SamplerOptions) withDefaults() SamplerOptions {
+	if o.SampleSize <= 0 {
+		o.SampleSize = DefaultSampleSize
+	}
+	if o.Threshold <= 0 {
+		o.Threshold = DefaultSampleThreshold
+	}
+	if o.SamplePct <= 0 {
+		o.SamplePct = DefaultSamplePct
+	}
+	if o.MaxSampled <= 0 {
+		o.MaxSampled = DefaultMaxSampled
+	}
+	return o
+}
+
 // Sampler connects to a MongoDB instance and samples documents to build
 // field frequency tables for schema inference.
 type Sampler struct {
-	client     *mongo.Client
-	database   string
-	sampleSize int
+	client   *mongo.Client
+	database string
+	opts     SamplerOptions
 }
 
 // NewSampler connects to MongoDB using the full URI (stored verbatim in
-// ConnectionConfig.DSN). sampleSize is the number of documents to sample
-// per collection; pass 0 to use DefaultSampleSize.
-func NewSampler(ctx context.Context, dsn string, sampleSize int) (*Sampler, error) {
-	if sampleSize <= 0 {
-		sampleSize = DefaultSampleSize
-	}
+// ConnectionConfig.DSN). See SamplerOptions for how the per-collection
+// sample size is chosen; zero-valued fields use their defaults.
+func NewSampler(ctx context.Context, dsn string, opts SamplerOptions) (*Sampler, error) {
+	opts = opts.withDefaults()
 
 	clientOpts := options.Client().
 		ApplyURI(dsn).
@@ -90,10 +136,26 @@ func NewSampler(ctx context.Context, dsn string, sampleSize int) (*Sampler, erro
 	}
 
 	return &Sampler{
-		client:     client,
-		database:   dbName,
-		sampleSize: sampleSize,
+		client:   client,
+		database: dbName,
+		opts:     opts,
 	}, nil
+}
+
+// effectiveSampleSize picks the number of documents to sample for a
+// collection given its estimated document count.
+func (s *Sampler) effectiveSampleSize(estimatedCount int64) int {
+	if estimatedCount < s.opts.Threshold {
+		return s.opts.SampleSize
+	}
+	computed := int64(float64(estimatedCount) * s.opts.SamplePct / 100)
+	if computed > int64(s.opts.MaxSampled) {
+		computed = int64(s.opts.MaxSampled)
+	}
+	if computed < 1 {
+		computed = 1
+	}
+	return int(computed)
 }
 
 // Close disconnects from MongoDB.
@@ -134,14 +196,15 @@ func (s *Sampler) SampleCollection(ctx context.Context, collection string) (*Col
 	if err != nil {
 		return nil, fmt.Errorf("estimated count %s: %w", collection, err)
 	}
+	sampleSize := s.effectiveSampleSize(estimatedCount)
 
 	// Use $sample to draw a random subset. For small collections the sample
 	// may be the entire collection.
 	pipeline := mongo.Pipeline{
-		{{Key: "$sample", Value: bson.D{{Key: "size", Value: s.sampleSize}}}},
+		{{Key: "$sample", Value: bson.D{{Key: "size", Value: sampleSize}}}},
 	}
 	cursor, err := coll.Aggregate(ctx, pipeline,
-		options.Aggregate().SetBatchSize(int32(s.sampleSize)))
+		options.Aggregate().SetBatchSize(int32(sampleSize)))
 	if err != nil {
 		return nil, fmt.Errorf("sample %s: %w", collection, err)
 	}

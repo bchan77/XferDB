@@ -33,7 +33,9 @@ var projectSchemaCmd = &cobra.Command{
 
 func init() {
 	// analyze flags
-	projectAnalyzeCmd.Flags().Int("sample-size", 0, "number of documents to sample per collection (default 2000)")
+	projectAnalyzeCmd.Flags().Int("sample-size", 0, "fixed number of documents to sample per collection, below --sample-threshold (default 2000)")
+	projectAnalyzeCmd.Flags().Float64("sample-pct", 0, "percentage of documents to sample once a collection reaches --sample-threshold (default 1.0)")
+	projectAnalyzeCmd.Flags().Int64("sample-threshold", 0, "estimated document count at which sampling switches from --sample-size to --sample-pct (default 100000)")
 	projectAnalyzeCmd.Flags().Bool("ai", false, "enable AI annotations for ambiguous fields")
 
 	// schema flags
@@ -60,11 +62,19 @@ func runProjectAnalyze(cmd *cobra.Command, args []string) error {
 	}
 
 	sampleSize, _ := cmd.Flags().GetInt("sample-size")
+	samplePct, _ := cmd.Flags().GetFloat64("sample-pct")
+	sampleThreshold, _ := cmd.Flags().GetInt64("sample-threshold")
 	ai, _ := cmd.Flags().GetBool("ai")
 
 	body := map[string]any{}
 	if sampleSize > 0 {
 		body["sample_size"] = sampleSize
+	}
+	if samplePct > 0 {
+		body["sample_pct"] = samplePct
+	}
+	if sampleThreshold > 0 {
+		body["sample_threshold"] = sampleThreshold
 	}
 	if ai {
 		body["ai"] = true
