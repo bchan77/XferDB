@@ -42,7 +42,8 @@ func ConvertDocument(doc bson.D, plan []state.SchemaPlanRow, extraCol string) (m
 		if err != nil {
 			return nil, fmt.Errorf("marshal _extra: %w", err)
 		}
-		result[extraCol] = b
+		// Return as string for PostgreSQL COPY compatibility.
+		result[extraCol] = string(b)
 	}
 
 	return result, nil
@@ -70,7 +71,9 @@ func convertDoc(doc bson.D, prefix string, plan map[string]state.SchemaPlanRow, 
 			if err != nil {
 				return fmt.Errorf("as_jsonb %s: %w", fieldPath, err)
 			}
-			out[row.PgColumn] = b
+			// Return as string for PostgreSQL COPY compatibility.
+			// COPY expects JSON as text, not []byte.
+			out[row.PgColumn] = string(b)
 
 		case "flatten":
 			nested, ok := elem.Value.(bson.D)
