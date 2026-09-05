@@ -456,6 +456,19 @@ XferDB follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## Sponsorship
+
+If XferDB saves you time on a database migration, consider sponsoring the project. Funds go toward the things that keep development moving:
+
+- **AI assistance** — coding copilots and inference costs during development
+- **Testing infrastructure** — managed PostgreSQL, MySQL, YugabyteDB, and MongoDB instances across versions and platforms for CI
+- **JetBrains license** — IDE for ongoing development
+- **Coffee** — because the other three need fuel
+
+The easiest way to sponsor is via [GitHub Sponsors](https://github.com/sponsors/bchan77). A "Sponsor" button will also appear at the top of the GitHub repository once sponsorship is enabled there.
+
+---
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
