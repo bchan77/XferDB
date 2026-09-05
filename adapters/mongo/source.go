@@ -26,6 +26,10 @@ type Source struct {
 	planByCollection map[string][]state.SchemaPlanRow
 	// extraCol is the sanitised name of the _extra jsonb column (default "_extra").
 	extraColByCollection map[string]string
+
+	// accurateCounts uses CountDocuments instead of EstimatedDocumentCount.
+	// Slower but accurate — useful when estimates are unreliable.
+	accurateCounts bool
 }
 
 // NewSource returns an uninitialised Source. Call Connect before use.
@@ -146,9 +150,28 @@ func (s *Source) GetSchema(ctx context.Context, collection string) (*adapters.Ta
 	return &adapters.TableSchema{Name: collection, Columns: cols}, nil
 }
 
+// SetAccurateCounts enables accurate document counting using CountDocuments
+// instead of EstimatedDocumentCount. Slower but accurate.
+func (s *Source) SetAccurateCounts(enabled bool) {
+	s.accurateCounts = enabled
+}
+
 func (s *Source) GetRowCount(ctx context.Context, collection string) (int64, error) {
-	// EstimatedDocumentCount is fast (uses collection metadata).
-	return s.client.Database(s.database).Collection(collection).EstimatedDocumentCount(ctx)
+	coll := s.client.Database(s.database).Collection(collection)
+	if s.accurateCounts {
+		// CountDocuments does a full collection scan — accurate but slow.
+		// Use a longer timeout (5 min) since large collections can take a while.
+		countCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		n, err := coll.CountDocuments(countCtx, bson.D{})
+		if err != nil {
+			// Fall back to estimated count if accurate count fails.
+			return coll.EstimatedDocumentCount(ctx)
+		}
+		return n, nil
+	}
+	// EstimatedDocumentCount is fast (uses collection metadata) but can be inaccurate.
+	return coll.EstimatedDocumentCount(ctx)
 }
 
 // GetPKRange is not supported for MongoDB — ObjectId range splits are deferred
