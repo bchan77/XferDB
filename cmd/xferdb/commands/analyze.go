@@ -121,6 +121,16 @@ func printMongoAnalysis(result map[string]any) {
 		schema, _ := m["schema"].(map[string]any)
 
 		fmt.Printf("Collection: %s\n", coll)
+
+		// Print sample stats if available
+		if schema != nil {
+			estCount, _ := schema["estimated_count"].(float64)
+			sampleSize, _ := schema["sample_size"].(float64)
+			if estCount > 0 {
+				pct := sampleSize / estCount * 100
+				fmt.Printf("  Sampled: %d / %d documents (%.2f%%)\n", int(sampleSize), int(estCount), pct)
+			}
+		}
 		if schema == nil {
 			warns, _ := m["warnings"].([]any)
 			for _, w := range warns {

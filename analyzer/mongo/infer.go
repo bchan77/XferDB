@@ -27,9 +27,11 @@ type InferredField struct {
 
 // InferredSchema is the full inference result for one collection.
 type InferredSchema struct {
-	Collection  string              `json:"collection"`
-	Fields      []InferredField     `json:"fields"`
-	TableSchema adapters.TableSchema `json:"table_schema"`
+	Collection     string               `json:"collection"`
+	EstimatedCount int64                `json:"estimated_count"` // total docs in collection
+	SampleSize     int                  `json:"sample_size"`     // docs actually sampled
+	Fields         []InferredField      `json:"fields"`
+	TableSchema    adapters.TableSchema `json:"table_schema"`
 }
 
 // PlanRows extracts just the SchemaPlanRows, ready for state.SavePlan.
@@ -75,8 +77,10 @@ func InferSchema(sample *CollectionSample, projectID string) (*InferredSchema, e
 	})
 
 	return &InferredSchema{
-		Collection: sample.Collection,
-		Fields:     fields,
+		Collection:     sample.Collection,
+		EstimatedCount: sample.EstimatedCount,
+		SampleSize:     sample.SampleSize,
+		Fields:         fields,
 		TableSchema: adapters.TableSchema{
 			Name:    sample.Collection,
 			Columns: columns,
