@@ -109,14 +109,29 @@ var projectListCmd = &cobra.Command{
 		}
 		json.NewDecoder(resp.Body).Decode(&projects)
 
+		// Get current project (ignore error if none set).
+		currentProj, _ := currentProject("")
+
 		if len(projects) == 0 {
 			fmt.Println("No projects found.")
+			if currentProj != "" {
+				fmt.Printf("\nActive project context: %s (not found)\n", currentProj)
+			}
 			return nil
 		}
-		fmt.Printf("%-36s  %-20s  %s\n", "ID", "Name", "Created")
-		fmt.Println(strings.Repeat("-", 72))
+
+		fmt.Printf("     %-36s  %-20s  %s\n", "ID", "Name", "Created")
+		fmt.Println(strings.Repeat("-", 77))
 		for _, p := range projects {
-			fmt.Printf("%-36s  %-20s  %s\n", p.ID, p.Name, p.CreatedAt.Format("2006-01-02 15:04"))
+			marker := "   "
+			if p.Name == currentProj {
+				marker = " → "
+			}
+			fmt.Printf("%s%-36s  %-20s  %s\n", marker, p.ID, p.Name, p.CreatedAt.Format("2006-01-02 15:04"))
+		}
+
+		if currentProj == "" {
+			fmt.Println("\nNo active project. Run 'xferdb project use <name>' to set one.")
 		}
 		return nil
 	},
