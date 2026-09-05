@@ -91,6 +91,13 @@ func InferSchema(sample *CollectionSample, projectID string) (*InferredSchema, e
 func inferField(ff FieldFrequency, projectID, collection string, seen map[string]bool) InferredField {
 	nullable := ff.NullCount > 0 || ff.AbsentCount > 0
 
+	// Nested fields (containing a dot) are always nullable in MongoDB since
+	// documents are schemaless and nested paths can be absent even if the
+	// sample showed 100% coverage.
+	if strings.Contains(ff.FieldName, ".") {
+		nullable = true
+	}
+
 	// _id is always primary key, never nullable.
 	if ff.FieldName == "_id" {
 		pgType, opts, warns := inferIDType(ff.Types)
