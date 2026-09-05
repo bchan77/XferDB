@@ -145,9 +145,15 @@ func NewSampler(ctx context.Context, dsn string, opts SamplerOptions) (*Sampler,
 // effectiveSampleSize picks the number of documents to sample for a
 // collection given its estimated document count.
 func (s *Sampler) effectiveSampleSize(estimatedCount int64) int {
+	// When user requests 100%, sample the entire collection regardless of thresholds.
+	if s.opts.SamplePct >= 100 {
+		return int(estimatedCount)
+	}
+	// Below threshold: use fixed sample size.
 	if estimatedCount < s.opts.Threshold {
 		return s.opts.SampleSize
 	}
+	// At or above threshold: use percentage-based sampling with cap.
 	computed := int64(float64(estimatedCount) * s.opts.SamplePct / 100)
 	if computed > int64(s.opts.MaxSampled) {
 		computed = int64(s.opts.MaxSampled)
