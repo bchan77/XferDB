@@ -108,7 +108,15 @@ Sample N documents per collection using MongoDB's `$sample` aggregation stage:
 db.collection.aggregate([{ $sample: { size: N } }])
 ```
 
-Default sample size: **2,000 documents**. Configurable via `--sample-size` on the
+Default sample size: **2,000 documents**, but this only applies below a document-count
+**threshold** (default **100,000** estimated documents per collection). At or above the
+threshold, sampling switches to a **percentage** of the collection (default **1%**),
+capped at a maximum document count (default **50,000**) so analysis stays fast even on
+collections with hundreds of millions of documents. This keeps the sample proportional
+to collection size instead of a fixed 2,000-document slice being 20% of one collection
+and 0.001% of another.
+
+Configurable via `--sample-size`, `--sample-threshold`, and `--sample-pct` on the
 `analyze` command only (not a global project setting). Larger samples improve accuracy
 at the cost of analysis time. Rare fields the sample never saw are handled at transfer
 time (see Runtime extras), not by raising the default N.
@@ -576,7 +584,7 @@ rows intact. `DELETE` (CLI `--reset`) wipes the collection's plan first.
     {
       "name": "orders",
       "estimated_count": 1247893,
-      "sample_size": 2000,
+      "sample_size": 12478,
       "fields": [
         {
           "name": "_id",
@@ -627,7 +635,8 @@ rows intact. `DELETE` (CLI `--reset`) wipes the collection's plan first.
 ```bash
 # Sample collections and infer schema (prints proposed Postgres schema)
 xferdb project analyze
-xferdb project analyze --sample-size 5000
+xferdb project analyze --sample-size 5000        # fixed count, below --sample-threshold
+xferdb project analyze --sample-pct 2 --sample-threshold 50000  # 2% sample once a collection hits 50k docs
 xferdb project analyze --ai                      # include AI annotations (frequency table only)
 xferdb project analyze --ai --ai-include-samples   # opt-in: redacted sample docs in the prompt
 
@@ -697,7 +706,8 @@ parallel, then proceed down the two tracks (analysis pipeline and adapter) concu
 
 ## Decisions (was: open questions)
 
-1. **Sample size default** — 2,000. Per-run `--sample-size` only.
+1. **Sample size default** — 2,000 below a 100,000-document threshold; 1% (capped at 50,000)
+   at or above it. Per-run `--sample-size`, `--sample-threshold`, `--sample-pct` overrides.
 2. **Flatten depth** — One level. No recursion. No array-of-documents → child tables.
 3. **`_id` column name** — Keep `_id`. Rename is an override.
 4. **Re-analysis** — Refreshes inferred rows; does not clobber `overridden`. `--reset` / DELETE wipes first.
