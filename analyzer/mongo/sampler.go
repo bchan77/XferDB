@@ -70,6 +70,10 @@ type CollectionSample struct {
 	Fields         []FieldFrequency `json:"fields"`
 }
 
+// ProgressFunc is called during sampling to report progress.
+// scanned is the number of documents processed so far, target is the total to sample.
+type ProgressFunc func(collection string, scanned, target int)
+
 // SamplerOptions configures how many documents Sampler draws from each
 // collection. Below Threshold estimated documents, SampleSize is used as a
 // fixed count. At or above Threshold, SamplePct of the collection is used
@@ -196,6 +200,12 @@ func (s *Sampler) ListSampleableCollections(ctx context.Context) ([]string, erro
 // SampleCollection samples up to s.sampleSize documents from a collection and
 // returns the field frequency table.
 func (s *Sampler) SampleCollection(ctx context.Context, collection string) (*CollectionSample, error) {
+	return s.SampleCollectionWithProgress(ctx, collection, nil)
+}
+
+// SampleCollectionWithProgress is like SampleCollection but calls progressFn
+// periodically to report progress. progressFn may be nil.
+func (s *Sampler) SampleCollectionWithProgress(ctx context.Context, collection string, progressFn ProgressFunc) (*CollectionSample, error) {
 	coll := s.client.Database(s.database).Collection(collection)
 
 	estimatedCount, err := coll.EstimatedDocumentCount(ctx)
@@ -204,21 +214,40 @@ func (s *Sampler) SampleCollection(ctx context.Context, collection string) (*Col
 	}
 	sampleSize := s.effectiveSampleSize(estimatedCount)
 
-	// Use $sample to draw a random subset. For small collections the sample
-	// may be the entire collection.
-	pipeline := mongo.Pipeline{
-		{{Key: "$sample", Value: bson.D{{Key: "size", Value: sampleSize}}}},
+	// Report initial progress (0 scanned).
+	if progressFn != nil {
+		progressFn(collection, 0, sampleSize)
 	}
-	cursor, err := coll.Aggregate(ctx, pipeline,
-		options.Aggregate().SetBatchSize(int32(sampleSize)))
-	if err != nil {
-		return nil, fmt.Errorf("sample %s: %w", collection, err)
+
+	var cursor *mongo.Cursor
+
+	// When sampling 100% (or more than estimated), use find() instead of $sample.
+	// $sample is slow for large samples because it randomly shuffles documents.
+	if sampleSize >= int(estimatedCount) {
+		cursor, err = coll.Find(ctx, bson.D{},
+			options.Find().SetBatchSize(10000))
+		if err != nil {
+			return nil, fmt.Errorf("find %s: %w", collection, err)
+		}
+	} else {
+		// Use $sample to draw a random subset.
+		pipeline := mongo.Pipeline{
+			{{Key: "$sample", Value: bson.D{{Key: "size", Value: sampleSize}}}},
+		}
+		cursor, err = coll.Aggregate(ctx, pipeline,
+			options.Aggregate().SetBatchSize(10000))
+		if err != nil {
+			return nil, fmt.Errorf("sample %s: %w", collection, err)
+		}
 	}
 	defer cursor.Close(ctx)
 
 	// freq maps field path → accumulator.
 	freq := make(map[string]*fieldAcc)
 	totalDocs := 0
+
+	// Report progress every progressInterval documents.
+	const progressInterval = 10000
 
 	for cursor.Next(ctx) {
 		var doc bson.D
@@ -227,9 +256,19 @@ func (s *Sampler) SampleCollection(ctx context.Context, collection string) (*Col
 		}
 		totalDocs++
 		walkDocument(doc, "", freq)
+
+		// Report progress periodically.
+		if progressFn != nil && totalDocs%progressInterval == 0 {
+			progressFn(collection, totalDocs, sampleSize)
+		}
 	}
 	if err := cursor.Err(); err != nil {
 		return nil, fmt.Errorf("cursor error in %s: %w", collection, err)
+	}
+
+	// Final progress report.
+	if progressFn != nil {
+		progressFn(collection, totalDocs, sampleSize)
 	}
 
 	// Mark absent counts: every field that was not in a document contributes

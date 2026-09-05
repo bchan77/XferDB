@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -11,7 +12,12 @@ import (
 
 // AnalyzeMongo handles POST /api/v1/projects/{id}/analyze when the source is MongoDB.
 // It samples collections, infers the schema plan, persists it as a draft, and
-// returns the full InferredSchema list for review.
+// streams progress events as newline-delimited JSON (NDJSON).
+//
+// Event types:
+//   - {"type":"progress","collection":"name","scanned":1000,"target":50000}
+//   - {"type":"collection","collection":"name","schema":{...}}
+//   - {"type":"done","total_collections":5,"total_fields":42}
 func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, projectID string, dsn string) {
 	var req struct {
 		SampleSize      int     `json:"sample_size"`
@@ -41,10 +47,34 @@ func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	// Set up streaming response.
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, canFlush := w.(http.Flusher)
+	writeEvent := func(event any) {
+		data, _ := json.Marshal(event)
+		fmt.Fprintf(w, "%s\n", data)
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	// Progress callback for row-level updates.
+	progressFn := func(collection string, scanned, target int) {
+		writeEvent(map[string]any{
+			"type":       "progress",
+			"collection": collection,
+			"scanned":    scanned,
+			"target":     target,
+		})
+	}
+
 	annotator := mongoanalyzer.NewAnnotator()
 
 	type collectionResult struct {
-		Collection string                       `json:"collection"`
+		Collection string                        `json:"collection"`
 		Schema     *mongoanalyzer.InferredSchema `json:"schema"`
 		Warnings   []string                      `json:"warnings,omitempty"`
 	}
@@ -53,19 +83,27 @@ func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, p
 	var allPlanRows []state.SchemaPlanRow
 
 	for _, coll := range collections {
-		sample, err := sampler.SampleCollection(ctx, coll)
+		sample, err := sampler.SampleCollectionWithProgress(ctx, coll, progressFn)
 		if err != nil {
 			h.Log.Warn("mongo.analyze: sample failed", "collection", coll, "error", err)
 			results = append(results, collectionResult{
 				Collection: coll,
 				Warnings:   []string{"sampling failed: " + err.Error()},
 			})
+			writeEvent(map[string]any{
+				"type":       "collection",
+				"collection": coll,
+				"warnings":   []string{"sampling failed: " + err.Error()},
+			})
 			continue
 		}
 
 		schema, err := mongoanalyzer.InferSchema(sample, projectID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "infer schema for "+coll+": "+err.Error())
+			writeEvent(map[string]any{
+				"type":  "error",
+				"error": "infer schema for " + coll + ": " + err.Error(),
+			})
 			return
 		}
 
@@ -80,12 +118,22 @@ func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, p
 
 		// Persist draft plan — does not clobber overridden rows.
 		if err := h.DB.SavePlan(ctx, schema.PlanRows()); err != nil {
-			writeError(w, http.StatusInternalServerError, "save plan for "+coll+": "+err.Error())
+			writeEvent(map[string]any{
+				"type":  "error",
+				"error": "save plan for " + coll + ": " + err.Error(),
+			})
 			return
 		}
 
 		allPlanRows = append(allPlanRows, schema.PlanRows()...)
 		results = append(results, collectionResult{Collection: coll, Schema: schema})
+
+		// Stream collection result.
+		writeEvent(map[string]any{
+			"type":       "collection",
+			"collection": coll,
+			"schema":     schema,
+		})
 	}
 
 	h.Log.Info("project.mongo.analyzed",
@@ -94,9 +142,11 @@ func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, p
 		"fields", len(allPlanRows),
 	)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"type":        "mongo_infer",
-		"collections": results,
+	// Final done event.
+	writeEvent(map[string]any{
+		"type":              "done",
+		"total_collections": len(collections),
+		"total_fields":      len(allPlanRows),
 	})
 }
 
