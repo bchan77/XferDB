@@ -152,17 +152,25 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 	case engine.EventTableStart:
 		s.Phase = "in_progress"
 		s.CurrentTable = ev.TableName
-		s.Tables.Total++
-		s.Tables.InProgress++
 		c.tableStarted[ev.TableName] = time.Now()
 		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			// Table already registered from EventMigrationStart.
+			// Only update total if it was zero (GetRowCount failed earlier).
 			if s.TableDetails[idx].Total == 0 && ev.RowsTotal > 0 {
 				s.Rows.Total += ev.RowsTotal
 				s.TableDetails[idx].Total = ev.RowsTotal
 			}
+			// Only count as new in-progress if not already in progress.
+			if s.TableDetails[idx].Status != "in_progress" {
+				s.Tables.Total++
+				s.Tables.InProgress++
+			}
 			s.TableDetails[idx].Status = "in_progress"
 		} else {
+			// Table not yet registered (EventMigrationStart was dropped).
 			s.Rows.Total += ev.RowsTotal
+			s.Tables.Total++
+			s.Tables.InProgress++
 			idx = len(s.TableDetails)
 			s.TableDetails = append(s.TableDetails, TableDetail{
 				Name:   ev.TableName,
@@ -184,6 +192,9 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		// Ensure table is in tableIndex (EventTableStart may have been dropped).
 		idx, ok := c.tableIndex[ev.TableName]
 		if !ok {
+			// Table not registered yet. Add it but DON'T add to Rows.Total here —
+			// it may have been counted in EventMigrationStart already. We'll fix
+			// the total below if transferred exceeds it.
 			idx = len(s.TableDetails)
 			s.TableDetails = append(s.TableDetails, TableDetail{
 				Name:   ev.TableName,
@@ -191,10 +202,15 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 				Total:  ev.RowsTotal,
 			})
 			c.tableIndex[ev.TableName] = idx
-			s.Rows.Total += ev.RowsTotal
 		}
 		s.TableDetails[idx].Transferred = ev.RowsTransferred
 		s.TableDetails[idx].Status = "in_progress"
+		// Update total if transferred exceeds it (MongoDB estimates can be low).
+		if ev.RowsTransferred > s.TableDetails[idx].Total {
+			diff := ev.RowsTransferred - s.TableDetails[idx].Total
+			s.TableDetails[idx].Total = ev.RowsTransferred
+			s.Rows.Total += diff
+		}
 		if s.Rows.RatePerSecond > 0 && s.Rows.Total > s.Rows.Transferred {
 			s.ETASeconds = float64(s.Rows.Total-s.Rows.Transferred) / s.Rows.RatePerSecond
 		}
@@ -204,20 +220,29 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		// Ensure table is in tableIndex (earlier events may have been dropped).
 		idx, ok := c.tableIndex[ev.TableName]
 		if !ok {
+			// Table not registered yet. Don't add to Rows.Total here — it may
+			// have been counted in EventMigrationStart.
 			idx = len(s.TableDetails)
 			s.TableDetails = append(s.TableDetails, TableDetail{
 				Name:  ev.TableName,
 				Total: ev.RowsTotal,
 			})
 			c.tableIndex[ev.TableName] = idx
-			s.Rows.Total += ev.RowsTotal
 		} else {
 			// Only decrement InProgress if we previously counted it.
-			s.Tables.InProgress--
+			if s.TableDetails[idx].Status == "in_progress" {
+				s.Tables.InProgress--
+			}
 		}
 		s.Tables.Completed++
 		s.TableDetails[idx].Status = "done"
 		s.TableDetails[idx].Transferred = ev.RowsTransferred
+		// Update total if transferred exceeds it (MongoDB estimates can be low).
+		if ev.RowsTransferred > s.TableDetails[idx].Total {
+			diff := ev.RowsTransferred - s.TableDetails[idx].Total
+			s.TableDetails[idx].Total = ev.RowsTransferred
+			s.Rows.Total += diff
+		}
 		elapsed := time.Since(c.tableStarted[ev.TableName])
 		c.log.Info("migration.table_completed",
 			"table", ev.TableName,
@@ -229,15 +254,18 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		// Ensure table is in tableIndex (earlier events may have been dropped).
 		idx, ok := c.tableIndex[ev.TableName]
 		if !ok {
+			// Table not registered yet. Don't add to Rows.Total here — it may
+			// have been counted in EventMigrationStart.
 			idx = len(s.TableDetails)
 			s.TableDetails = append(s.TableDetails, TableDetail{
 				Name:  ev.TableName,
 				Total: ev.RowsTotal,
 			})
 			c.tableIndex[ev.TableName] = idx
-			s.Rows.Total += ev.RowsTotal
 		} else {
-			s.Tables.InProgress--
+			if s.TableDetails[idx].Status == "in_progress" {
+				s.Tables.InProgress--
+			}
 		}
 		s.Tables.Failed++
 		s.TableDetails[idx].Status = "failed"
