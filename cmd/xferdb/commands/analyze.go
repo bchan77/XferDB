@@ -1,14 +1,18 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var projectAnalyzeCmd = &cobra.Command{
@@ -91,84 +95,259 @@ func runProjectAnalyze(cmd *cobra.Command, args []string) error {
 	}
 	defer resp.Body.Close()
 
-	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		var e map[string]any
-		json.Unmarshal(raw, &e)
+		json.NewDecoder(resp.Body).Decode(&e)
 		return fmt.Errorf("server error %d: %v", resp.StatusCode, e["error"])
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+	// Check if response is streaming NDJSON.
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "application/x-ndjson") {
+		return handleStreamingAnalyze(resp)
 	}
 
-	if t, _ := result["type"].(string); t == "mongo_infer" {
-		printMongoAnalysis(result)
-	} else {
-		out, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(out))
+	// Fallback: non-streaming JSON response (relational sources).
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
 	}
+	out, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(out))
 	return nil
 }
 
-func printMongoAnalysis(result map[string]any) {
-	colls, _ := result["collections"].([]any)
-	fmt.Printf("Analyzed %d collection(s)\n\n", len(colls))
-	for _, c := range colls {
-		m, _ := c.(map[string]any)
-		coll, _ := m["collection"].(string)
-		schema, _ := m["schema"].(map[string]any)
+// progressState tracks the current sampling progress for the spinner.
+type progressState struct {
+	mu         sync.Mutex
+	collection string
+	scanned    int
+	target     int
+	startTime  time.Time
+	done       bool
+}
 
-		fmt.Printf("Collection: %s\n", coll)
+func (p *progressState) update(collection string, scanned, target int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.collection != collection {
+		p.collection = collection
+		p.startTime = time.Now()
+	}
+	p.scanned = scanned
+	p.target = target
+}
 
-		// Print sample stats if available
-		if schema != nil {
-			estCount, _ := schema["estimated_count"].(float64)
-			sampleSize, _ := schema["sample_size"].(float64)
-			if estCount > 0 {
-				pct := sampleSize / estCount * 100
-				fmt.Printf("  Sampled: %d / %d documents (%.2f%%)\n", int(sampleSize), int(estCount), pct)
-			}
+func (p *progressState) markDone() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.done = true
+}
+
+func (p *progressState) isDone() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.done
+}
+
+func (p *progressState) get() (string, int, int, time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.collection, p.scanned, p.target, time.Since(p.startTime)
+}
+
+// handleStreamingAnalyze processes NDJSON streaming response from MongoDB analyze.
+func handleStreamingAnalyze(resp *http.Response) error {
+	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	scanner := bufio.NewScanner(resp.Body)
+
+	var collections []map[string]any
+	spinnerChars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	spinnerIdx := 0
+
+	state := &progressState{startTime: time.Now()}
+	var lastLineLen int
+
+	// Spinner goroutine - updates display every 100ms even when no new events.
+	stopSpinner := make(chan struct{})
+	var spinnerWg sync.WaitGroup
+
+	clearLine := func() {
+		if isTTY && lastLineLen > 0 {
+			fmt.Printf("\r%s\r", strings.Repeat(" ", lastLineLen))
+			lastLineLen = 0
 		}
-		if schema == nil {
-			warns, _ := m["warnings"].([]any)
-			for _, w := range warns {
-				fmt.Printf("  WARNING: %v\n", w)
+	}
+
+	if isTTY {
+		spinnerWg.Add(1)
+		go func() {
+			defer spinnerWg.Done()
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-stopSpinner:
+					return
+				case <-ticker.C:
+					if state.isDone() {
+						continue
+					}
+					coll, scanned, target, elapsed := state.get()
+					if coll == "" {
+						continue
+					}
+
+					pct := float64(0)
+					if target > 0 {
+						pct = float64(scanned) / float64(target) * 100
+					}
+
+					// Calculate rows/sec.
+					rowsPerSec := float64(0)
+					if elapsed.Seconds() > 0 {
+						rowsPerSec = float64(scanned) / elapsed.Seconds()
+					}
+
+					spinner := spinnerChars[spinnerIdx%len(spinnerChars)]
+					spinnerIdx++
+
+					line := fmt.Sprintf("  %s Sampling %s: %d / %d (%.1f%%)  [%s, %.0f rows/s]",
+						spinner, coll, scanned, target, pct, formatDuration(elapsed), rowsPerSec)
+
+					// Clear and rewrite.
+					if lastLineLen > 0 {
+						fmt.Printf("\r%s\r", strings.Repeat(" ", lastLineLen))
+					}
+					fmt.Print(line)
+					lastLineLen = len(line)
+				}
 			}
-			fmt.Println()
+		}()
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
 			continue
 		}
 
-		fields, _ := schema["fields"].([]any)
-		fmt.Printf("  %-30s  %-20s  %-10s  %s\n", "Field", "Postgres Type", "Strategy", "Coverage")
-		fmt.Printf("  %s\n", strings.Repeat("-", 75))
-		for _, f := range fields {
-			fm, _ := f.(map[string]any)
-			planRow, _ := fm["plan_row"].(map[string]any)
-			freq, _ := fm["frequency"].(map[string]any)
-
-			fieldName, _ := planRow["field_name"].(string)
-			pgType, _ := planRow["pg_type"].(string)
-			strategy, _ := planRow["strategy"].(string)
-
-			totalDocs, _ := freq["total_docs"].(float64)
-			occurrences, _ := freq["occurrences"].(float64)
-			coverage := ""
-			if totalDocs > 0 {
-				coverage = fmt.Sprintf("%.0f%%", occurrences/totalDocs*100)
-			}
-
-			polymorphic := ""
-			if p, _ := freq["polymorphic"].(bool); p {
-				polymorphic = " [polymorphic]"
-			}
-
-			fmt.Printf("  %-30s  %-20s  %-10s  %s%s\n", fieldName, pgType, strategy, coverage, polymorphic)
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
 		}
-		fmt.Println()
+
+		eventType, _ := event["type"].(string)
+
+		switch eventType {
+		case "progress":
+			coll, _ := event["collection"].(string)
+			scanned, _ := event["scanned"].(float64)
+			target, _ := event["target"].(float64)
+			state.update(coll, int(scanned), int(target))
+
+		case "collection":
+			clearLine()
+
+			coll, _ := event["collection"].(string)
+			schema, _ := event["schema"].(map[string]any)
+			warnings, _ := event["warnings"].([]any)
+
+			fmt.Printf("Collection: %s\n", coll)
+
+			if schema != nil {
+				estCount, _ := schema["estimated_count"].(float64)
+				sampleSize, _ := schema["sample_size"].(float64)
+				if estCount > 0 {
+					pct := sampleSize / estCount * 100
+					fmt.Printf("  Sampled: %d / %d documents (%.2f%%)\n", int(sampleSize), int(estCount), pct)
+				}
+				collections = append(collections, map[string]any{"collection": coll, "schema": schema})
+				printCollectionFields(schema)
+			} else if len(warnings) > 0 {
+				for _, w := range warnings {
+					fmt.Printf("  WARNING: %v\n", w)
+				}
+			}
+			fmt.Println()
+
+			// Reset state for next collection.
+			state.update("", 0, 0)
+
+		case "error":
+			state.markDone()
+			close(stopSpinner)
+			spinnerWg.Wait()
+			clearLine()
+			errMsg, _ := event["error"].(string)
+			return fmt.Errorf("server error: %s", errMsg)
+
+		case "done":
+			state.markDone()
+			close(stopSpinner)
+			spinnerWg.Wait()
+			clearLine()
+			totalColls, _ := event["total_collections"].(float64)
+			fmt.Printf("Analyzed %d collection(s)\n", int(totalColls))
+			fmt.Println("Run 'xferdb project schema' to review and override field decisions.")
+		}
 	}
-	fmt.Println("Run 'xferdb project schema' to review and override field decisions.")
+
+	// Ensure spinner is stopped if we exit early.
+	if !state.isDone() {
+		state.markDone()
+		close(stopSpinner)
+		spinnerWg.Wait()
+	}
+
+	return scanner.Err()
+}
+
+// formatDuration formats a duration as "1m23s" or "45s".
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	m := d / time.Minute
+	s := (d % time.Minute) / time.Second
+	if m > 0 {
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+// printCollectionFields prints the field table for a collection schema.
+func printCollectionFields(schema map[string]any) {
+	fields, _ := schema["fields"].([]any)
+	if len(fields) == 0 {
+		return
+	}
+
+	fmt.Printf("  %-30s  %-20s  %-10s  %s\n", "Field", "Postgres Type", "Strategy", "Coverage")
+	fmt.Printf("  %s\n", strings.Repeat("-", 75))
+
+	for _, f := range fields {
+		fm, _ := f.(map[string]any)
+		planRow, _ := fm["plan_row"].(map[string]any)
+		freq, _ := fm["frequency"].(map[string]any)
+
+		fieldName, _ := planRow["field_name"].(string)
+		pgType, _ := planRow["pg_type"].(string)
+		strategy, _ := planRow["strategy"].(string)
+
+		totalDocs, _ := freq["total_docs"].(float64)
+		occurrences, _ := freq["occurrences"].(float64)
+		coverage := ""
+		if totalDocs > 0 {
+			coverage = fmt.Sprintf("%.0f%%", occurrences/totalDocs*100)
+		}
+
+		polymorphic := ""
+		if p, _ := freq["polymorphic"].(bool); p {
+			polymorphic = " [polymorphic]"
+		}
+
+		fmt.Printf("  %-30s  %-20s  %-10s  %s%s\n", fieldName, pgType, strategy, coverage, polymorphic)
+	}
 }
 
 func runProjectSchema(cmd *cobra.Command, args []string) error {
