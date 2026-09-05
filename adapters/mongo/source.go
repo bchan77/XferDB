@@ -160,7 +160,15 @@ func (s *Source) GetRowCount(ctx context.Context, collection string) (int64, err
 	coll := s.client.Database(s.database).Collection(collection)
 	if s.accurateCounts {
 		// CountDocuments does a full collection scan — accurate but slow.
-		return coll.CountDocuments(ctx, bson.D{})
+		// Use a longer timeout (5 min) since large collections can take a while.
+		countCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		n, err := coll.CountDocuments(countCtx, bson.D{})
+		if err != nil {
+			// Fall back to estimated count if accurate count fails.
+			return coll.EstimatedDocumentCount(ctx)
+		}
+		return n, nil
 	}
 	// EstimatedDocumentCount is fast (uses collection metadata) but can be inaccurate.
 	return coll.EstimatedDocumentCount(ctx)
