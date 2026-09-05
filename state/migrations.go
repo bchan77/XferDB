@@ -17,6 +17,7 @@ type migrationRow struct {
 	StartedAt   sql.NullTime `db:"started_at"`
 	CompletedAt sql.NullTime `db:"completed_at"`
 	Error       string       `db:"error"`
+	SchemaPlan  string       `db:"schema_plan"`
 }
 
 func (r *migrationRow) toMigration() *adapters.Migration {
