@@ -173,13 +173,13 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	s.Rows.Total = totalRows
 	s.Rows.Transferred = totalTransferred
 
-	// Decay rate if no batches have arrived recently (e.g., bulk copy stalling).
-	// After 3s of no progress, start decaying; after ~15s, rate approaches 0.
+	// Decay rate if no batches have arrived recently (e.g., bulk copy setup).
+	// After 3s of no progress, start decaying; floor at 10% to keep ETA meaningful.
 	timeSinceLastBatch := time.Since(c.lastSampleTime).Seconds()
 	if timeSinceLastBatch > 3.0 && s.Rows.RatePerSecond > 0 {
 		decayFactor := 1.0 - (timeSinceLastBatch-3.0)/12.0
-		if decayFactor < 0 {
-			decayFactor = 0
+		if decayFactor < 0.1 {
+			decayFactor = 0.1 // floor at 10% to avoid showing 0
 		}
 		s.Rows.RatePerSecond *= decayFactor
 	}
