@@ -40,6 +40,7 @@ type TransferConfig struct {
 	Tables         []string    `json:"tables"`          // if non-empty, only migrate these tables; supports "schema.table" notation
 	BulkCopy       bool        `json:"bulk_copy"`       // use COPY protocol instead of INSERT; requires target table to be empty
 	AccurateCounts bool        `json:"accurate_counts"` // use accurate row counts (slower for MongoDB)
+	AsyncPipeline  bool        `json:"async_pipeline"`  // overlap read/write for faster throughput
 }
 
 // Project is a named migration project with a fixed source/target configuration.

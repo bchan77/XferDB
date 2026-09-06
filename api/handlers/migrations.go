@@ -62,6 +62,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		OffsetFallback *bool    `json:"offset_fallback"`
 		BulkCopy       *bool    `json:"bulk_copy"`
 		AccurateCounts *bool    `json:"accurate_counts"`
+		AsyncPipeline  *bool    `json:"async_pipeline"`
 		Tables         []string `json:"tables"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
@@ -94,6 +95,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if overrides.AccurateCounts != nil {
 		p.TransferConfig.AccurateCounts = *overrides.AccurateCounts
+	}
+	if overrides.AsyncPipeline != nil {
+		p.TransferConfig.AsyncPipeline = *overrides.AsyncPipeline
 	}
 	if len(overrides.Tables) > 0 {
 		p.TransferConfig.Tables = overrides.Tables
