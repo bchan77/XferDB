@@ -289,10 +289,18 @@ func (h *MigrationsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, pt := range projectTables {
 				if !inScope[pt.TableName] {
+					// If this table's status is from a different migration, show it as
+					// "pending" for the current migration rather than the old status.
+					status := pt.Status
+					transferred := pt.RowsTransferred
+					if pt.LastMigrationID != id {
+						status = "pending"
+						transferred = 0
+					}
 					snap.TableDetails = append(snap.TableDetails, stats.TableDetail{
 						Name:        pt.TableName,
-						Status:      pt.Status,
-						Transferred: pt.RowsTransferred,
+						Status:      status,
+						Transferred: transferred,
 						Total:       pt.RowsTotal,
 					})
 				}
