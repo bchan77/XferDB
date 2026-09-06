@@ -29,6 +29,9 @@
 - **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
 - **Live progress display** — per-table status, rows/s, read/write rates, ETA, and live resource usage (goroutines, heap, CPU%)
+- **Detailed table status** — shows "counting rows...", "waiting for schema", "waiting for indexes" so you always know what's happening
+- **Async pipeline mode** — `--async-pipeline` decouples reading and writing with buffered channels for higher throughput
+- **Stats history** — migration statistics recorded every 5 seconds; view with `--history` after completion
 - **Structured server logging** — JSON log file + text stderr with configurable log level; captures project/migration lifecycle, table schemas, and per-table progress
 - **Flexible reload modes** — default upsert (delta sync), `--truncate` (wipe and reload), or `--recreate-schema` (drop and recreate)
 - **Multi-project** — named projects with their own source/target config and migration history
@@ -236,6 +239,9 @@ xferdb migrate --preflight
 # Re-attach to a running migration
 xferdb migrate --status
 
+# View recorded stats history after migration completes
+xferdb migrate --history
+
 # Cancel the running migration (keeps history, preserves checkpoints)
 xferdb migrate --cancel
 
@@ -259,6 +265,12 @@ xferdb migrate --recreate-schema
 
 # Use PostgreSQL COPY protocol for faster writes (combine with --truncate or --recreate-schema)
 xferdb migrate --bulk-copy --recreate-schema
+
+# Async pipeline mode — decouples read/write for higher throughput
+xferdb migrate --async-pipeline --bulk-copy --truncate
+
+# Use exact MongoDB document counts instead of estimates (slower but accurate)
+xferdb migrate --accurate-counts
 
 # Override batch size for this run (project default is used when not set)
 xferdb migrate --batch-size 50000
@@ -288,6 +300,8 @@ xferdb list
 | Bulk copy | `xferdb migrate --bulk-copy` | Uses PostgreSQL `COPY` for maximum write throughput. Requires empty target tables — combine with `--truncate` or `--recreate-schema`. |
 | Selective tables | `xferdb migrate --tables t1,t2` | Only migrate the named tables; all others are skipped. Supports `schema.table` notation. |
 | Parallel per-table | `xferdb migrate --segment-workers 4` | Split each table into N segments; workers read/write in parallel. Uses PK ranges by default (no OFFSET scan penalty); falls back to OFFSET for tables without an integer PK. Add `--offset-segments` to force OFFSET mode. |
+| Async pipeline | `xferdb migrate --async-pipeline` | Decouples reading and writing with buffered channels. Readers fetch the next batch while writers flush the previous one. Combine with `--bulk-copy` for best throughput. |
+| Accurate counts | `xferdb migrate --accurate-counts` | Use exact MongoDB `CountDocuments` instead of `EstimatedDocumentCount`. Slower but gives accurate row totals and ETA. |
 | Schema only | API: `schema_only: true` | Creates tables, indexes, constraints — no data transfer. |
 | Data only | API: `data_only: true` | Skips schema creation — target schema must already exist. |
 
@@ -397,6 +411,7 @@ GET    /api/v1/migrations/:id
 PATCH  /api/v1/migrations/:id               # body: {"action":"pause"|"resume"|"cancel"}
 DELETE /api/v1/migrations/:id               # cancel + delete record
 GET    /api/v1/migrations/:id/stats
+GET    /api/v1/migrations/:id/stats/history # recorded snapshots (every 5s during migration)
 
 GET    /api/v1/health
 ```
@@ -434,6 +449,9 @@ go build -o xferdb ./cmd/xferdb
 - [x] Selective table migration (`--tables`)
 - [x] Structured server logging (`--log-file`, `--log-level`)
 - [x] MongoDB source adapter with schema inference
+- [x] Async pipeline mode (`--async-pipeline`)
+- [x] Accurate MongoDB counts (`--accurate-counts`)
+- [x] Migration stats history (`--history`)
 - [ ] MongoDB target adapter
 - [ ] Web UI
 - [ ] WebSocket live progress
@@ -444,15 +462,7 @@ go build -o xferdb ./cmd/xferdb
 
 ## Versioning
 
-XferDB follows [Semantic Versioning](https://semver.org/).
-
-| Version | Milestone |
-|---------|-----------|
-| `v0.2.0` | Current — PostgreSQL/MySQL/SQLite, parallel migration, preflight |
-| `v0.3.0` | Native schema transfer, bulk copy, resource monitoring, server logging |
-| `v0.4.0` | MongoDB source adapter with schema inference |
-| `v0.5.0` | Web UI |
-| `v1.0.0` | Stable release |
+XferDB follows [Semantic Versioning](https://semver.org/). See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ---
 
