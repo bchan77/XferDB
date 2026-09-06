@@ -172,6 +172,12 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	}
 	s.Rows.Total = totalRows
 	s.Rows.Transferred = totalTransferred
+	// Recompute ETA using the freshly computed totals (not stale values from EventBatch).
+	if s.Rows.RatePerSecond > 0 && s.Rows.Total > s.Rows.Transferred {
+		s.ETASeconds = float64(s.Rows.Total-s.Rows.Transferred) / s.Rows.RatePerSecond
+	} else {
+		s.ETASeconds = 0
+	}
 	return s
 }
 
