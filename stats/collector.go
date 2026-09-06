@@ -172,7 +172,19 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	}
 	s.Rows.Total = totalRows
 	s.Rows.Transferred = totalTransferred
-	// Recompute ETA using the freshly computed totals (not stale values from EventBatch).
+
+	// Decay rate if no batches have arrived recently (e.g., bulk copy stalling).
+	// After 3s of no progress, start decaying; after ~15s, rate approaches 0.
+	timeSinceLastBatch := time.Since(c.lastSampleTime).Seconds()
+	if timeSinceLastBatch > 3.0 && s.Rows.RatePerSecond > 0 {
+		decayFactor := 1.0 - (timeSinceLastBatch-3.0)/12.0
+		if decayFactor < 0 {
+			decayFactor = 0
+		}
+		s.Rows.RatePerSecond *= decayFactor
+	}
+
+	// Recompute ETA using the freshly computed totals and decayed rate.
 	if s.Rows.RatePerSecond > 0 && s.Rows.Total > s.Rows.Transferred {
 		s.ETASeconds = float64(s.Rows.Total-s.Rows.Transferred) / s.Rows.RatePerSecond
 	} else {
