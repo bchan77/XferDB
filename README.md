@@ -486,7 +486,7 @@ If XferDB saves you time on a database migration, consider sponsoring the projec
 - **JetBrains license** — IDE for ongoing development
 - **Coffee** — because the other three need fuel
 
-The easiest way to sponsor is via [GitHub Sponsors](https://github.com/sponsors/bchan77). A "Sponsor" button will also appear at the top of the GitHub repository once sponsorship is enabled there.
+Sponsor via [GitHub Sponsors](https://github.com/sponsors/bchan77) or use the Sponsor button at the top of the repository.
 
 ---
 
