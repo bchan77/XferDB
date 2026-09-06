@@ -363,8 +363,9 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.Tables.Completed++
 		s.TableDetails[idx].Status = "done"
 		s.TableDetails[idx].Transferred = ev.RowsTransferred
-		// Update total if transferred exceeds it (MongoDB estimates can be low).
-		if ev.RowsTransferred > s.TableDetails[idx].Total {
+		// When a table is done, we know the exact row count. Update Total to match
+		// RowsTransferred regardless of direction (handles both under- and over-estimates).
+		if s.TableDetails[idx].Total != ev.RowsTransferred {
 			diff := ev.RowsTransferred - s.TableDetails[idx].Total
 			s.TableDetails[idx].Total = ev.RowsTransferred
 			s.Rows.Total += diff
