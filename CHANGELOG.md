@@ -2,9 +2,15 @@
 
 All notable changes to XferDB are documented here.
 
-## [0.5.0] - Unreleased
+## [0.4.0] - 2024-09-06
 
 ### Added
+- **MongoDB source adapter** with schema inference
+- Schema analysis for MongoDB → PostgreSQL migrations (`xferdb project analyze`)
+- Schema plan review and override (`xferdb project schema`)
+- Percentage-based sampling for large MongoDB collections
+- AI annotation interface for ambiguous field types
+- Active project indicator in `project list`
 - **Async pipeline mode** (`--async-pipeline`) — decouples reading and writing with buffered channels for higher throughput
 - **Accurate MongoDB counts** (`--accurate-counts`) — use exact `CountDocuments` instead of estimates for accurate ETA
 - **Stats history recording** — migration statistics recorded every 5 seconds; view with `--history` after completion
@@ -15,16 +21,6 @@ All notable changes to XferDB are documented here.
 - Row totals now correct when MongoDB over-estimates document counts
 - ETA recalculated using corrected totals (not stale estimates)
 - Rate decays when no batches arrive (e.g., during bulk copy setup) instead of staying frozen
-
-## [0.4.0] - 2024
-
-### Added
-- **MongoDB source adapter** with schema inference
-- Schema analysis for MongoDB → PostgreSQL migrations (`xferdb project analyze`)
-- Schema plan review and override (`xferdb project schema`)
-- Percentage-based sampling for large MongoDB collections
-- AI annotation interface for ambiguous field types
-- Active project indicator in `project list`
 
 ## [0.3.0] - 2024
 
