@@ -14,6 +14,36 @@ import (
 // resourceSampleInterval is how often the collector samples process resource usage.
 const resourceSampleInterval = 3 * time.Second
 
+// statsPersistInterval is how often the collector persists stats to storage.
+const statsPersistInterval = 5 * time.Second
+
+// StatsSaver is an interface for persisting stats snapshots.
+// Implemented by state.MetaDB.
+type StatsSaver interface {
+	SaveMigrationStats(ctx context.Context, rec StatsRecord) error
+}
+
+// StatsRecord is the data persisted for each stats snapshot.
+// Matches state.MigrationStatsRecord but defined here to avoid import cycle.
+type StatsRecord struct {
+	MigrationID     string
+	Timestamp       time.Time
+	ElapsedSecs     float64
+	Phase           string
+	RowsTotal       int64
+	RowsTransferred int64
+	RatePerSec      float64
+	ReadRate        float64
+	WriteRate       float64
+	TablesTotal     int
+	TablesDone      int
+	TablesFailed    int
+	Goroutines      int
+	MemAllocMB      float64
+	MemSysMB        float64
+	CPUPercent      float64
+}
+
 // Collector consumes a stream of engine.ProgressEvents and maintains a
 // thread-safe rolling snapshot of the migration's current statistics.
 type Collector struct {
@@ -21,6 +51,7 @@ type Collector struct {
 	projectID   string
 	events      <-chan engine.ProgressEvent
 	log         *slog.Logger
+	saver       StatsSaver // optional; if set, stats are persisted periodically
 
 	mu        sync.RWMutex
 	snapshot  StatsSnapshot
@@ -63,6 +94,11 @@ func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEv
 	}
 }
 
+// SetSaver sets the stats saver for persisting snapshots. Call before Start.
+func (c *Collector) SetSaver(s StatsSaver) {
+	c.saver = s
+}
+
 // Start begins consuming events in a background goroutine. It returns when the
 // events channel is closed or ctx is cancelled.
 func (c *Collector) Start(ctx context.Context) {
@@ -101,6 +137,24 @@ func (c *Collector) Start(ctx context.Context) {
 			}
 		}
 	}()
+
+	// Periodically persist stats to storage if a saver is configured.
+	if c.saver != nil {
+		go func() {
+			ticker := time.NewTicker(statsPersistInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					// Persist final snapshot on shutdown.
+					c.persistSnapshot(ctx)
+					return
+				case <-ticker.C:
+					c.persistSnapshot(ctx)
+				}
+			}
+		}()
+	}
 }
 
 // Snapshot returns a point-in-time copy of the current statistics.
@@ -119,6 +173,46 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	s.Rows.Total = totalRows
 	s.Rows.Transferred = totalTransferred
 	return s
+}
+
+// persistSnapshot saves the current stats snapshot to storage.
+func (c *Collector) persistSnapshot(ctx context.Context) {
+	if c.saver == nil {
+		return
+	}
+	snap := c.Snapshot()
+
+	var goroutines int
+	var memAllocMB, memSysMB, cpuPercent float64
+	if snap.Resource != nil {
+		goroutines = snap.Resource.Goroutines
+		memAllocMB = snap.Resource.MemAllocMB
+		memSysMB = snap.Resource.MemSysMB
+		cpuPercent = snap.Resource.CPUPercent
+	}
+
+	rec := StatsRecord{
+		MigrationID:     snap.MigrationID,
+		Timestamp:       time.Now(),
+		ElapsedSecs:     snap.ElapsedSeconds,
+		Phase:           snap.Phase,
+		RowsTotal:       snap.Rows.Total,
+		RowsTransferred: snap.Rows.Transferred,
+		RatePerSec:      snap.Rows.RatePerSecond,
+		ReadRate:        snap.Rows.ReadRate,
+		WriteRate:       snap.Rows.WriteRate,
+		TablesTotal:     snap.Tables.Total,
+		TablesDone:      snap.Tables.Completed,
+		TablesFailed:    snap.Tables.Failed,
+		Goroutines:      goroutines,
+		MemAllocMB:      memAllocMB,
+		MemSysMB:        memSysMB,
+		CPUPercent:      cpuPercent,
+	}
+
+	if err := c.saver.SaveMigrationStats(ctx, rec); err != nil {
+		c.log.Warn("failed to persist stats", "error", err)
+	}
 }
 
 // apply processes a single event and updates the internal snapshot.

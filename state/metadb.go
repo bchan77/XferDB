@@ -100,6 +100,29 @@ func (m *MetaDB) migrate() error {
 			created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (project_id, collection, field_name)
 		);
+
+		CREATE TABLE IF NOT EXISTS migration_stats (
+			id               INTEGER PRIMARY KEY AUTOINCREMENT,
+			migration_id     TEXT NOT NULL REFERENCES migrations(id) ON DELETE CASCADE,
+			timestamp        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			elapsed_secs     REAL NOT NULL DEFAULT 0,
+			phase            TEXT NOT NULL DEFAULT '',
+			rows_total       INTEGER NOT NULL DEFAULT 0,
+			rows_transferred INTEGER NOT NULL DEFAULT 0,
+			rate_per_sec     REAL NOT NULL DEFAULT 0,
+			read_rate        REAL NOT NULL DEFAULT 0,
+			write_rate       REAL NOT NULL DEFAULT 0,
+			tables_total     INTEGER NOT NULL DEFAULT 0,
+			tables_done      INTEGER NOT NULL DEFAULT 0,
+			tables_failed    INTEGER NOT NULL DEFAULT 0,
+			goroutines       INTEGER NOT NULL DEFAULT 0,
+			mem_alloc_mb     REAL NOT NULL DEFAULT 0,
+			mem_sys_mb       REAL NOT NULL DEFAULT 0,
+			cpu_percent      REAL NOT NULL DEFAULT 0
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_migration_stats_migration_id
+			ON migration_stats(migration_id);
 	`)
 	if err != nil {
 		return err
