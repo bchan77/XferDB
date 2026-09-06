@@ -6,15 +6,26 @@
 
 ## Supported Databases
 
-| Database | Source | Target | Notes |
-|----------|--------|--------|-------|
-| PostgreSQL / YugabyteDB | ✅ | ✅ | Tested against YugabyteDB 2024.2 |
-| MySQL | ✅ | ✅ | Implemented, pending live DB testing |
-| SQLite | ✅ | ✅ | Fully working |
-| MongoDB | ✅ | 🔜 | Source with schema inference; target coming soon |
-| Cassandra | 🔜 | 🔜 | Coming soon |
+| Database | Source | Target | Tested Versions |
+|----------|--------|--------|-----------------|
+| PostgreSQL | ✅ | ✅ | 13 |
+| YugabyteDB | ✅ | ✅ | 2024.2 |
+| MySQL | ✅ | ✅ | Not yet tested |
+| SQLite | ✅ | ✅ | 3.x |
+| MongoDB | ✅ | 🔜 | 8.0 |
+| Cassandra | 🔜 | 🔜 | — |
 
 > ✅ = Working &nbsp;|&nbsp; 🔜 = Planned
+
+### Tested Migration Paths
+
+| Source | Target | Status |
+|--------|--------|--------|
+| MongoDB 8.0 | PostgreSQL 13 | ✅ Tested |
+| PostgreSQL | PostgreSQL | ✅ Tested |
+| PostgreSQL | YugabyteDB 2024.2 | ✅ Tested |
+| SQLite | PostgreSQL | ✅ Tested |
+| MySQL | PostgreSQL | Implemented, not yet tested |
 
 ---
 
