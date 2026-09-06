@@ -372,6 +372,9 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 			}
 			detail = fmt.Sprintf("%s / %s rows  (%d%%)",
 				fmtInt(t.Transferred), fmtInt(t.Total), pct)
+		case "counting":
+			marker = "◐"
+			detail = "counting rows..."
 		case "failed":
 			marker = "✗"
 			detail = "failed"
@@ -379,8 +382,16 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 			marker = "·"
 			detail = "not started"
 		default:
+			// Show context based on current phase.
 			marker = "○"
-			detail = "pending"
+			switch snap.Phase {
+			case "schema":
+				detail = "waiting for schema"
+			case "post_schema":
+				detail = "waiting for indexes"
+			default:
+				detail = "pending"
+			}
 		}
 		lines = append(lines, fmt.Sprintf("  %s  %-30s  %s", marker, truncate(t.Name, 30), detail))
 		if t.Status == "failed" && t.Error != "" {

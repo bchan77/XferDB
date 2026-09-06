@@ -47,13 +47,12 @@ func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableS
 func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapters.TableSchema) error {
 	table := sourceSchema.Name
 
-	// Emit EventTableStart immediately so the UI shows "in_progress" while
-	// we count rows (which can be slow for large MongoDB collections).
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count
+	// (which can be slow for large MongoDB collections with --accurate-counts).
 	now := time.Now()
 	e.emit(ProgressEvent{
-		Kind:      EventTableStart,
+		Kind:      EventTableCounting,
 		TableName: table,
-		RowsTotal: 0, // will be updated after count completes
 		Timestamp: now,
 	})
 
@@ -198,13 +197,12 @@ type pipelineBatch struct {
 func (e *Engine) transferTablePipelined(ctx context.Context, sourceSchema adapters.TableSchema) error {
 	table := sourceSchema.Name
 
-	// Emit EventTableStart immediately so the UI shows "in_progress" while
-	// we count rows (which can be slow for large MongoDB collections).
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count
+	// (which can be slow for large MongoDB collections with --accurate-counts).
 	now := time.Now()
 	e.emit(ProgressEvent{
-		Kind:      EventTableStart,
+		Kind:      EventTableCounting,
 		TableName: table,
-		RowsTotal: 0, // will be updated after count completes
 		Timestamp: now,
 	})
 
@@ -420,9 +418,9 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 		batchSize = defaultBatchSize
 	}
 
-	// Emit EventTableStart immediately so the UI shows "in_progress" while counting.
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count.
 	now := time.Now()
-	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: 0, Timestamp: now})
+	e.emit(ProgressEvent{Kind: EventTableCounting, TableName: table, Timestamp: now})
 
 	total, err := e.source.GetRowCount(ctx, table)
 	if err != nil {
@@ -507,9 +505,9 @@ func (e *Engine) transferTableParallelOffset(ctx context.Context, schema adapter
 		batchSize = defaultBatchSize
 	}
 
-	// Emit EventTableStart immediately so the UI shows "in_progress" while counting.
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count.
 	now := time.Now()
-	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: 0, Timestamp: now})
+	e.emit(ProgressEvent{Kind: EventTableCounting, TableName: table, Timestamp: now})
 
 	total, err := e.source.GetRowCount(ctx, table)
 	if err != nil {

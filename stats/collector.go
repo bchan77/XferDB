@@ -252,19 +252,42 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			)
 		}
 
+	case engine.EventTableCounting:
+		// Worker picked up the table and is counting rows.
+		s.Phase = "in_progress"
+		s.CurrentTable = ev.TableName
+		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			// Only update status if not already past counting.
+			if s.TableDetails[idx].Status == "pending" {
+				s.TableDetails[idx].Status = "counting"
+				s.Tables.Total++
+				s.Tables.InProgress++
+			}
+		} else {
+			// Table not yet registered.
+			idx := len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:   ev.TableName,
+				Status: "counting",
+			})
+			c.tableIndex[ev.TableName] = idx
+			s.Tables.Total++
+			s.Tables.InProgress++
+		}
+
 	case engine.EventTableStart:
 		s.Phase = "in_progress"
 		s.CurrentTable = ev.TableName
 		c.tableStarted[ev.TableName] = time.Now()
 		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			// Table already registered from EventMigrationStart.
-			// Only update total if it was zero (GetRowCount failed earlier).
+			// Table already registered from EventMigrationStart or EventTableCounting.
+			// Update total now that counting is done.
 			if s.TableDetails[idx].Total == 0 && ev.RowsTotal > 0 {
 				s.Rows.Total += ev.RowsTotal
 				s.TableDetails[idx].Total = ev.RowsTotal
 			}
-			// Only count as new in-progress if not already in progress.
-			if s.TableDetails[idx].Status != "in_progress" {
+			// Only count as new in-progress if not already counted.
+			if s.TableDetails[idx].Status != "in_progress" && s.TableDetails[idx].Status != "counting" {
 				s.Tables.Total++
 				s.Tables.InProgress++
 			}
