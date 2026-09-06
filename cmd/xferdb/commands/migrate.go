@@ -35,6 +35,7 @@ Examples:
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 		accurateCounts, _ := cmd.Flags().GetBool("accurate-counts")
 		asyncPipeline, _ := cmd.Flags().GetBool("async-pipeline")
+		historyOnly, _ := cmd.Flags().GetBool("history")
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
@@ -81,6 +82,14 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
+		if historyOnly {
+			migrationID, err := latestMigrationID(projectID)
+			if err != nil {
+				return err
+			}
+			return showStatsHistory(migrationID)
+		}
+
 		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, accurateCounts, asyncPipeline, tables)
 		if err != nil {
 			return err
@@ -107,6 +116,7 @@ func init() {
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 	migrateCmd.Flags().Bool("accurate-counts", false, "Use accurate row counts instead of estimates (slower for MongoDB but shows correct progress)")
 	migrateCmd.Flags().Bool("async-pipeline", false, "Overlap reading and writing for faster throughput (reads batch N+1 while writing batch N)")
+	migrateCmd.Flags().Bool("history", false, "Show recorded stats history for the latest migration")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -362,6 +372,9 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 			}
 			detail = fmt.Sprintf("%s / %s rows  (%d%%)",
 				fmtInt(t.Transferred), fmtInt(t.Total), pct)
+		case "counting":
+			marker = "◐"
+			detail = "counting rows..."
 		case "failed":
 			marker = "✗"
 			detail = "failed"
@@ -369,8 +382,16 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 			marker = "·"
 			detail = "not started"
 		default:
+			// Show context based on current phase.
 			marker = "○"
-			detail = "pending"
+			switch snap.Phase {
+			case "schema":
+				detail = "waiting for schema"
+			case "post_schema":
+				detail = "waiting for indexes"
+			default:
+				detail = "pending"
+			}
 		}
 		lines = append(lines, fmt.Sprintf("  %s  %-30s  %s", marker, truncate(t.Name, 30), detail))
 		if t.Status == "failed" && t.Error != "" {
@@ -416,5 +437,108 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// showStatsHistory fetches and displays recorded stats for a migration.
+func showStatsHistory(migrationID string) error {
+	url := fmt.Sprintf("%s/api/v1/migrations/%s/stats/history", ServerAddr, migrationID)
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("fetch stats history: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	var records []struct {
+		Timestamp       string  `json:"timestamp"`
+		ElapsedSecs     float64 `json:"elapsed_secs"`
+		Phase           string  `json:"phase"`
+		RowsTotal       int64   `json:"rows_total"`
+		RowsTransferred int64   `json:"rows_transferred"`
+		RatePerSec      float64 `json:"rate_per_sec"`
+		ReadRate        float64 `json:"read_rate"`
+		WriteRate       float64 `json:"write_rate"`
+		TablesTotal     int     `json:"tables_total"`
+		TablesDone      int     `json:"tables_done"`
+		TablesFailed    int     `json:"tables_failed"`
+		Goroutines      int     `json:"goroutines"`
+		MemAllocMB      float64 `json:"mem_alloc_mb"`
+		MemSysMB        float64 `json:"mem_sys_mb"`
+		CPUPercent      float64 `json:"cpu_percent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&records); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	if len(records) == 0 {
+		fmt.Println("No recorded stats for this migration.")
+		return nil
+	}
+
+	fmt.Printf("Migration %s - %d recorded snapshots\n", migrationID, len(records))
+	fmt.Println(strings.Repeat("─", 100))
+	fmt.Printf("%-8s  %-12s  %-20s  %-10s  %-10s  %-10s  %-8s  %-8s\n",
+		"Elapsed", "Phase", "Rows", "Rate/s", "Read/s", "Write/s", "Mem(MB)", "CPU%")
+	fmt.Println(strings.Repeat("─", 100))
+
+	for _, r := range records {
+		pct := 0
+		if r.RowsTotal > 0 {
+			pct = int(r.RowsTransferred * 100 / r.RowsTotal)
+		}
+		rowsStr := fmt.Sprintf("%s/%s (%d%%)", fmtInt(r.RowsTransferred), fmtInt(r.RowsTotal), pct)
+		fmt.Printf("%-8s  %-12s  %-20s  %-10.0f  %-10.0f  %-10.0f  %-8.1f  %-8.1f\n",
+			fmtDuration(r.ElapsedSecs),
+			r.Phase,
+			rowsStr,
+			r.RatePerSec,
+			r.ReadRate,
+			r.WriteRate,
+			r.MemAllocMB,
+			r.CPUPercent)
+	}
+
+	// Summary
+	if len(records) > 0 {
+		first := records[0]
+		last := records[len(records)-1]
+		fmt.Println(strings.Repeat("─", 100))
+		fmt.Printf("Duration: %s  |  Final: %s rows transferred  |  Peak rate: %.0f/s\n",
+			fmtDuration(last.ElapsedSecs),
+			fmtInt(last.RowsTransferred),
+			maxRate(records))
+		fmt.Printf("Start: %s  |  End: %s\n", first.Timestamp, last.Timestamp)
+	}
+
+	return nil
+}
+
+func maxRate(records []struct {
+	Timestamp       string  `json:"timestamp"`
+	ElapsedSecs     float64 `json:"elapsed_secs"`
+	Phase           string  `json:"phase"`
+	RowsTotal       int64   `json:"rows_total"`
+	RowsTransferred int64   `json:"rows_transferred"`
+	RatePerSec      float64 `json:"rate_per_sec"`
+	ReadRate        float64 `json:"read_rate"`
+	WriteRate       float64 `json:"write_rate"`
+	TablesTotal     int     `json:"tables_total"`
+	TablesDone      int     `json:"tables_done"`
+	TablesFailed    int     `json:"tables_failed"`
+	Goroutines      int     `json:"goroutines"`
+	MemAllocMB      float64 `json:"mem_alloc_mb"`
+	MemSysMB        float64 `json:"mem_sys_mb"`
+	CPUPercent      float64 `json:"cpu_percent"`
+}) float64 {
+	var max float64
+	for _, r := range records {
+		if r.RatePerSec > max {
+			max = r.RatePerSec
+		}
+	}
+	return max
 }
 

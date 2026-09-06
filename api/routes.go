@@ -44,6 +44,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/migrations/{id}", mh.PatchMigration)
 	mux.HandleFunc("DELETE /api/v1/migrations/{id}", mh.DeleteMigration)
 	mux.HandleFunc("GET /api/v1/migrations/{id}/stats", mh.GetStats)
+	mux.HandleFunc("GET /api/v1/migrations/{id}/stats/history", mh.GetStatsHistory)
 
 	// TODO: WebSocket live progress at GET /api/v1/migrations/{id}/ws
 

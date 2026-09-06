@@ -13,7 +13,8 @@ type EventKind string
 
 const (
 	EventMigrationStart  EventKind = "migration_start" // emitted once with all table names
-	EventTableStart      EventKind = "table_start"
+	EventTableCounting   EventKind = "table_counting"  // table picked up by worker; counting rows
+	EventTableStart      EventKind = "table_start"     // row count done; data transfer starting
 	EventBatch           EventKind = "batch"
 	EventTableDone       EventKind = "table_done"
 	EventTableFailed     EventKind = "table_failed" // table failed; migration continues

@@ -27,6 +27,32 @@ type MigrationsHandler struct {
 	Log        *slog.Logger
 }
 
+// statsSaverAdapter wraps MetaDB to implement stats.StatsSaver.
+type statsSaverAdapter struct {
+	db *state.MetaDB
+}
+
+func (a *statsSaverAdapter) SaveMigrationStats(ctx context.Context, rec stats.StatsRecord) error {
+	return a.db.SaveMigrationStats(ctx, state.MigrationStatsRecord{
+		MigrationID:     rec.MigrationID,
+		Timestamp:       rec.Timestamp,
+		ElapsedSecs:     rec.ElapsedSecs,
+		Phase:           rec.Phase,
+		RowsTotal:       rec.RowsTotal,
+		RowsTransferred: rec.RowsTransferred,
+		RatePerSec:      rec.RatePerSec,
+		ReadRate:        rec.ReadRate,
+		WriteRate:       rec.WriteRate,
+		TablesTotal:     rec.TablesTotal,
+		TablesDone:      rec.TablesDone,
+		TablesFailed:    rec.TablesFailed,
+		Goroutines:      rec.Goroutines,
+		MemAllocMB:      rec.MemAllocMB,
+		MemSysMB:        rec.MemSysMB,
+		CPUPercent:      rec.CPUPercent,
+	})
+}
+
 // StartMigration handles POST /api/v1/projects/{id}/migrations.
 func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
@@ -161,6 +187,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		"data_only", cfg.DataOnly,
 	)
 
+	col.SetSaver(&statsSaverAdapter{db: h.DB})
 	col.Start(ctx)
 	go func() {
 		defer func() {
@@ -308,8 +335,30 @@ func (h *MigrationsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 			sort.Slice(snap.TableDetails, func(i, j int) bool {
 				return snap.TableDetails[i].Name < snap.TableDetails[j].Name
 			})
+			// Recompute totals after augmentation to ensure consistency.
+			var totalRows, totalTransferred int64
+			for _, td := range snap.TableDetails {
+				totalRows += td.Total
+				totalTransferred += td.Transferred
+			}
+			snap.Rows.Total = totalRows
+			snap.Rows.Transferred = totalTransferred
 		}
 	}
 
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// GetStatsHistory handles GET /api/v1/migrations/{id}/stats/history.
+// Returns all recorded stats snapshots for the migration.
+func (h *MigrationsHandler) GetStatsHistory(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	records, err := h.DB.GetMigrationStats(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, records)
 }

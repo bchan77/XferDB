@@ -47,6 +47,15 @@ func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableS
 func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapters.TableSchema) error {
 	table := sourceSchema.Name
 
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count
+	// (which can be slow for large MongoDB collections with --accurate-counts).
+	now := time.Now()
+	e.emit(ProgressEvent{
+		Kind:      EventTableCounting,
+		TableName: table,
+		Timestamp: now,
+	})
+
 	total, err := e.source.GetRowCount(ctx, table)
 	if err != nil {
 		return fmt.Errorf("row count(%s): %w", table, err)
@@ -59,7 +68,6 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 		batchSize = defaultBatchSize
 	}
 
-	now := time.Now()
 	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
 		TableName:       table,
 		Status:          adapters.StatusInProgress,
@@ -70,12 +78,13 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 		return err
 	}
 
+	// Emit updated event with actual row count now that counting is done.
 	e.emit(ProgressEvent{
 		Kind:            EventTableStart,
 		TableName:       table,
 		RowsTotal:       total,
 		RowsTransferred: rowsTransferred,
-		Timestamp:       now,
+		Timestamp:       time.Now(),
 	})
 
 	batchID := offset / batchSize
@@ -188,6 +197,15 @@ type pipelineBatch struct {
 func (e *Engine) transferTablePipelined(ctx context.Context, sourceSchema adapters.TableSchema) error {
 	table := sourceSchema.Name
 
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count
+	// (which can be slow for large MongoDB collections with --accurate-counts).
+	now := time.Now()
+	e.emit(ProgressEvent{
+		Kind:      EventTableCounting,
+		TableName: table,
+		Timestamp: now,
+	})
+
 	total, err := e.source.GetRowCount(ctx, table)
 	if err != nil {
 		return fmt.Errorf("row count(%s): %w", table, err)
@@ -200,7 +218,6 @@ func (e *Engine) transferTablePipelined(ctx context.Context, sourceSchema adapte
 		batchSize = defaultBatchSize
 	}
 
-	now := time.Now()
 	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
 		TableName:       table,
 		Status:          adapters.StatusInProgress,
@@ -211,12 +228,13 @@ func (e *Engine) transferTablePipelined(ctx context.Context, sourceSchema adapte
 		return err
 	}
 
+	// Emit updated event with actual row count now that counting is done.
 	e.emit(ProgressEvent{
 		Kind:            EventTableStart,
 		TableName:       table,
 		RowsTotal:       total,
 		RowsTransferred: rowsTransferred,
-		Timestamp:       now,
+		Timestamp:       time.Now(),
 	})
 
 	batchID := offset / batchSize
@@ -400,6 +418,10 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 		batchSize = defaultBatchSize
 	}
 
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count.
+	now := time.Now()
+	e.emit(ProgressEvent{Kind: EventTableCounting, TableName: table, Timestamp: now})
+
 	total, err := e.source.GetRowCount(ctx, table)
 	if err != nil {
 		return fmt.Errorf("row count(%s): %w", table, err)
@@ -411,11 +433,10 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 		return e.transferTableParallelOffset(ctx, schema, workers)
 	}
 
-	now := time.Now()
 	e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
 		TableName: table, Status: adapters.StatusInProgress, RowsTotal: total, StartedAt: &now,
 	})
-	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: total, Timestamp: now})
+	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: total, Timestamp: time.Now()})
 
 	// Divide [pkMin, pkMax] into N equal-width ranges.
 	span := pkMax - pkMin + 1
@@ -484,16 +505,19 @@ func (e *Engine) transferTableParallelOffset(ctx context.Context, schema adapter
 		batchSize = defaultBatchSize
 	}
 
+	// Emit EventTableCounting so the UI shows "counting..." while we get the row count.
+	now := time.Now()
+	e.emit(ProgressEvent{Kind: EventTableCounting, TableName: table, Timestamp: now})
+
 	total, err := e.source.GetRowCount(ctx, table)
 	if err != nil {
 		return fmt.Errorf("row count(%s): %w", table, err)
 	}
 
-	now := time.Now()
 	e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
 		TableName: table, Status: adapters.StatusInProgress, RowsTotal: total, StartedAt: &now,
 	})
-	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: total, Timestamp: now})
+	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: total, Timestamp: time.Now()})
 
 	// Divide rows into N equal segments.
 	segSize := (int(total) + workers - 1) / workers // ceiling division

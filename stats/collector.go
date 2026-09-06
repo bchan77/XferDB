@@ -14,6 +14,36 @@ import (
 // resourceSampleInterval is how often the collector samples process resource usage.
 const resourceSampleInterval = 3 * time.Second
 
+// statsPersistInterval is how often the collector persists stats to storage.
+const statsPersistInterval = 5 * time.Second
+
+// StatsSaver is an interface for persisting stats snapshots.
+// Implemented by state.MetaDB.
+type StatsSaver interface {
+	SaveMigrationStats(ctx context.Context, rec StatsRecord) error
+}
+
+// StatsRecord is the data persisted for each stats snapshot.
+// Matches state.MigrationStatsRecord but defined here to avoid import cycle.
+type StatsRecord struct {
+	MigrationID     string
+	Timestamp       time.Time
+	ElapsedSecs     float64
+	Phase           string
+	RowsTotal       int64
+	RowsTransferred int64
+	RatePerSec      float64
+	ReadRate        float64
+	WriteRate       float64
+	TablesTotal     int
+	TablesDone      int
+	TablesFailed    int
+	Goroutines      int
+	MemAllocMB      float64
+	MemSysMB        float64
+	CPUPercent      float64
+}
+
 // Collector consumes a stream of engine.ProgressEvents and maintains a
 // thread-safe rolling snapshot of the migration's current statistics.
 type Collector struct {
@@ -21,6 +51,7 @@ type Collector struct {
 	projectID   string
 	events      <-chan engine.ProgressEvent
 	log         *slog.Logger
+	saver       StatsSaver // optional; if set, stats are persisted periodically
 
 	mu        sync.RWMutex
 	snapshot  StatsSnapshot
@@ -63,6 +94,11 @@ func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEv
 	}
 }
 
+// SetSaver sets the stats saver for persisting snapshots. Call before Start.
+func (c *Collector) SetSaver(s StatsSaver) {
+	c.saver = s
+}
+
 // Start begins consuming events in a background goroutine. It returns when the
 // events channel is closed or ctx is cancelled.
 func (c *Collector) Start(ctx context.Context) {
@@ -101,6 +137,24 @@ func (c *Collector) Start(ctx context.Context) {
 			}
 		}
 	}()
+
+	// Periodically persist stats to storage if a saver is configured.
+	if c.saver != nil {
+		go func() {
+			ticker := time.NewTicker(statsPersistInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					// Persist final snapshot on shutdown.
+					c.persistSnapshot(ctx)
+					return
+				case <-ticker.C:
+					c.persistSnapshot(ctx)
+				}
+			}
+		}()
+	}
 }
 
 // Snapshot returns a point-in-time copy of the current statistics.
@@ -118,7 +172,65 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	}
 	s.Rows.Total = totalRows
 	s.Rows.Transferred = totalTransferred
+
+	// Decay rate if no batches have arrived recently (e.g., bulk copy setup).
+	// After 3s of no progress, start decaying; floor at 10% to keep ETA meaningful.
+	timeSinceLastBatch := time.Since(c.lastSampleTime).Seconds()
+	if timeSinceLastBatch > 3.0 && s.Rows.RatePerSecond > 0 {
+		decayFactor := 1.0 - (timeSinceLastBatch-3.0)/12.0
+		if decayFactor < 0.1 {
+			decayFactor = 0.1 // floor at 10% to avoid showing 0
+		}
+		s.Rows.RatePerSecond *= decayFactor
+	}
+
+	// Recompute ETA using the freshly computed totals and decayed rate.
+	if s.Rows.RatePerSecond > 0 && s.Rows.Total > s.Rows.Transferred {
+		s.ETASeconds = float64(s.Rows.Total-s.Rows.Transferred) / s.Rows.RatePerSecond
+	} else {
+		s.ETASeconds = 0
+	}
 	return s
+}
+
+// persistSnapshot saves the current stats snapshot to storage.
+func (c *Collector) persistSnapshot(ctx context.Context) {
+	if c.saver == nil {
+		return
+	}
+	snap := c.Snapshot()
+
+	var goroutines int
+	var memAllocMB, memSysMB, cpuPercent float64
+	if snap.Resource != nil {
+		goroutines = snap.Resource.Goroutines
+		memAllocMB = snap.Resource.MemAllocMB
+		memSysMB = snap.Resource.MemSysMB
+		cpuPercent = snap.Resource.CPUPercent
+	}
+
+	rec := StatsRecord{
+		MigrationID:     snap.MigrationID,
+		Timestamp:       time.Now(),
+		ElapsedSecs:     snap.ElapsedSeconds,
+		Phase:           snap.Phase,
+		RowsTotal:       snap.Rows.Total,
+		RowsTransferred: snap.Rows.Transferred,
+		RatePerSec:      snap.Rows.RatePerSecond,
+		ReadRate:        snap.Rows.ReadRate,
+		WriteRate:       snap.Rows.WriteRate,
+		TablesTotal:     snap.Tables.Total,
+		TablesDone:      snap.Tables.Completed,
+		TablesFailed:    snap.Tables.Failed,
+		Goroutines:      goroutines,
+		MemAllocMB:      memAllocMB,
+		MemSysMB:        memSysMB,
+		CPUPercent:      cpuPercent,
+	}
+
+	if err := c.saver.SaveMigrationStats(ctx, rec); err != nil {
+		c.log.Warn("failed to persist stats", "error", err)
+	}
 }
 
 // apply processes a single event and updates the internal snapshot.
@@ -158,19 +270,42 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			)
 		}
 
+	case engine.EventTableCounting:
+		// Worker picked up the table and is counting rows.
+		s.Phase = "in_progress"
+		s.CurrentTable = ev.TableName
+		if idx, ok := c.tableIndex[ev.TableName]; ok {
+			// Only update status if not already past counting.
+			if s.TableDetails[idx].Status == "pending" {
+				s.TableDetails[idx].Status = "counting"
+				s.Tables.Total++
+				s.Tables.InProgress++
+			}
+		} else {
+			// Table not yet registered.
+			idx := len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:   ev.TableName,
+				Status: "counting",
+			})
+			c.tableIndex[ev.TableName] = idx
+			s.Tables.Total++
+			s.Tables.InProgress++
+		}
+
 	case engine.EventTableStart:
 		s.Phase = "in_progress"
 		s.CurrentTable = ev.TableName
 		c.tableStarted[ev.TableName] = time.Now()
 		if idx, ok := c.tableIndex[ev.TableName]; ok {
-			// Table already registered from EventMigrationStart.
-			// Only update total if it was zero (GetRowCount failed earlier).
+			// Table already registered from EventMigrationStart or EventTableCounting.
+			// Update total now that counting is done.
 			if s.TableDetails[idx].Total == 0 && ev.RowsTotal > 0 {
 				s.Rows.Total += ev.RowsTotal
 				s.TableDetails[idx].Total = ev.RowsTotal
 			}
-			// Only count as new in-progress if not already in progress.
-			if s.TableDetails[idx].Status != "in_progress" {
+			// Only count as new in-progress if not already counted.
+			if s.TableDetails[idx].Status != "in_progress" && s.TableDetails[idx].Status != "counting" {
 				s.Tables.Total++
 				s.Tables.InProgress++
 			}
@@ -246,8 +381,9 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 		s.Tables.Completed++
 		s.TableDetails[idx].Status = "done"
 		s.TableDetails[idx].Transferred = ev.RowsTransferred
-		// Update total if transferred exceeds it (MongoDB estimates can be low).
-		if ev.RowsTransferred > s.TableDetails[idx].Total {
+		// When a table is done, we know the exact row count. Update Total to match
+		// RowsTransferred regardless of direction (handles both under- and over-estimates).
+		if s.TableDetails[idx].Total != ev.RowsTransferred {
 			diff := ev.RowsTransferred - s.TableDetails[idx].Total
 			s.TableDetails[idx].Total = ev.RowsTransferred
 			s.Rows.Total += diff
