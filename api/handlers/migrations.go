@@ -62,6 +62,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		OffsetFallback *bool    `json:"offset_fallback"`
 		BulkCopy       *bool    `json:"bulk_copy"`
 		AccurateCounts *bool    `json:"accurate_counts"`
+		AsyncPipeline  *bool    `json:"async_pipeline"`
 		Tables         []string `json:"tables"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
@@ -94,6 +95,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if overrides.AccurateCounts != nil {
 		p.TransferConfig.AccurateCounts = *overrides.AccurateCounts
+	}
+	if overrides.AsyncPipeline != nil {
+		p.TransferConfig.AsyncPipeline = *overrides.AsyncPipeline
 	}
 	if len(overrides.Tables) > 0 {
 		p.TransferConfig.Tables = overrides.Tables
@@ -285,10 +289,18 @@ func (h *MigrationsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, pt := range projectTables {
 				if !inScope[pt.TableName] {
+					// If this table's status is from a different migration, show it as
+					// "pending" for the current migration rather than the old status.
+					status := pt.Status
+					transferred := pt.RowsTransferred
+					if pt.LastMigrationID != id {
+						status = "pending"
+						transferred = 0
+					}
 					snap.TableDetails = append(snap.TableDetails, stats.TableDetail{
 						Name:        pt.TableName,
-						Status:      pt.Status,
-						Transferred: pt.RowsTransferred,
+						Status:      status,
+						Transferred: transferred,
 						Total:       pt.RowsTotal,
 					})
 				}

@@ -34,6 +34,7 @@ Examples:
 		bulkCopy, _ := cmd.Flags().GetBool("bulk-copy")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 		accurateCounts, _ := cmd.Flags().GetBool("accurate-counts")
+		asyncPipeline, _ := cmd.Flags().GetBool("async-pipeline")
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
@@ -80,7 +81,7 @@ Examples:
 			return cancelMigration(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, accurateCounts, tables)
+		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, accurateCounts, asyncPipeline, tables)
 		if err != nil {
 			return err
 		}
@@ -105,6 +106,7 @@ func init() {
 	migrateCmd.Flags().Bool("bulk-copy", false, "Use PostgreSQL COPY protocol for writes (faster; requires target table to be empty — combine with --truncate or --recreate-schema)")
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 	migrateCmd.Flags().Bool("accurate-counts", false, "Use accurate row counts instead of estimates (slower for MongoDB but shows correct progress)")
+	migrateCmd.Flags().Bool("async-pipeline", false, "Overlap reading and writing for faster throughput (reads batch N+1 while writing batch N)")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -240,7 +242,7 @@ func latestMigrationID(projectID string) (string, error) {
 }
 
 // startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments, bulkCopy, accurateCounts bool, tables []string) (string, error) {
+func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments, bulkCopy, accurateCounts, asyncPipeline bool, tables []string) (string, error) {
 	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
@@ -249,6 +251,7 @@ func startMigration(projectID string, recreateSchema, truncate bool, tableWorker
 		"offset_fallback": offsetSegments,
 		"bulk_copy":       bulkCopy,
 		"accurate_counts": accurateCounts,
+		"async_pipeline":  asyncPipeline,
 	}
 	if batchSize > 0 {
 		req["batch_size"] = batchSize

@@ -18,6 +18,10 @@ func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableS
 	cfg := e.project.TransferConfig
 	bw := cfg.SegmentWorkers
 	if bw <= 1 {
+		// Use pipelined mode if enabled (overlaps read/write for better throughput).
+		if cfg.AsyncPipeline {
+			return e.transferTablePipelined(ctx, sourceSchema)
+		}
 		return e.transferTableSequential(ctx, sourceSchema)
 	}
 
@@ -146,6 +150,221 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 			WriteDuration:   writeDur,
 			Timestamp:       time.Now(),
 		})
+	}
+
+	done := time.Now()
+	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
+		TableName:       table,
+		Status:          adapters.StatusCompleted,
+		RowsTotal:       total,
+		RowsTransferred: rowsTransferred,
+		CompletedAt:     &done,
+	}); err != nil {
+		return err
+	}
+
+	e.emit(ProgressEvent{
+		Kind:            EventTableDone,
+		TableName:       table,
+		RowsTransferred: rowsTransferred,
+		RowsTotal:       total,
+		Timestamp:       done,
+	})
+	return nil
+}
+
+// pipelineBatch holds a batch plus timing info for the pipelined transfer.
+type pipelineBatch struct {
+	batch    *adapters.Batch
+	readDur  time.Duration
+	lastKey  string // resume token for keyset mode
+	offset   int    // for offset mode
+	batchID  int
+	readErr  error // non-nil signals reader error
+}
+
+// transferTablePipelined overlaps reading and writing for better throughput.
+// While batch N is being written, batch N+1 is read concurrently.
+func (e *Engine) transferTablePipelined(ctx context.Context, sourceSchema adapters.TableSchema) error {
+	table := sourceSchema.Name
+
+	total, err := e.source.GetRowCount(ctx, table)
+	if err != nil {
+		return fmt.Errorf("row count(%s): %w", table, err)
+	}
+
+	offset, rowsTransferred, lastKey := e.resumeState(ctx, table)
+
+	batchSize := e.project.TransferConfig.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+
+	now := time.Now()
+	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
+		TableName:       table,
+		Status:          adapters.StatusInProgress,
+		RowsTotal:       total,
+		RowsTransferred: rowsTransferred,
+		StartedAt:       &now,
+	}); err != nil {
+		return err
+	}
+
+	e.emit(ProgressEvent{
+		Kind:            EventTableStart,
+		TableName:       table,
+		RowsTotal:       total,
+		RowsTransferred: rowsTransferred,
+		Timestamp:       now,
+	})
+
+	batchID := offset / batchSize
+
+	// Channel for passing batches from reader to writer.
+	// Buffer of 2 allows reader to get ahead while writer processes.
+	batchCh := make(chan pipelineBatch, 2)
+
+	// Context for coordinating shutdown between reader and writer.
+	pipeCtx, cancelPipe := context.WithCancel(ctx)
+	defer cancelPipe()
+
+	// Reader goroutine: reads batches and sends to channel.
+	var readerWg sync.WaitGroup
+	readerWg.Add(1)
+	go func() {
+		defer readerWg.Done()
+		defer close(batchCh)
+
+		currentOffset := offset
+		currentLastKey := lastKey
+		currentBatchID := batchID
+
+		for {
+			select {
+			case <-pipeCtx.Done():
+				return
+			default:
+			}
+
+			var opts adapters.BatchOptions
+			if currentLastKey != "" {
+				opts = adapters.BatchOptions{LastPK: currentLastKey, Limit: batchSize}
+			} else {
+				opts = adapters.BatchOptions{Offset: currentOffset, Limit: batchSize}
+			}
+
+			t0 := time.Now()
+			batch, err := e.source.ReadBatch(pipeCtx, table, opts)
+			readDur := time.Since(t0)
+
+			if err != nil {
+				select {
+				case batchCh <- pipelineBatch{readErr: err}:
+				case <-pipeCtx.Done():
+				}
+				return
+			}
+
+			if batch.Size == 0 {
+				return // No more data
+			}
+
+			currentBatchID++
+			pb := pipelineBatch{
+				batch:   batch,
+				readDur: readDur,
+				batchID: currentBatchID,
+				offset:  currentOffset,
+			}
+
+			// Update cursor for next read.
+			if batch.LastKey != "" {
+				currentLastKey = batch.LastKey
+				pb.lastKey = batch.LastKey
+			} else {
+				currentOffset += batch.Size
+			}
+
+			select {
+			case batchCh <- pb:
+			case <-pipeCtx.Done():
+				return
+			}
+		}
+	}()
+
+	// Writer loop: receives batches from channel and writes them.
+	var writeErr error
+	for pb := range batchCh {
+		// Check for reader error.
+		if pb.readErr != nil {
+			writeErr = fmt.Errorf("read batch %s: %w", table, pb.readErr)
+			break
+		}
+
+		// Check for pause.
+		if err := e.checkPause(ctx); err != nil {
+			writeErr = err
+			break
+		}
+
+		t1 := time.Now()
+		if err := e.target.WriteBatch(ctx, table, pb.batch); err != nil {
+			writeErr = fmt.Errorf("write batch %s: %w", table, err)
+			break
+		}
+		writeDur := time.Since(t1)
+
+		rowsTransferred += int64(pb.batch.Size)
+
+		// Update lastKey for checkpoint (use the one from the batch we just wrote).
+		if pb.lastKey != "" {
+			lastKey = pb.lastKey
+		} else {
+			offset = pb.offset + pb.batch.Size
+		}
+
+		if err := e.db.SaveCheckpoint(ctx, adapters.Checkpoint{
+			MigrationID: e.migrationID,
+			TableName:   table,
+			BatchID:     pb.batchID,
+			LastPK:      lastKey,
+			RowsInBatch: pb.batch.Size,
+			CreatedAt:   time.Now(),
+		}); err != nil {
+			writeErr = fmt.Errorf("save checkpoint: %w", err)
+			break
+		}
+
+		if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
+			TableName:       table,
+			Status:          adapters.StatusInProgress,
+			RowsTotal:       total,
+			RowsTransferred: rowsTransferred,
+		}); err != nil {
+			writeErr = err
+			break
+		}
+
+		e.emit(ProgressEvent{
+			Kind:            EventBatch,
+			TableName:       table,
+			RowsTransferred: rowsTransferred,
+			RowsTotal:       total,
+			BatchRows:       pb.batch.Size,
+			ReadDuration:    pb.readDur,
+			WriteDuration:   writeDur,
+			Timestamp:       time.Now(),
+		})
+	}
+
+	// Cancel reader if we exited early due to error.
+	cancelPipe()
+	readerWg.Wait()
+
+	if writeErr != nil {
+		return writeErr
 	}
 
 	done := time.Now()
