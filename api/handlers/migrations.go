@@ -335,6 +335,14 @@ func (h *MigrationsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 			sort.Slice(snap.TableDetails, func(i, j int) bool {
 				return snap.TableDetails[i].Name < snap.TableDetails[j].Name
 			})
+			// Recompute totals after augmentation to ensure consistency.
+			var totalRows, totalTransferred int64
+			for _, td := range snap.TableDetails {
+				totalRows += td.Total
+				totalTransferred += td.Transferred
+			}
+			snap.Rows.Total = totalRows
+			snap.Rows.Transferred = totalTransferred
 		}
 	}
 
