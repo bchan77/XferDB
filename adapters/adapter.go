@@ -181,6 +181,19 @@ type PermissionCheck struct {
 	Errors         []string `json:"errors,omitempty"`
 }
 
+// DatabaseInfo holds metadata about a connected database.
+type DatabaseInfo struct {
+	Type         string `json:"type"`                    // e.g. "PostgreSQL", "MongoDB", "MySQL"
+	Version      string `json:"version"`                 // e.g. "13.23", "8.0.3"
+	Host         string `json:"host"`                    // e.g. "postgres.homelab.local:5432"
+	Database     string `json:"database"`                // database/schema name
+	Tables       int    `json:"tables"`                  // number of tables/collections
+	SizeBytes    int64  `json:"size_bytes,omitempty"`    // total size in bytes (0 if unknown)
+	SizeHuman    string `json:"size_human,omitempty"`    // human-readable size e.g. "1.2 GB"
+	SSL          string `json:"ssl,omitempty"`           // "enabled", "disabled", or ""
+	ServerInfo   string `json:"server_info,omitempty"`   // additional server info
+}
+
 // SourceAdapter is implemented by any database that can act as a migration source.
 type SourceAdapter interface {
 	Connect(ctx context.Context, config ConnectionConfig) error
@@ -194,6 +207,8 @@ type SourceAdapter interface {
 	GetPKRange(ctx context.Context, table, pkColumn string) (min, max int64, err error)
 	ReadBatch(ctx context.Context, table string, opts BatchOptions) (*Batch, error)
 	CheckPermissions(ctx context.Context) (*PermissionCheck, error)
+	// GetInfo returns metadata about the connected database (version, size, etc.).
+	GetInfo(ctx context.Context) (*DatabaseInfo, error)
 }
 
 // BulkCopyWriter is an optional interface for target adapters that support the
@@ -223,4 +238,6 @@ type TargetAdapter interface {
 	CreateConstraints(ctx context.Context, table string, fks []ForeignKey, checks []CheckConstraint) error
 	WriteBatch(ctx context.Context, table string, batch *Batch) error
 	CheckPermissions(ctx context.Context) (*PermissionCheck, error)
+	// GetInfo returns metadata about the connected database (version, size, etc.).
+	GetInfo(ctx context.Context) (*DatabaseInfo, error)
 }

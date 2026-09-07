@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"gitea.homelab.local/nextdevops/XferDB/api"
 	"gitea.homelab.local/nextdevops/XferDB/state"
+	"gitea.homelab.local/nextdevops/XferDB/version"
 )
 
 // ServerAddr is the base URL of the XferDB API server, set via --server flag.
@@ -28,7 +29,7 @@ Then use projects and migrations:
   xferdb project create --name myproject --source sqlite:///src.db --target sqlite:///dst.db
   xferdb project use myproject
   xferdb migrate`,
-	Version:      "0.2.0",
+	Version:      version.Version,
 	SilenceUsage: true,
 }
 
@@ -45,13 +46,14 @@ func init() {
 	RootCmd.AddCommand(migrateCmd)
 	RootCmd.AddCommand(versionCmd)
 	RootCmd.AddCommand(listCmd)
+	RootCmd.AddCommand(supportBundleCmd)
 }
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print XferDB version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("XferDB v0.2.0")
+		fmt.Printf("XferDB v%s\n", version.Version)
 	},
 }
 

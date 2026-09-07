@@ -19,6 +19,7 @@ import (
 // the frozen schema plan after Connect.
 type Source struct {
 	client   *mongo.Client
+	config   adapters.ConnectionConfig
 	database string
 	plan     []state.SchemaPlanRow
 
@@ -75,6 +76,7 @@ func (s *Source) Connect(ctx context.Context, cfg adapters.ConnectionConfig) err
 	}
 
 	s.client = client
+	s.config = cfg
 	s.database = cfg.Database
 	return nil
 }
@@ -274,6 +276,85 @@ func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionChec
 	return result, nil
 }
 
+func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
+	info := &adapters.DatabaseInfo{
+		Type:     "MongoDB",
+		Database: s.database,
+	}
+
+	// Get host from config or parse from DSN
+	if s.config.Host != "" {
+		port := s.config.Port
+		if port == 0 {
+			port = 27017
+		}
+		info.Host = fmt.Sprintf("%s:%d", s.config.Host, port)
+	} else if s.config.DSN != "" {
+		// Parse host from mongodb:// URI
+		info.Host = parseMongoHost(s.config.DSN)
+	}
+
+	// Get server version and info via buildInfo command
+	var buildInfo bson.M
+	if err := s.client.Database("admin").RunCommand(ctx, bson.D{{Key: "buildInfo", Value: 1}}).Decode(&buildInfo); err == nil {
+		if version, ok := buildInfo["version"].(string); ok {
+			info.Version = version
+		}
+	}
+
+	// Count collections
+	db := s.client.Database(s.database)
+	specs, err := db.ListCollectionSpecifications(ctx, bson.D{})
+	if err == nil {
+		count := 0
+		for _, spec := range specs {
+			if !shouldSkipCollection(spec.Name, spec.Type) {
+				count++
+			}
+		}
+		info.Tables = count
+	}
+
+	// Get database stats for size
+	var dbStats bson.M
+	if err := db.RunCommand(ctx, bson.D{{Key: "dbStats", Value: 1}}).Decode(&dbStats); err == nil {
+		if dataSize, ok := dbStats["dataSize"].(int64); ok {
+			info.SizeBytes = dataSize
+			info.SizeHuman = humanSize(dataSize)
+		} else if dataSize, ok := dbStats["dataSize"].(float64); ok {
+			info.SizeBytes = int64(dataSize)
+			info.SizeHuman = humanSize(int64(dataSize))
+		} else if dataSize, ok := dbStats["dataSize"].(int32); ok {
+			info.SizeBytes = int64(dataSize)
+			info.SizeHuman = humanSize(int64(dataSize))
+		}
+	}
+
+	return info, nil
+}
+
+// humanSize formats bytes as a human-readable string.
+func humanSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+		TB = GB * 1024
+	)
+	switch {
+	case bytes >= TB:
+		return fmt.Sprintf("%.1f TB", float64(bytes)/TB)
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/GB)
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/MB)
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/KB)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func (s *Source) requirePlan() error {
@@ -350,4 +431,48 @@ func decodeLastKey(key string, plan []state.SchemaPlanRow) (interface{}, error) 
 		}
 		return key, nil
 	}
+}
+
+// parseMongoHost extracts the host(s) from a mongodb:// or mongodb+srv:// URI.
+func parseMongoHost(dsn string) string {
+	// mongodb://user:pass@host1:27017,host2:27017/db?options
+	// mongodb+srv://user:pass@cluster.mongodb.net/db?options
+
+	// Find the start of the host portion (after ://)
+	idx := 0
+	if len(dsn) > 14 && dsn[:14] == "mongodb+srv://" {
+		idx = 14
+	} else if len(dsn) > 10 && dsn[:10] == "mongodb://" {
+		idx = 10
+	} else {
+		return ""
+	}
+
+	rest := dsn[idx:]
+
+	// Skip credentials if present (user:pass@)
+	if atIdx := findByte(rest, '@'); atIdx >= 0 {
+		rest = rest[atIdx+1:]
+	}
+
+	// Take everything up to the first / or ? (the host portion)
+	endIdx := len(rest)
+	if slashIdx := findByte(rest, '/'); slashIdx >= 0 && slashIdx < endIdx {
+		endIdx = slashIdx
+	}
+	if qIdx := findByte(rest, '?'); qIdx >= 0 && qIdx < endIdx {
+		endIdx = qIdx
+	}
+
+	return rest[:endIdx]
+}
+
+// findByte returns the index of the first occurrence of b in s, or -1.
+func findByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
 }

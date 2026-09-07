@@ -11,7 +11,8 @@ import (
 
 // Source implements adapters.SourceAdapter for PostgreSQL.
 type Source struct {
-	db *sql.DB
+	db     *sql.DB
+	config adapters.ConnectionConfig
 }
 
 func NewSource() adapters.SourceAdapter {
@@ -24,6 +25,7 @@ func (s *Source) Connect(ctx context.Context, config adapters.ConnectionConfig) 
 		return fmt.Errorf("postgres open: %w", err)
 	}
 	s.db = db
+	s.config = config
 	return s.Ping(ctx)
 }
 
@@ -186,4 +188,61 @@ func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionChec
 
 	s.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
+}
+
+func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
+	info := &adapters.DatabaseInfo{Type: "PostgreSQL"}
+
+	// Get version
+	var version string
+	if err := s.db.QueryRowContext(ctx, `SHOW server_version`).Scan(&version); err == nil {
+		info.Version = version
+	}
+
+	// Get current database name
+	var dbName string
+	if err := s.db.QueryRowContext(ctx, `SELECT current_database()`).Scan(&dbName); err == nil {
+		info.Database = dbName
+	}
+
+	// Get host info from config or inet_server_addr()
+	if s.config.Host != "" {
+		port := s.config.Port
+		if port == 0 {
+			port = 5432
+		}
+		info.Host = fmt.Sprintf("%s:%d", s.config.Host, port)
+	} else {
+		var host sql.NullString
+		var port sql.NullInt64
+		s.db.QueryRowContext(ctx, `SELECT inet_server_addr(), inet_server_port()`).Scan(&host, &port)
+		if host.Valid {
+			info.Host = fmt.Sprintf("%s:%d", host.String, port.Int64)
+		}
+	}
+
+	// Count tables
+	tables, err := listTables(ctx, s.db)
+	if err == nil {
+		info.Tables = len(tables)
+	}
+
+	// Get database size
+	var sizeBytes int64
+	if err := s.db.QueryRowContext(ctx, `SELECT pg_database_size(current_database())`).Scan(&sizeBytes); err == nil {
+		info.SizeBytes = sizeBytes
+		info.SizeHuman = humanSize(sizeBytes)
+	}
+
+	// Check SSL status
+	var ssl string
+	if err := s.db.QueryRowContext(ctx, `SHOW ssl`).Scan(&ssl); err == nil {
+		if ssl == "on" {
+			info.SSL = "enabled"
+		} else {
+			info.SSL = "disabled"
+		}
+	}
+
+	return info, nil
 }

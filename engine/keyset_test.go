@@ -56,6 +56,9 @@ func (s *keysetSource) GetPKRange(_ context.Context, _, _ string) (int64, int64,
 func (s *keysetSource) CheckPermissions(_ context.Context) (*adapters.PermissionCheck, error) {
 	return &adapters.PermissionCheck{CanRead: true}, nil
 }
+func (s *keysetSource) GetInfo(_ context.Context) (*adapters.DatabaseInfo, error) {
+	return &adapters.DatabaseInfo{Type: "MockKeyset"}, nil
+}
 
 // offsetSource simulates a SQL adapter that never sets LastKey.
 type offsetSource struct {
@@ -100,6 +103,9 @@ func (s *offsetSource) GetPKRange(_ context.Context, _, _ string) (int64, int64,
 func (s *offsetSource) CheckPermissions(_ context.Context) (*adapters.PermissionCheck, error) {
 	return &adapters.PermissionCheck{CanRead: true}, nil
 }
+func (s *offsetSource) GetInfo(_ context.Context) (*adapters.DatabaseInfo, error) {
+	return &adapters.DatabaseInfo{Type: "MockOffset"}, nil
+}
 
 // ── mock target ─────────────────────────────────────────────────────────────
 
@@ -131,6 +137,9 @@ func (t *devNullTarget) CreateConstraints(_ context.Context, _ string, _ []adapt
 }
 func (t *devNullTarget) CheckPermissions(_ context.Context) (*adapters.PermissionCheck, error) {
 	return &adapters.PermissionCheck{CanWrite: true}, nil
+}
+func (t *devNullTarget) GetInfo(_ context.Context) (*adapters.DatabaseInfo, error) {
+	return &adapters.DatabaseInfo{Type: "MockTarget"}, nil
 }
 
 // ── test helpers ────────────────────────────────────────────────────────────

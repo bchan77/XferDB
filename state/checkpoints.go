@@ -60,6 +60,30 @@ func (m *MetaDB) GetLastCheckpoint(ctx context.Context, migrationID, tableName s
 	}, nil
 }
 
+// ListCheckpoints returns all checkpoints for a migration, ordered by table and batch.
+func (m *MetaDB) ListCheckpoints(ctx context.Context, migrationID string) ([]adapters.Checkpoint, error) {
+	var rows []checkpointRow
+	err := m.db.SelectContext(ctx, &rows, `
+		SELECT * FROM checkpoints
+		WHERE migration_id = ?
+		ORDER BY table_name, batch_id`, migrationID)
+	if err != nil {
+		return nil, fmt.Errorf("list checkpoints: %w", err)
+	}
+	result := make([]adapters.Checkpoint, len(rows))
+	for i, row := range rows {
+		result[i] = adapters.Checkpoint{
+			MigrationID: row.MigrationID,
+			TableName:   row.TableName,
+			BatchID:     row.BatchID,
+			LastPK:      row.LastPK,
+			RowsInBatch: row.RowsInBatch,
+			CreatedAt:   row.CreatedAt,
+		}
+	}
+	return result, nil
+}
+
 // DeleteCheckpoints removes all checkpoints for a migration (called on completion or cancellation).
 func (m *MetaDB) DeleteCheckpoints(ctx context.Context, migrationID string) error {
 	_, err := m.db.ExecContext(ctx,

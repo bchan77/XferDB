@@ -12,7 +12,8 @@ import (
 
 // Target implements adapters.TargetAdapter for SQLite.
 type Target struct {
-	db *sql.DB
+	db     *sql.DB
+	config adapters.ConnectionConfig
 }
 
 func NewTarget() adapters.TargetAdapter {
@@ -25,6 +26,7 @@ func (t *Target) Connect(ctx context.Context, config adapters.ConnectionConfig) 
 		return err
 	}
 	t.db = db
+	t.config = config
 	return t.Ping(ctx)
 }
 
@@ -236,4 +238,41 @@ func (t *Target) CheckPermissions(ctx context.Context) (*adapters.PermissionChec
 
 	t.db.ExecContext(ctx, `DROP TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
+}
+
+func (t *Target) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
+	info := &adapters.DatabaseInfo{Type: "SQLite"}
+
+	// Get version
+	var version string
+	if err := t.db.QueryRowContext(ctx, `SELECT sqlite_version()`).Scan(&version); err == nil {
+		info.Version = version
+	}
+
+	// Get database path from config
+	if t.config.DSN != "" {
+		info.Database = t.config.DSN
+	} else if t.config.Database != "" {
+		info.Database = t.config.Database
+	}
+
+	// Count tables
+	tables, err := listTables(ctx, t.db)
+	if err == nil {
+		info.Tables = len(tables)
+	}
+
+	// Get database size using PRAGMA
+	var pageCount, pageSize int64
+	if err := t.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err == nil {
+		if err := t.db.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err == nil {
+			info.SizeBytes = pageCount * pageSize
+			info.SizeHuman = humanSize(info.SizeBytes)
+		}
+	}
+
+	// SQLite has no SSL
+	info.SSL = "n/a"
+
+	return info, nil
 }
