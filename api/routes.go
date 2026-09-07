@@ -30,6 +30,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{id}", ph.GetProject)
 	mux.HandleFunc("DELETE /api/v1/projects/{id}", ph.DeleteProject)
 	mux.HandleFunc("POST /api/v1/projects/{id}/preflight", ph.Preflight)
+	mux.HandleFunc("GET /api/v1/projects/{id}/support-bundle", ph.SupportBundle)
 	mux.HandleFunc("POST /api/v1/projects/{id}/analyze", ph.Analyze)
 	mux.HandleFunc("GET /api/v1/projects/{id}/schema-plan", ph.GetSchemaPlan)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/schema-plan", ph.OverrideSchemaPlan)

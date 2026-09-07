@@ -127,6 +127,15 @@ func runPreflight(name, projectID string) error {
 	}
 	defer resp.Body.Close()
 
+	type dbInfo struct {
+		Type      string `json:"type"`
+		Version   string `json:"version"`
+		Host      string `json:"host"`
+		Database  string `json:"database"`
+		Tables    int    `json:"tables"`
+		SizeHuman string `json:"size_human"`
+		SSL       string `json:"ssl"`
+	}
 	var result struct {
 		Status string `json:"status"`
 		Source *struct {
@@ -141,7 +150,9 @@ func runPreflight(name, projectID string) error {
 			CanCreateTable bool     `json:"can_create_table"`
 			Errors         []string `json:"errors"`
 		} `json:"target"`
-		Error string `json:"error"`
+		SourceInfo *dbInfo `json:"source_info"`
+		TargetInfo *dbInfo `json:"target_info"`
+		Error      string  `json:"error"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
@@ -151,20 +162,58 @@ func runPreflight(name, projectID string) error {
 
 	fmt.Printf("Project:  %s\n", name)
 	fmt.Printf("Status:   %s\n", result.Status)
-	if result.Source != nil {
+
+	if result.SourceInfo != nil {
+		fmt.Printf("\nSource: %s %s\n", result.SourceInfo.Type, result.SourceInfo.Version)
+		if result.SourceInfo.Host != "" {
+			fmt.Printf("  Host:     %s\n", result.SourceInfo.Host)
+		}
+		if result.SourceInfo.Database != "" {
+			fmt.Printf("  Database: %s\n", result.SourceInfo.Database)
+		}
+		fmt.Printf("  Tables:   %d\n", result.SourceInfo.Tables)
+		if result.SourceInfo.SizeHuman != "" {
+			fmt.Printf("  Size:     %s\n", result.SourceInfo.SizeHuman)
+		}
+		if result.SourceInfo.SSL != "" {
+			fmt.Printf("  SSL:      %s\n", result.SourceInfo.SSL)
+		}
+	} else if result.Source != nil {
 		fmt.Printf("\nSource:\n")
-		fmt.Printf("  can_read:         %v\n", result.Source.CanRead)
-		fmt.Printf("  can_write:        %v\n", result.Source.CanWrite)
-		fmt.Printf("  can_create_table: %v\n", result.Source.CanCreateTable)
+	}
+	if result.Source != nil {
+		fmt.Printf("  Permissions:\n")
+		fmt.Printf("    can_read:         %v\n", result.Source.CanRead)
+		fmt.Printf("    can_write:        %v\n", result.Source.CanWrite)
+		fmt.Printf("    can_create_table: %v\n", result.Source.CanCreateTable)
 		for _, e := range result.Source.Errors {
 			fmt.Printf("  ERROR: %s\n", e)
 		}
 	}
-	if result.Target != nil {
+
+	if result.TargetInfo != nil {
+		fmt.Printf("\nTarget: %s %s\n", result.TargetInfo.Type, result.TargetInfo.Version)
+		if result.TargetInfo.Host != "" {
+			fmt.Printf("  Host:     %s\n", result.TargetInfo.Host)
+		}
+		if result.TargetInfo.Database != "" {
+			fmt.Printf("  Database: %s\n", result.TargetInfo.Database)
+		}
+		fmt.Printf("  Tables:   %d\n", result.TargetInfo.Tables)
+		if result.TargetInfo.SizeHuman != "" {
+			fmt.Printf("  Size:     %s\n", result.TargetInfo.SizeHuman)
+		}
+		if result.TargetInfo.SSL != "" {
+			fmt.Printf("  SSL:      %s\n", result.TargetInfo.SSL)
+		}
+	} else if result.Target != nil {
 		fmt.Printf("\nTarget:\n")
-		fmt.Printf("  can_read:         %v\n", result.Target.CanRead)
-		fmt.Printf("  can_write:        %v\n", result.Target.CanWrite)
-		fmt.Printf("  can_create_table: %v\n", result.Target.CanCreateTable)
+	}
+	if result.Target != nil {
+		fmt.Printf("  Permissions:\n")
+		fmt.Printf("    can_read:         %v\n", result.Target.CanRead)
+		fmt.Printf("    can_write:        %v\n", result.Target.CanWrite)
+		fmt.Printf("    can_create_table: %v\n", result.Target.CanCreateTable)
 		for _, e := range result.Target.Errors {
 			fmt.Printf("  ERROR: %s\n", e)
 		}

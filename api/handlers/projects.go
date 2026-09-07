@@ -120,9 +120,11 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	type checkResult struct {
-		Source *adapters.PermissionCheck `json:"source"`
-		Target *adapters.PermissionCheck `json:"target"`
-		Status string                    `json:"status"`
+		Source     *adapters.PermissionCheck `json:"source"`
+		Target     *adapters.PermissionCheck `json:"target"`
+		SourceInfo *adapters.DatabaseInfo    `json:"source_info,omitempty"`
+		TargetInfo *adapters.DatabaseInfo    `json:"target_info,omitempty"`
+		Status     string                    `json:"status"`
 	}
 
 	result := checkResult{Status: "ready"}
@@ -140,6 +142,8 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		if result.Source != nil && len(result.Source.Errors) > 0 {
 			result.Status = "failed"
 		}
+		// Collect database info.
+		result.SourceInfo, _ = src.GetInfo(ctx)
 	}
 
 	// Target — same pattern.
@@ -155,6 +159,8 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		if result.Target != nil && len(result.Target.Errors) > 0 {
 			result.Status = "failed"
 		}
+		// Collect database info.
+		result.TargetInfo, _ = tgt.GetInfo(ctx)
 	}
 
 	h.Log.Info("project.preflight",

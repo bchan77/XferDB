@@ -11,7 +11,8 @@ import (
 
 // Source implements adapters.SourceAdapter for MySQL.
 type Source struct {
-	db *sql.DB
+	db     *sql.DB
+	config adapters.ConnectionConfig
 }
 
 func NewSource() adapters.SourceAdapter {
@@ -24,6 +25,7 @@ func (s *Source) Connect(ctx context.Context, config adapters.ConnectionConfig) 
 		return fmt.Errorf("mysql open: %w", err)
 	}
 	s.db = db
+	s.config = config
 	return s.Ping(ctx)
 }
 
@@ -182,4 +184,60 @@ func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionChec
 
 	s.db.ExecContext(ctx, `DROP TEMPORARY TABLE IF EXISTS _xferdb_probe`) //nolint:errcheck
 	return check, nil
+}
+
+func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
+	info := &adapters.DatabaseInfo{Type: "MySQL"}
+
+	// Get version
+	var version string
+	if err := s.db.QueryRowContext(ctx, `SELECT VERSION()`).Scan(&version); err == nil {
+		info.Version = version
+	}
+
+	// Get current database name
+	var dbName sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT DATABASE()`).Scan(&dbName); err == nil && dbName.Valid {
+		info.Database = dbName.String
+	}
+
+	// Get host from config
+	if s.config.Host != "" {
+		port := s.config.Port
+		if port == 0 {
+			port = 3306
+		}
+		info.Host = fmt.Sprintf("%s:%d", s.config.Host, port)
+	}
+
+	// Count tables
+	tables, err := listTables(ctx, s.db)
+	if err == nil {
+		info.Tables = len(tables)
+	}
+
+	// Get database size
+	if info.Database != "" {
+		var sizeBytes sql.NullInt64
+		err := s.db.QueryRowContext(ctx, `
+			SELECT SUM(data_length + index_length)
+			FROM information_schema.tables
+			WHERE table_schema = ?`, info.Database).Scan(&sizeBytes)
+		if err == nil && sizeBytes.Valid {
+			info.SizeBytes = sizeBytes.Int64
+			info.SizeHuman = humanSize(sizeBytes.Int64)
+		}
+	}
+
+	// Check SSL status
+	var sslCipher sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SHOW STATUS LIKE 'Ssl_cipher'`).Scan(new(string), &sslCipher); err == nil {
+		if sslCipher.Valid && sslCipher.String != "" {
+			info.SSL = "enabled"
+		} else {
+			info.SSL = "disabled"
+		}
+	}
+
+	return info, nil
 }

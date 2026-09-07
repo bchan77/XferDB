@@ -2,6 +2,22 @@
 
 All notable changes to XferDB are documented here.
 
+## [0.6.0] - 2024-09-06
+
+### Added
+- **Database info in preflight** — shows database type, version, host, database name, table count, size, and SSL status for both source and target
+- **Support bundle** — `xferdb support-bundle [project]` generates a tar.gz diagnostic archive for troubleshooting (credentials automatically redacted)
+
+### Support Bundle Contents
+- `system.json` — XferDB version, Go version, OS, architecture
+- `project.json` — project configuration (passwords/DSN credentials redacted)
+- `source_info.json` / `target_info.json` — database metadata
+- `preflight.json` — permissions check results
+- `migrations.json` — migration history with table progress
+- `checkpoints.json` — resume checkpoints
+- `source_schema.json` / `target_schema.json` — table schemas
+- `schema_plan.json` — MongoDB schema plan (if applicable)
+
 ## [0.4.0] - 2024-09-06
 
 ### Added
