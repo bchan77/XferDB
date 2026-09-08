@@ -11,9 +11,21 @@ import (
 )
 
 // buildDSN constructs a MySQL DSN from config fields.
-// If DSN is already set it is used directly.
+//
+// The go-sql-driver/mysql expects its native DSN format:
+//
+//	user:password@tcp(host:port)/dbname?parseTime=true
+//
+// It does NOT understand URL-format connection strings like:
+//
+//	mysql://user:password@host:port/dbname
+//
+// The registry parser sets config.DSN to the original URL for convenience,
+// but we must always rebuild the DSN in native format for MySQL.
 func buildDSN(config adapters.ConnectionConfig) string {
-	if config.DSN != "" {
+	// Ignore URL-format DSNs - they must be rebuilt in native format.
+	// A native DSN never starts with a scheme like "mysql://".
+	if config.DSN != "" && !strings.HasPrefix(config.DSN, "mysql://") {
 		return config.DSN
 	}
 	port := config.Port
