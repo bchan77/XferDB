@@ -290,6 +290,95 @@ func pkColumns(schema *adapters.TableSchema) []string {
 	return pks
 }
 
+// mapTypeToPostgres converts a source database type (e.g. MySQL) to its
+// PostgreSQL equivalent. If the type is already valid PostgreSQL or unknown,
+// it is returned unchanged.
+func mapTypeToPostgres(srcType string) string {
+	// Normalize for comparison
+	lower := strings.ToLower(strings.TrimSpace(srcType))
+
+	// Direct mappings for MySQL types
+	switch lower {
+	case "datetime":
+		return "timestamp"
+	case "tinyint(1)":
+		return "boolean"
+	case "tinyint":
+		return "smallint"
+	case "mediumint":
+		return "integer"
+	case "int":
+		return "integer"
+	case "double":
+		return "double precision"
+	case "float":
+		return "real"
+	case "longtext", "mediumtext", "tinytext":
+		return "text"
+	case "longblob", "mediumblob", "tinyblob", "blob":
+		return "bytea"
+	case "json":
+		return "jsonb"
+	case "year":
+		return "smallint"
+	case "bit(1)":
+		return "boolean"
+	}
+
+	// Pattern-based mappings
+	// int(n) → integer (MySQL display width is not relevant in PG)
+	if strings.HasPrefix(lower, "int(") {
+		return "integer"
+	}
+	// bigint(n) → bigint
+	if strings.HasPrefix(lower, "bigint(") {
+		return "bigint"
+	}
+	// smallint(n) → smallint
+	if strings.HasPrefix(lower, "smallint(") {
+		return "smallint"
+	}
+	// tinyint(n) where n != 1 → smallint
+	if strings.HasPrefix(lower, "tinyint(") {
+		return "smallint"
+	}
+	// mediumint(n) → integer
+	if strings.HasPrefix(lower, "mediumint(") {
+		return "integer"
+	}
+	// double(m,d) → double precision
+	if strings.HasPrefix(lower, "double(") {
+		return "double precision"
+	}
+	// float(m,d) → real
+	if strings.HasPrefix(lower, "float(") {
+		return "real"
+	}
+	// bit(n) where n > 1 → bit(n) (same in PG)
+	if strings.HasPrefix(lower, "bit(") {
+		return srcType // PostgreSQL supports bit(n)
+	}
+	// enum(...) → text (PostgreSQL enums require explicit CREATE TYPE)
+	if strings.HasPrefix(lower, "enum(") {
+		return "text"
+	}
+	// set(...) → text (no direct equivalent)
+	if strings.HasPrefix(lower, "set(") {
+		return "text"
+	}
+	// varbinary(n) → bytea
+	if strings.HasPrefix(lower, "varbinary(") {
+		return "bytea"
+	}
+	// binary(n) → bytea
+	if strings.HasPrefix(lower, "binary(") {
+		return "bytea"
+	}
+
+	// Type is already PostgreSQL compatible or unknown — pass through
+	return srcType
+}
+
 // humanSize formats bytes as a human-readable string.
 func humanSize(bytes int64) string {
 	const (

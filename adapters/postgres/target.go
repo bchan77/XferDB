@@ -77,7 +77,8 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 	defs := make([]string, 0, len(schema.Columns))
 	var pks []string
 	for _, c := range schema.Columns {
-		def := fmt.Sprintf(`%s %s`, quote(c.Name), c.Type)
+		pgType := mapTypeToPostgres(c.Type)
+		def := fmt.Sprintf(`%s %s`, quote(c.Name), pgType)
 		if !c.Nullable {
 			def += " NOT NULL"
 		}
@@ -197,7 +198,8 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 		var query string
 		switch change.Type {
 		case adapters.ChangeAddColumn:
-			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), change.Column.Type)
+			pgType := mapTypeToPostgres(change.Column.Type)
+			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), pgType)
 			if !change.Column.Nullable {
 				def += " NOT NULL"
 			}
@@ -209,8 +211,9 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 			query = fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`,
 				quote(table), quote(change.Column.Name))
 		case adapters.ChangeAlterColumn:
+			pgType := mapTypeToPostgres(change.Column.Type)
 			query = fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s TYPE %s`,
-				quote(table), quote(change.Column.Name), change.Column.Type)
+				quote(table), quote(change.Column.Name), pgType)
 		default:
 			return fmt.Errorf("unsupported change type: %s", change.Type)
 		}
