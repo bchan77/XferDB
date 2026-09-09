@@ -2,11 +2,16 @@
 
 All notable changes to XferDB are documented here.
 
-## [0.6.0] - 2024-09-06
+## [0.6.0] - 2026-09-09
 
 ### Added
 - **Database info in preflight** — shows database type, version, host, database name, table count, size, and SSL status for both source and target
 - **Support bundle** — `xferdb support-bundle [project]` generates a tar.gz diagnostic archive for troubleshooting (credentials automatically redacted)
+
+### Fixed
+- MySQL adapter no longer fails on URL-format DSNs (`mysql://user:pass@host:port/db`) — rebuilds them into the native `go-sql-driver/mysql` format instead of passing the URL straight to `sql.Open()`
+- MySQL → PostgreSQL migrations now map MySQL types to their PostgreSQL equivalents (`datetime`→`timestamp`, `tinyint(1)`→`boolean`, `json`→`jsonb`, etc.) instead of failing with `pq: type "datetime" does not exist`
+- Compatibility test matrix expanded to MongoDB 6.0/7.0/8.0/8.2/8.3 × PostgreSQL 14/15/16/17, MySQL 8.4 → PostgreSQL 17, and full PostgreSQL 14–17 cross-version migration — 27/27 passing
 
 ### Support Bundle Contents
 - `system.json` — XferDB version, Go version, OS, architecture
