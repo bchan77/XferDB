@@ -2,7 +2,7 @@
 
 All notable changes to XferDB are documented here.
 
-## [0.6.0] - 2026-09-09
+## [0.5.0] - 2026-09-09
 
 ### Added
 - **Database info in preflight** — shows database type, version, host, database name, table count, size, and SSL status for both source and target
