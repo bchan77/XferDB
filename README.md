@@ -8,11 +8,11 @@
 
 | Database | Source | Target | Tested Versions |
 |----------|--------|--------|-----------------|
-| PostgreSQL | ✅ | ✅ | 13 |
+| PostgreSQL | ✅ | ✅ | 14, 15, 16, 17 |
 | YugabyteDB | ✅ | ✅ | 2024.2 |
-| MySQL | ✅ | ✅ | Not yet tested |
+| MySQL | ✅ | ✅ | 8.4 |
 | SQLite | ✅ | ✅ | 3.x |
-| MongoDB | ✅ | 🔜 | 8.0 |
+| MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
 | Cassandra | 🔜 | 🔜 | — |
 
 > ✅ = Working &nbsp;|&nbsp; 🔜 = Planned
@@ -21,11 +21,11 @@
 
 | Source | Target | Status |
 |--------|--------|--------|
-| MongoDB 8.0 | PostgreSQL 13 | ✅ Tested |
-| PostgreSQL | PostgreSQL | ✅ Tested |
+| MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 20/20 passing |
+| MySQL 8.4 | PostgreSQL 17 | ✅ Tested |
+| PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested |
 | PostgreSQL | YugabyteDB 2024.2 | ✅ Tested |
 | SQLite | PostgreSQL | ✅ Tested |
-| MySQL | PostgreSQL | Implemented, not yet tested |
 
 ---
 
@@ -47,6 +47,8 @@
 - **Flexible reload modes** — default upsert (delta sync), `--truncate` (wipe and reload), or `--recreate-schema` (drop and recreate)
 - **Multi-project** — named projects with their own source/target config and migration history
 - **API-first** — REST API is the core; CLI is a thin client
+- **Database info in preflight** — shows type, version, host, database name, table count, size, and SSL status for both source and target
+- **Support bundle** — `xferdb support-bundle [project]` generates a redacted diagnostic archive for troubleshooting
 
 ---
 
@@ -103,15 +105,27 @@ xferdb migrate --preflight
 Project:  my-migration
 Status:   ready
 
-Source:
-  can_read:         true
-  can_write:        true
-  can_create_table: true
+Source: postgres 16
+  Host:     source-host:5432
+  Database: mydb
+  Tables:   14
+  Size:     2.3 GB
+  SSL:      require
+  Permissions:
+    can_read:         true
+    can_write:        true
+    can_create_table: true
 
-Target:
-  can_read:         true
-  can_write:        true
-  can_create_table: true
+Target: postgres 16
+  Host:     target-host:5432
+  Database: mydb
+  Tables:   14
+  Size:     0 B
+  SSL:      require
+  Permissions:
+    can_read:         true
+    can_write:        true
+    can_create_table: true
 ```
 
 ### 4. Migrate
@@ -291,10 +305,20 @@ xferdb migrate --tables orders,customers
 xferdb migrate --tables public.orders,public.customers
 ```
 
+### Support bundle
+
+Generate a diagnostic archive for troubleshooting — system info, project config, source/target database metadata, preflight results, migration history, checkpoints, table schemas, and MongoDB schema plan (if applicable). Passwords and API keys are automatically redacted.
+
+```bash
+xferdb support-bundle [project-name]
+xferdb support-bundle [project-name] --output /tmp/bundle.tar.gz
+```
+
 ### Other commands
 
 ```bash
 xferdb server [--addr :8080] [--log-file <path>] [--log-level <level>]
+xferdb support-bundle [project-name] [--output <path>]
 xferdb version
 xferdb list
 ```
@@ -414,6 +438,7 @@ GET    /api/v1/projects/:id
 DELETE /api/v1/projects/:id
 POST   /api/v1/projects/:id/preflight
 POST   /api/v1/projects/:id/analyze
+GET    /api/v1/projects/:id/support-bundle  # tar.gz diagnostic archive, credentials redacted
 
 # Migrations
 POST   /api/v1/projects/:id/migrations      # body: {"table_workers":5,"segment_workers":10,"batch_size":50000,"truncate":true,"bulk_copy":true,"tables":["orders","customers"],...}
@@ -463,6 +488,8 @@ go build -o xferdb ./cmd/xferdb
 - [x] Async pipeline mode (`--async-pipeline`)
 - [x] Accurate MongoDB counts (`--accurate-counts`)
 - [x] Migration stats history (`--history`)
+- [x] Database info in preflight (type, version, host, table count, size, SSL)
+- [x] Support bundle (`xferdb support-bundle`)
 - [ ] MongoDB target adapter
 - [ ] Web UI
 - [ ] WebSocket live progress
