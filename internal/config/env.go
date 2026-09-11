@@ -6,6 +6,40 @@ import (
 	"strings"
 )
 
+// expandEnv walks every DSN-bearing string field in the File and substitutes
+// ${VAR} and ${VAR:-default} references with values from os.Getenv.
+//
+// This intentionally does NOT walk every string in the file — only fields that
+// hold DSNs or other secrets. Documented in examples/xferdb.yaml.
+func expandEnv(f *File) error {
+	if f == nil {
+		return nil
+	}
+	for i := range f.Projects {
+		p := &f.Projects[i]
+		var err error
+		if p.Source.DSN, err = expand(p.Source.DSN); err != nil {
+			return fmt.Errorf("projects[%d].source.dsn: %w", i, err)
+		}
+		if p.Target.DSN, err = expand(p.Target.DSN); err != nil {
+			return fmt.Errorf("projects[%d].target.dsn: %w", i, err)
+		}
+		if p.Source.Username, err = expand(p.Source.Username); err != nil {
+			return fmt.Errorf("projects[%d].source.username: %w", i, err)
+		}
+		if p.Source.Password, err = expand(p.Source.Password); err != nil {
+			return fmt.Errorf("projects[%d].source.password: %w", i, err)
+		}
+		if p.Target.Username, err = expand(p.Target.Username); err != nil {
+			return fmt.Errorf("projects[%d].target.username: %w", i, err)
+		}
+		if p.Target.Password, err = expand(p.Target.Password); err != nil {
+			return fmt.Errorf("projects[%d].target.password: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // expand returns s with ${VAR} and ${VAR:-default} substitutions applied.
 //
 // We implement this by hand instead of using os.Expand because the latter does
