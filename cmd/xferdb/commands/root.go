@@ -17,6 +17,11 @@ import (
 // ServerAddr is the base URL of the XferDB API server, set via --server flag.
 var ServerAddr string
 
+// ConfigPath is the path to the XferDB config file, set via --config flag or
+// $XFERDB_CONFIG. When empty, the loader searches ./xferdb.{yaml,toml,json}
+// and ~/.xferdb/config.{yaml,toml,json} in that order.
+var ConfigPath string
+
 var RootCmd = &cobra.Command{
 	Use:   "xferdb",
 	Short: "Universal database transfer tool",
@@ -28,7 +33,10 @@ Start the API server first:
 Then use projects and migrations:
   xferdb project create --name myproject --source sqlite:///src.db --target sqlite:///dst.db
   xferdb project use myproject
-  xferdb migrate`,
+  xferdb migrate
+
+Or define projects in xferdb.yaml and skip the create/use dance. See
+'xferdb config init' to start a config file.`,
 	Version:      version.Version,
 	SilenceUsage: true,
 }
@@ -40,6 +48,8 @@ func Execute() error {
 func init() {
 	RootCmd.PersistentFlags().StringVar(&ServerAddr, "server", "http://localhost:8080",
 		"XferDB API server address")
+	RootCmd.PersistentFlags().StringVar(&ConfigPath, "config", "",
+		"Path to xferdb.{yaml,toml,json} (default: $XFERDB_CONFIG, then ./xferdb.yaml, then ~/.xferdb/config.yaml)")
 
 	RootCmd.AddCommand(serverCmd)
 	RootCmd.AddCommand(projectCmd)
@@ -47,6 +57,7 @@ func init() {
 	RootCmd.AddCommand(versionCmd)
 	RootCmd.AddCommand(listCmd)
 	RootCmd.AddCommand(supportBundleCmd)
+	RootCmd.AddCommand(configCmd)
 }
 
 var versionCmd = &cobra.Command{

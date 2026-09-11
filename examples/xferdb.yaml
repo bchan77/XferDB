@@ -1,0 +1,71 @@
+# xferdb.yaml — XferDB configuration file (v0.6.0+)
+#
+# This file is the canonical reference for all supported fields. Place it in
+# any of these locations and XferDB will pick it up automatically:
+#
+#   1. The path passed via --config /path/to/xferdb.yaml
+#   2. $XFERDB_CONFIG environment variable
+#   3. ./xferdb.{yaml,toml,json} in the current working directory
+#   4. ~/.xferdb/config.{yaml,toml,json}
+#
+# Any field may be omitted; missing fields fall back to built-in defaults.
+# CLI flags always override this file. Environment variables override file
+# values (see README for the full precedence table).
+#
+# DSN strings support ${VAR} and ${VAR:-default} substitutions from the
+# process environment so credentials never have to live in this file.
+
+server:
+  # Address for `xferdb server` to listen on. Use :PORT or HOST:PORT.
+  addr: ":8080"
+  # debug | info | warn | error
+  log_level: info
+  # Path to a JSON log file; stderr text output always continues.
+  log_file: ""
+  # Where the state database lives. Defaults to ~/.xferdb/state.db.
+  state_dir: ""
+
+defaults:
+  # Migrate this many tables concurrently.
+  table_workers: 2
+  # Workers per table, splitting by PK range. 0 disables intra-table parallelism.
+  segment_workers: 1
+  # Rows per batch read from the source.
+  batch_size: 5000
+  # Use PostgreSQL COPY protocol when supported (faster).
+  bulk_copy: true
+  # Overlap reads and writes for higher throughput.
+  async_pipeline: true
+  # abort | skip — what to do on a per-table failure.
+  on_error: abort
+  # Limit migrations to a specific table list. Empty means "all tables".
+  tables: []
+
+projects:
+  - name: prod-to-staging
+    description: Hourly clone of prod orders + customers for the staging env.
+    source:
+      type: postgres
+      dsn: ${PROD_DSN}
+    target:
+      type: postgres
+      dsn: ${STAGING_DSN}
+    transfer:
+      tables:
+        - orders
+        - public.customers
+      batch_size: 2500
+      recreate_schema: false
+      bulk_copy: true
+
+  - name: mongo-archive
+    description: Daily snapshot of the shop MongoDB to a local SQLite archive.
+    source:
+      type: mongodb
+      dsn: ${MONGO_DSN}
+    target:
+      type: sqlite
+      dsn: file:/srv/archive/shop.db
+    transfer:
+      async_pipeline: true
+      on_error: skip

@@ -2,6 +2,19 @@
 
 All notable changes to XferDB are documented here.
 
+## [Unreleased]
+
+### Added
+- **Structured config files (xferdb.yaml / xferdb.json)** — server settings, migration defaults, and named projects can now live in a single file under version control. Loaded from `--config`, `$XFERDB_CONFIG`, `./xferdb.{yaml,yml,json}`, or `~/.xferdb/config.{yaml,yml,json}` in that order. Precedence is CLI flag → env var → config file → built-in default.
+- **`xferdb config` subcommand** — `init` writes a starter file, `show` prints the resolved config, `validate` checks syntax and semantics, `path` prints the resolved path.
+- **DSN safety via `${VAR}` expansion** — DSN strings in config files can reference environment variables, so credentials never have to live in the file. `${VAR}` requires the var to be set; `${VAR:-default}` falls back. Missing required vars fail the load with a clear error pointing at the field.
+- **Three example configs** in `examples/` (`xferdb.yaml`, `xferdb.json`, `xferdb.toml`) showing realistic project setups and the env-var DSN pattern.
+- **Config-aware defaults** — `internal/config.ResolveTransferConfig` lets `migrate`/`project create` honour file-defined defaults before consulting flags.
+- **Tests** — `internal/config/` covers YAML/JSON load, env expansion (set, default, missing), missing-file fallback, validation errors (duplicate names, unknown adapters, bad log level, negative values), and precedence (CLI > env > file > default).
+
+### Notes
+- **TOML is not yet supported** in v0.6.0 (kept the dependency surface minimal). It returns a clear error explaining how to convert with `yq` / `toml2json`. Tracked for v0.6.1.
+
 ## [0.5.0] - 2026-09-09
 
 ### Added

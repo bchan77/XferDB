@@ -1,0 +1,22 @@
+{
+  "server": {
+    "addr": ":8080",
+    "log_level": "info"
+  },
+  "defaults": {
+    "table_workers": 1,
+    "batch_size": 2000
+  },
+  "projects": [
+    {
+      "name": "sqlite-clone",
+      "description": "Single-file JSON example for users who prefer JSON.",
+      "source": { "type": "sqlite", "dsn": "file:/data/source.db" },
+      "target": { "type": "sqlite", "dsn": "file:/data/target.db" },
+      "transfer": {
+        "batch_size": 1000,
+        "recreate_schema": true
+      }
+    }
+  ]
+}
