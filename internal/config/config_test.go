@@ -320,6 +320,10 @@ defaults:
 	}
 
 	// Built-in default preserved when file has nothing to say.
+	// Clear any env vars left over from the previous sub-case (t.Setenv only
+	// auto-restores at end of the test, not between statements).
+	t.Setenv("XFERDB_BATCH_SIZE", "")
+	t.Setenv("XFERDB_BULK_COPY", "")
 	noFile := &Loader{}
 	got = ResolveTransferConfig(noFile, adapters.TransferConfig{BatchSize: 42, TableWorkers: 3, OnError: adapters.ErrorPolicyAbort})
 	if got.BatchSize != 42 || got.TableWorkers != 3 {
