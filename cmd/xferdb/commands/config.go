@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"gitea.homelab.local/nextdevops/XferDB/internal/config"
+	"gitea.homelab.local/nextdevops/XferDB/config"
 )
 
 var configCmd = &cobra.Command{
@@ -127,8 +127,7 @@ func init() {
 // starterConfig is the example shipped in examples/xferdb.yaml. Kept here
 // as a string so `xferdb config init` works without the repo checked out.
 const starterConfigTmpl = `# xferdb.yaml — XferDB configuration
-# See https://gitea.homelab.local/nextdevops/XferDB (docs/CONFIG.md)
-# for the full reference.
+# Full reference: https://gitea.homelab.local/nextdevops/XferDB/src/branch/main/docs/CONFIG.md
 
 server:
   addr: ":8080"

@@ -123,7 +123,9 @@ projects:
       batch_size: 2500
 ```
 
-JSON is also supported (`examples/xferdb.json`). TOML is on the v0.6.x roadmap; for now convert with `yq` or `toml2json`.
+JSON is also supported (`examples/xferdb.json`). TOML is on the v0.6.x roadmap (`examples/xferdb.toml` shows the equivalent structure for reference); for now convert with `yq` or `toml2json`.
+
+Full field-by-field reference: [`docs/CONFIG.md`](docs/CONFIG.md).
 
 ---
 

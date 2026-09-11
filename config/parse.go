@@ -11,8 +11,9 @@ import (
 // parse dispatches to the right decoder based on file extension.
 // JSON is also accepted as a fallback for users who prefer it.
 // (TOML is on the v0.6.x roadmap but excluded from v0.6.0 to keep the
-// dependency surface minimal — see examples/xferdb.toml for the equivalent
-// YAML structure or convert with `toml2json`.)
+// dependency surface minimal — see examples/xferdb.yaml for the equivalent
+// YAML structure, or examples/xferdb.toml for the same content in TOML
+// syntax, or convert one to the other with `toml2json`/`yq`.)
 func parse(path string, data []byte) (*File, error) {
 	lower := strings.ToLower(path)
 	switch {

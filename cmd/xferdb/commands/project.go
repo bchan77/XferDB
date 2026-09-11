@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
-	"gitea.homelab.local/nextdevops/XferDB/internal/config"
+	"gitea.homelab.local/nextdevops/XferDB/config"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"github.com/spf13/cobra"
 )
