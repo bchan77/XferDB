@@ -7,14 +7,14 @@ import (
 
 // ConnectionConfig holds database connection parameters.
 type ConnectionConfig struct {
-	Type     string `json:"type"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Database string `json:"database"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	SSLMode  string `json:"ssl_mode"`
-	DSN      string `json:"dsn"` // optional raw DSN; overrides individual fields if set
+	Type     string `json:"type" yaml:"type"`
+	Host     string `json:"host" yaml:"host"`
+	Port     int    `json:"port" yaml:"port"`
+	Database string `json:"database" yaml:"database"`
+	Username string `json:"username" yaml:"username"`
+	Password string `json:"password" yaml:"password"`
+	SSLMode  string `json:"ssl_mode" yaml:"ssl_mode"`
+	DSN      string `json:"dsn" yaml:"dsn"` // optional raw DSN; overrides individual fields if set
 }
 
 // ErrorPolicy defines how transfer errors are handled.
@@ -27,20 +27,20 @@ const (
 
 // TransferConfig controls batch transfer behaviour.
 type TransferConfig struct {
-	BatchSize      int         `json:"batch_size"`
-	TableWorkers   int         `json:"table_workers"`   // tables to migrate concurrently (inter-table)
-	SegmentWorkers int         `json:"segment_workers"` // workers per table, splitting by PK range (intra-table)
-	OffsetFallback bool        `json:"offset_fallback"` // force offset-based segments even when PK range is available
-	Validate       bool        `json:"validate"`
-	OnError        ErrorPolicy `json:"on_error"`
-	DataOnly       bool        `json:"data_only"`       // skip schema creation; target schema must already exist
-	SchemaOnly     bool        `json:"schema_only"`     // create schema on target but do not transfer data
-	RecreateSchema bool        `json:"recreate_schema"` // drop and recreate tables before migrating
-	Truncate       bool        `json:"truncate"`        // truncate tables before loading data (keeps schema)
-	Tables         []string    `json:"tables"`          // if non-empty, only migrate these tables; supports "schema.table" notation
-	BulkCopy       bool        `json:"bulk_copy"`       // use COPY protocol instead of INSERT; requires target table to be empty
-	AccurateCounts bool        `json:"accurate_counts"` // use accurate row counts (slower for MongoDB)
-	AsyncPipeline  bool        `json:"async_pipeline"`  // overlap read/write for faster throughput
+	BatchSize      int         `json:"batch_size" yaml:"batch_size"`
+	TableWorkers   int         `json:"table_workers" yaml:"table_workers"`     // tables to migrate concurrently (inter-table)
+	SegmentWorkers int         `json:"segment_workers" yaml:"segment_workers"` // workers per table, splitting by PK range (intra-table)
+	OffsetFallback bool        `json:"offset_fallback" yaml:"offset_fallback"` // force offset-based segments even when PK range is available
+	Validate       bool        `json:"validate" yaml:"validate"`
+	OnError        ErrorPolicy `json:"on_error" yaml:"on_error"`
+	DataOnly       bool        `json:"data_only" yaml:"data_only"`             // skip schema creation; target schema must already exist
+	SchemaOnly     bool        `json:"schema_only" yaml:"schema_only"`         // create schema on target but do not transfer data
+	RecreateSchema bool        `json:"recreate_schema" yaml:"recreate_schema"` // drop and recreate tables before migrating
+	Truncate       bool        `json:"truncate" yaml:"truncate"`               // truncate tables before loading data (keeps schema)
+	Tables         []string    `json:"tables" yaml:"tables"`                   // if non-empty, only migrate these tables; supports "schema.table" notation
+	BulkCopy       bool        `json:"bulk_copy" yaml:"bulk_copy"`             // use COPY protocol instead of INSERT; requires target table to be empty
+	AccurateCounts bool        `json:"accurate_counts" yaml:"accurate_counts"` // use accurate row counts (slower for MongoDB)
+	AsyncPipeline  bool        `json:"async_pipeline" yaml:"async_pipeline"`   // overlap read/write for faster throughput
 }
 
 // Project is a named migration project with a fixed source/target configuration.

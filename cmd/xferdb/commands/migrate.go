@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/internal/config"
 	"gitea.homelab.local/nextdevops/XferDB/stats"
 )
 
@@ -27,28 +29,58 @@ Examples:
 		cancelOnly, _ := cmd.Flags().GetBool("cancel")
 		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
 		truncate, _ := cmd.Flags().GetBool("truncate")
-		tableWorkers, _ := cmd.Flags().GetInt("table-workers")
-		segmentWorkers, _ := cmd.Flags().GetInt("segment-workers")
 		offsetSegments, _ := cmd.Flags().GetBool("offset-segments")
-		batchSize, _ := cmd.Flags().GetInt("batch-size")
-		bulkCopy, _ := cmd.Flags().GetBool("bulk-copy")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 		accurateCounts, _ := cmd.Flags().GetBool("accurate-counts")
-		asyncPipeline, _ := cmd.Flags().GetBool("async-pipeline")
 		historyOnly, _ := cmd.Flags().GetBool("history")
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
 		}
 
-		// Parse comma-separated table list; strip whitespace.
+		// table-workers/segment-workers/batch-size/bulk-copy/async-pipeline/tables
+		// resolve with CLI flag > env var > config file > built-in default
+		// precedence. A CLI flag only wins when the user actually passed it --
+		// otherwise the flag's own default (e.g. --table-workers defaults to 1)
+		// would always shadow a config file value.
+		builtIn := adapters.TransferConfig{TableWorkers: 1, SegmentWorkers: 1}
+		resolved := builtIn
+		if loader, cfgErr := config.Load(ConfigPath); cfgErr == nil {
+			resolved = config.ResolveTransferConfig(loader, builtIn)
+		}
+
+		tableWorkers := resolved.TableWorkers
+		if cmd.Flags().Changed("table-workers") {
+			tableWorkers, _ = cmd.Flags().GetInt("table-workers")
+		}
+		segmentWorkers := resolved.SegmentWorkers
+		if cmd.Flags().Changed("segment-workers") {
+			segmentWorkers, _ = cmd.Flags().GetInt("segment-workers")
+		}
+		batchSize := resolved.BatchSize
+		if cmd.Flags().Changed("batch-size") {
+			batchSize, _ = cmd.Flags().GetInt("batch-size")
+		}
+		bulkCopy := resolved.BulkCopy
+		if cmd.Flags().Changed("bulk-copy") {
+			bulkCopy, _ = cmd.Flags().GetBool("bulk-copy")
+		}
+		asyncPipeline := resolved.AsyncPipeline
+		if cmd.Flags().Changed("async-pipeline") {
+			asyncPipeline, _ = cmd.Flags().GetBool("async-pipeline")
+		}
+
+		// Parse comma-separated table list; strip whitespace. Falls back to the
+		// resolved (env/config) table list when --tables wasn't passed.
 		var tables []string
-		if tablesFlag != "" {
+		if cmd.Flags().Changed("tables") {
 			for _, t := range strings.Split(tablesFlag, ",") {
 				if t = strings.TrimSpace(t); t != "" {
 					tables = append(tables, t)
 				}
 			}
+		} else {
+			tables = resolved.Tables
 		}
 
 		projectName, err := currentProject(projectFlag)
@@ -226,6 +258,11 @@ func runPreflight(name, projectID string) error {
 }
 
 // resolveProjectID fetches the project list and returns the ID for the given name.
+//
+// When the name isn't found via the API but is defined inline in the config
+// file (projects:), it's created on the fly so `xferdb migrate --project X`
+// (and `project use`/`project preflight`, which also call this) work without
+// a separate `project create` step.
 func resolveProjectID(name string) (string, error) {
 	resp, err := http.Get(ServerAddr + "/api/v1/projects")
 	if err != nil {
@@ -245,6 +282,18 @@ func resolveProjectID(name string) (string, error) {
 			return p.ID, nil
 		}
 	}
+
+	if loader, cfgErr := config.Load(ConfigPath); cfgErr == nil {
+		if proj := loader.FindProject(name); proj != nil {
+			id, err := createProject(proj.Name, proj.Description, proj.Source, proj.Target, proj.Transfer)
+			if err != nil {
+				return "", fmt.Errorf("auto-create project %q from %s: %w", name, loader.Path(), err)
+			}
+			fmt.Printf("Project %q not found on the server; created it from %s.\n", name, loader.Path())
+			return id, nil
+		}
+	}
+
 	return "", fmt.Errorf("project %q not found", name)
 }
 
