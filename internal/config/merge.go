@@ -8,24 +8,54 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
 
+// envTriState reads XFERDB_NAME as a tri-state:
+//
+//   - Unset (or empty)  → return (false, false) — caller should use file/default value.
+//   - "true"/"1"/"yes"/"on"  → return (true, true) — caller should use true.
+//   - "false"/"0"/"no"/"off" → return (false, true) — caller should use false.
+//
+// The second return value is `set`: only when true should the caller override
+// the file/default value. This avoids the bug where env_bool("false") returned
+// false but didn't tell the caller to override a file-set true.
+func envTriState(name string) (val, set bool) {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("XFERDB_" + name)))
+	if v == "" {
+		return false, false
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	// Unrecognised value: don't override.
+	return false, false
+}
+
+// envInt reads XFERDB_NAME as an int. Returns (n, true) when set+parseable, (0, false) otherwise.
+func envInt(name string) (int, bool) {
+	v := strings.TrimSpace(os.Getenv("XFERDB_" + name))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
 // ResolveTransferConfig applies the precedence rules:
 //
 //	CLI flag > env var > config file > built-in default
 //
-// to every field of a TransferConfig. flagSet tells ResolveTransferConfig
-// whether the CLI value was explicitly set (true) or left at zero-value (false).
+// to every field of a TransferConfig.
 //
-// The result is safe to use as the project's effective transfer settings.
-//
-// builtInDefault is used as the floor when nothing else provides a value
-// (typically adapters.TransferConfig{BatchSize: 1000, TableWorkers: 1, OnError: ErrorPolicyAbort}).
+// builtInDefault is the floor used when nothing else provides a value.
 func ResolveTransferConfig(loader *Loader, builtInDefault adapters.TransferConfig) adapters.TransferConfig {
 	out := builtInDefault
 	if loader != nil {
 		d := loader.Defaults()
-		// Project-level defaults are layered on top of built-in defaults
-		// only when the field was at its zero value, preserving non-default
-		// user intent (e.g. a negative BatchSize stays unset).
 		if d.BatchSize > 0 {
 			out.BatchSize = d.BatchSize
 		}
@@ -36,10 +66,10 @@ func ResolveTransferConfig(loader *Loader, builtInDefault adapters.TransferConfi
 			out.SegmentWorkers = d.SegmentWorkers
 		}
 		if d.BulkCopy {
-			out.BulkCopy = d.BulkCopy
+			out.BulkCopy = true
 		}
 		if d.AsyncPipeline {
-			out.AsyncPipeline = d.AsyncPipeline
+			out.AsyncPipeline = true
 		}
 		if d.OnError != "" {
 			out.OnError = d.OnError
@@ -49,44 +79,21 @@ func ResolveTransferConfig(loader *Loader, builtInDefault adapters.TransferConfi
 		}
 	}
 
-	// Env vars override the file.
-	if v := envInt("BATCH_SIZE"); v > 0 {
+	// Env vars override file/default values. Use tri-state so "false" actually disables.
+	if v, set := envTriState("BULK_COPY"); set {
+		out.BulkCopy = v
+	}
+	if v, set := envTriState("ASYNC_PIPELINE"); set {
+		out.AsyncPipeline = v
+	}
+	if v, set := envInt("BATCH_SIZE"); set && v > 0 {
 		out.BatchSize = v
 	}
-	if v := envInt("TABLE_WORKERS"); v > 0 {
+	if v, set := envInt("TABLE_WORKERS"); set && v > 0 {
 		out.TableWorkers = v
 	}
-	if v := envInt("SEGMENT_WORKERS"); v > 0 {
+	if v, set := envInt("SEGMENT_WORKERS"); set && v > 0 {
 		out.SegmentWorkers = v
 	}
-	if v := envBool("BULK_COPY"); v {
-		out.BulkCopy = true
-	}
-	if v := envBool("ASYNC_PIPELINE"); v {
-		out.AsyncPipeline = true
-	}
 	return out
-}
-
-// envInt reads XFERDB_NAME as an int; returns 0 when unset or unparseable.
-func envInt(name string) int {
-	v := os.Getenv(envPrefix + name)
-	if v == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
-// envBool reads XFERDB_NAME as a bool. Truthy values: 1, true, yes, on (case-insensitive).
-func envBool(name string) bool {
-	v := strings.ToLower(os.Getenv(envPrefix + name))
-	switch v {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
 }
