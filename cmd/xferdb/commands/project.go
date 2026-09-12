@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/config"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"github.com/spf13/cobra"
 )
@@ -52,32 +53,29 @@ var projectCreateCmd = &cobra.Command{
 			return fmt.Errorf("parse --target: %w", err)
 		}
 
-		body := map[string]any{
-			"name":          name,
-			"description":   desc,
-			"source_config": srcCfg,
-			"target_config": tgtCfg,
-			"transfer_config": adapters.TransferConfig{
-				BatchSize:    batchSize,
-				TableWorkers: tableWorkers,
-				OnError:      adapters.ErrorPolicyAbort,
-			},
+		// batch-size/table-workers: CLI flag wins if the user passed it; otherwise
+		// fall back through env var / config file defaults before the built-in floor.
+		builtIn := adapters.TransferConfig{BatchSize: 1000, TableWorkers: 1}
+		resolved := builtIn
+		if loader, cfgErr := config.Load(ConfigPath); cfgErr == nil {
+			resolved = config.ResolveTransferConfig(loader, builtIn)
+		}
+		if cmd.Flags().Changed("batch-size") {
+			resolved.BatchSize = batchSize
+		}
+		if cmd.Flags().Changed("table-workers") {
+			resolved.TableWorkers = tableWorkers
 		}
 
-		data, _ := json.Marshal(body)
-		resp, err := http.Post(ServerAddr+"/api/v1/projects", "application/json", bytes.NewReader(data))
+		id, err := createProject(name, desc, srcCfg, tgtCfg, adapters.TransferConfig{
+			BatchSize:    resolved.BatchSize,
+			TableWorkers: resolved.TableWorkers,
+			OnError:      adapters.ErrorPolicyAbort,
+		})
 		if err != nil {
-			return fmt.Errorf("API request failed: %w", err)
+			return err
 		}
-		defer resp.Body.Close()
-
-		var result map[string]any
-		json.NewDecoder(resp.Body).Decode(&result)
-
-		if resp.StatusCode != http.StatusCreated {
-			return fmt.Errorf("server error %d: %v", resp.StatusCode, result["error"])
-		}
-		fmt.Printf("Created project %q (id: %v)\n", name, result["id"])
+		fmt.Printf("Created project %q (id: %s)\n", name, id)
 		return nil
 	},
 }
@@ -89,6 +87,32 @@ func init() {
 	projectCreateCmd.Flags().StringP("description", "d", "", "Project description")
 	projectCreateCmd.Flags().Int("batch-size", 1000, "Rows per batch (higher = faster, more memory)")
 	projectCreateCmd.Flags().Int("table-workers", 1, "Default number of tables to migrate concurrently")
+}
+
+// createProject POSTs a new project to the API and returns its ID.
+func createProject(name, description string, source, target adapters.ConnectionConfig, transfer adapters.TransferConfig) (string, error) {
+	body := map[string]any{
+		"name":            name,
+		"description":     description,
+		"source_config":   source,
+		"target_config":   target,
+		"transfer_config": transfer,
+	}
+	data, _ := json.Marshal(body)
+	resp, err := http.Post(ServerAddr+"/api/v1/projects", "application/json", bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("server error %d: %v", resp.StatusCode, result["error"])
+	}
+	id, _ := result["id"].(string)
+	return id, nil
 }
 
 var projectListCmd = &cobra.Command{

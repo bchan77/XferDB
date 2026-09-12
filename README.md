@@ -69,6 +69,66 @@ Binaries are published to Gitea on tagged releases. Download and move to your `P
 
 ---
 
+## Configuration file (xferdb.yaml) — new in v0.6.0
+
+XferDB now reads a structured config file (YAML or JSON) so projects, server settings, and migration defaults live in version control instead of on the command line.
+
+**Search order** — first match wins:
+1. `--config /path/to/xferdb.yaml` flag
+2. `$XFERDB_CONFIG` environment variable
+3. `./xferdb.{yaml,yml,json}` in the current working directory
+4. `~/.xferdb/config.{yaml,yml,json}`
+
+**Precedence** — highest wins:
+1. CLI flag (e.g. `--table-workers=4`)
+2. Environment variable (`XFERDB_TABLE_WORKERS=4`)
+3. Config file value
+4. Built-in default
+
+**DSN safety** — use `${VAR}` or `${VAR:-default}` references in DSN strings; values are expanded from the process environment at load time. Missing variables (no default) cause the load to fail.
+
+```bash
+# Start a config from scratch
+xferdb config init ./xferdb.yaml
+
+# Validate, show, and resolve
+xferdb config validate --config ./xferdb.yaml
+xferdb config show --config ./xferdb.yaml
+xferdb config path --config ./xferdb.yaml
+```
+
+Example (`examples/xferdb.yaml`):
+
+```yaml
+server:
+  addr: ":8080"
+  log_level: info
+
+defaults:
+  table_workers: 2
+  batch_size: 5000
+  bulk_copy: true
+  on_error: abort
+
+projects:
+  - name: prod-to-staging
+    source:
+      type: postgres
+      dsn: ${PROD_DSN}
+    target:
+      type: postgres
+      dsn: ${STAGING_DSN}
+    transfer:
+      tables: [orders, customers]
+      batch_size: 2500
+```
+
+JSON is also supported (`examples/xferdb.json`). TOML is on the v0.6.x roadmap (`examples/xferdb.toml` shows the equivalent structure for reference); for now convert with `yq` or `toml2json`.
+
+Full field-by-field reference: [`docs/CONFIG.md`](docs/CONFIG.md).
+
+---
+
 ## Quick Start
 
 XferDB runs as an API server. The CLI talks to it.

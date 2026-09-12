@@ -1,0 +1,63 @@
+# xferdb.toml — XferDB configuration file, TOML syntax (reference only)
+#
+# XferDB does NOT parse TOML yet — `xferdb config` returns a clear error if
+# you point it at a .toml file, explaining how to convert. This file exists
+# so the field names and structure are documented in TOML syntax too; it's
+# not loadable as-is. Convert it to YAML or JSON first:
+#
+#   yq -o=json xferdb.toml > xferdb.json
+#   # or
+#   yq -o=yaml xferdb.toml > xferdb.yaml
+#
+# See examples/xferdb.yaml for the fully annotated, loadable reference, and
+# docs/CONFIG.md for the complete field-by-field documentation. TOML support
+# itself is tracked for v0.6.1 (see CHANGELOG.md).
+
+[server]
+addr = ":8080"
+log_level = "info"
+log_file = ""
+state_dir = ""
+
+[defaults]
+table_workers = 2
+segment_workers = 1
+batch_size = 5000
+bulk_copy = true
+async_pipeline = true
+on_error = "abort"
+tables = []
+
+[[projects]]
+name = "prod-to-staging"
+description = "Hourly clone of prod orders + customers for the staging env."
+
+[projects.source]
+type = "postgres"
+dsn = "${PROD_DSN}"
+
+[projects.target]
+type = "postgres"
+dsn = "${STAGING_DSN}"
+
+[projects.transfer]
+tables = ["orders", "public.customers"]
+batch_size = 2500
+recreate_schema = false
+bulk_copy = true
+
+[[projects]]
+name = "mongo-archive"
+description = "Daily snapshot of the shop MongoDB to a local SQLite archive."
+
+[projects.source]
+type = "mongodb"
+dsn = "${MONGO_DSN}"
+
+[projects.target]
+type = "sqlite"
+dsn = "file:/srv/archive/shop.db"
+
+[projects.transfer]
+async_pipeline = true
+on_error = "skip"
