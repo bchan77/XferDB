@@ -3,6 +3,8 @@ package mongo
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -78,7 +80,27 @@ func (s *Source) Connect(ctx context.Context, cfg adapters.ConnectionConfig) err
 	s.client = client
 	s.config = cfg
 	s.database = cfg.Database
+	// Extract database from DSN if not explicitly provided in config.
+	if s.database == "" {
+		s.database = databaseFromDSN(cfg.DSN)
+	}
 	return nil
+}
+
+// databaseFromDSN extracts the database name from a MongoDB connection string.
+// Returns empty string if the DSN doesn't contain a database path.
+func databaseFromDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return ""
+	}
+	// Path is "/dbname" or "/dbname?opts"; trim the leading slash.
+	db := strings.TrimPrefix(u.Path, "/")
+	// Remove query string if present (shouldn't be, but defensive).
+	if idx := strings.Index(db, "?"); idx >= 0 {
+		db = db[:idx]
+	}
+	return db
 }
 
 func (s *Source) Close() error {
