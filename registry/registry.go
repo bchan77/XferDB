@@ -169,3 +169,24 @@ func SupportedAdapters() []string {
 func supportedTypes() string {
 	return strings.Join(SupportedAdapters(), ", ")
 }
+
+// InferTypeFromDSN extracts the adapter type from a DSN scheme.
+// Returns an empty string if the DSN is empty or the scheme is unrecognized.
+func InferTypeFromDSN(dsn string) string {
+	if dsn == "" {
+		return ""
+	}
+	lower := strings.ToLower(dsn)
+	if strings.HasPrefix(lower, "mongodb://") || strings.HasPrefix(lower, "mongodb+srv://") {
+		return "mongodb"
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if _, ok := sourceFactories[scheme]; ok {
+		return scheme
+	}
+	return ""
+}
