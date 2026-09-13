@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/registry"
 )
 
 // File is the top-level structure of an XferDB config file.
@@ -155,6 +156,8 @@ func Load(path string) (*Loader, error) {
 		return nil, fmt.Errorf("expand env vars in %s: %w", resolved, err)
 	}
 
+	inferTypes(raw)
+
 	if err := raw.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", resolved, err)
 	}
@@ -285,6 +288,23 @@ func validateConnConfig(prefix string, c adapters.ConnectionConfig) error {
 		return fmt.Errorf("%s.type %q is not a supported adapter (postgres, mysql, mongodb, sqlite)", prefix, c.Type)
 	}
 	return nil
+}
+
+// inferTypes fills in empty Type fields by extracting the scheme from the DSN.
+// Called after expandEnv so environment variables in DSNs are already resolved.
+func inferTypes(f *File) {
+	if f == nil {
+		return
+	}
+	for i := range f.Projects {
+		p := &f.Projects[i]
+		if p.Source.Type == "" && p.Source.DSN != "" {
+			p.Source.Type = registry.InferTypeFromDSN(p.Source.DSN)
+		}
+		if p.Target.Type == "" && p.Target.DSN != "" {
+			p.Target.Type = registry.InferTypeFromDSN(p.Target.DSN)
+		}
+	}
 }
 
 func validateTransferConfig(prefix string, t adapters.TransferConfig) error {
