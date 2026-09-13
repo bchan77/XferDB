@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -23,11 +25,18 @@ import (
 // The registry parser sets config.DSN to the original URL for convenience,
 // but we must always rebuild the DSN in native format for MySQL.
 func buildDSN(config adapters.ConnectionConfig) string {
-	// Ignore URL-format DSNs - they must be rebuilt in native format.
-	// A native DSN never starts with a scheme like "mysql://".
+	// If DSN is already in native format, use it directly.
 	if config.DSN != "" && !strings.HasPrefix(config.DSN, "mysql://") {
 		return config.DSN
 	}
+
+	// If DSN is URL format and config fields are empty, parse the URL.
+	if strings.HasPrefix(config.DSN, "mysql://") && config.Host == "" {
+		if parsed, err := parseURLDSN(config.DSN); err == nil {
+			config = parsed
+		}
+	}
+
 	port := config.Port
 	if port == 0 {
 		port = 3306
@@ -35,6 +44,30 @@ func buildDSN(config adapters.ConnectionConfig) string {
 	// Format: user:password@tcp(host:port)/dbname?parseTime=true
 	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true",
 		config.Username, config.Password, config.Host, port, config.Database)
+}
+
+// parseURLDSN extracts connection fields from a mysql:// URL.
+func parseURLDSN(dsn string) (adapters.ConnectionConfig, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return adapters.ConnectionConfig{}, err
+	}
+	cfg := adapters.ConnectionConfig{
+		Type:     "mysql",
+		Host:     u.Hostname(),
+		Database: strings.TrimPrefix(u.Path, "/"),
+		DSN:      dsn,
+	}
+	if u.User != nil {
+		cfg.Username = u.User.Username()
+		cfg.Password, _ = u.User.Password()
+	}
+	if portStr := u.Port(); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			cfg.Port = port
+		}
+	}
+	return cfg, nil
 }
 
 // quote returns a safely backtick-quoted MySQL identifier.
