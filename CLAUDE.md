@@ -31,6 +31,7 @@ See `ARCHITECTURE.md` for full system design, endpoint list, SQL schema, and pac
 | `analyzer/` | Done | Schema diff engine + rule-based suggestions + AI stub interface |
 | `api/` | Done | REST API (net/http ServeMux): projects, migrations, preflight, analyze, stats |
 | `cmd/xferdb/` | Done | CLI rewritten as thin API client; `server`, `project`, `migrate` commands |
+| `cmd/xferdb-web/` | In progress | Separate process serving the web UI; reverse-proxies `/api/*` to `xferdb server` so the UI survives an API/engine crash (e.g. OOM) |
 
 Legacy scaffolding in `internal/` is superseded — do not extend it.
 
@@ -233,3 +234,4 @@ xferdb migrate --project prod-to-staging
 - **API-first, CLI is a client** — CLI must not call engine code directly. It calls the REST API. This enforces the architecture boundary.
 - **Start with SQLite adapter (#2)** — Easiest to test locally, validates the interface before touching Postgres/MySQL.
 - **`internal/` is legacy scaffolding** — Do not extend it. New code goes into the top-level packages (`adapters/`, `engine/`, `state/`, `api/`, `analyzer/`, `stats/`).
+- **Web UI runs in its own process (`cmd/xferdb-web/`)** — It holds no migration state and no source/target DB credentials; it only serves static assets and reverse-proxies `/api/*` (REST + the future WebSocket at `/api/v1/migrations/:id/ws`) to `xferdb server`. This means an OOM crash in the engine (which buffers batches in memory) doesn't take the UI down, the browser needs no CORS config since it only ever talks to one origin, and `xferdb server` can live on a private network never exposed to the browser directly. Source/target databases must be network-reachable from wherever `xferdb server` runs, not from the client machine.

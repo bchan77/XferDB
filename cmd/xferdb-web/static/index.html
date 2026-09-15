@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>XferDB</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 2rem; max-width: 40rem; }
+  .banner { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .banner.ok { background: #16a34a22; color: #16a34a; border: 1px solid #16a34a55; }
+  .banner.down { background: #dc262622; color: #dc2626; border: 1px solid #dc262655; }
+  h1 { font-size: 1.25rem; }
+</style>
+</head>
+<body>
+  <div id="banner" class="banner down">Checking API server&hellip;</div>
+  <h1>XferDB</h1>
+  <p>This page is served by the <code>xferdb-web</code> process, separate from the API/engine
+  server. If the API server restarts or crashes (e.g. OOM during a large migration), the banner
+  above reflects that, but this page keeps running and reconnects automatically.</p>
+
+  <script>
+    const banner = document.getElementById('banner');
+    let backoff = 2000;
+
+    async function checkHealth() {
+      try {
+        const res = await fetch('/api/v1/health', { cache: 'no-store' });
+        if (!res.ok) throw new Error('status ' + res.status);
+        banner.textContent = 'Connected to API server';
+        banner.className = 'banner ok';
+        backoff = 2000;
+      } catch (err) {
+        banner.textContent = 'API server unreachable — retrying…';
+        banner.className = 'banner down';
+        backoff = Math.min(backoff * 1.5, 15000);
+      } finally {
+        setTimeout(checkHealth, backoff);
+      }
+    }
+
+    checkHealth();
+  </script>
+</body>
+</html>
