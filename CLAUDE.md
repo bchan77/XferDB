@@ -31,7 +31,7 @@ See `ARCHITECTURE.md` for full system design, endpoint list, SQL schema, and pac
 | `analyzer/` | Done | Schema diff engine + rule-based suggestions + AI stub interface |
 | `api/` | Done | REST API (net/http ServeMux): projects, migrations, preflight, analyze, stats |
 | `cmd/xferdb/` | Done | CLI rewritten as thin API client; `server`, `project`, `migrate` commands |
-| `cmd/xferdb-web/` | In progress | Separate process serving the web UI; reverse-proxies `/api/*` to `xferdb server` so the UI survives an API/engine crash (e.g. OOM) |
+| `cmd/xferdb-web/` | Done (relational schema editing not yet supported) | Separate process serving the web UI (vanilla JS SPA, hash routing, no build step); reverse-proxies `/api/*` to `xferdb server` so the UI survives an API/engine crash (e.g. OOM) |
 
 Legacy scaffolding in `internal/` is superseded — do not extend it.
 
@@ -58,32 +58,10 @@ Define all shared types:
 - `PermissionCheck` (can_read, can_write, can_create_table bool, errors []string)
 - `ConnectionConfig` (type, host, port, database, username, password, ssl_mode, dsn string)
 
-Define split interfaces (per ARCHITECTURE.md §8):
-
-```go
-type SourceAdapter interface {
-    Connect(ctx context.Context, config ConnectionConfig) error
-    Close() error
-    Ping(ctx context.Context) error
-    ListTables(ctx context.Context) ([]TableSchema, error)
-    GetSchema(ctx context.Context, table string) (*TableSchema, error)
-    GetRowCount(ctx context.Context, table string) (int64, error)
-    ReadBatch(ctx context.Context, table string, opts BatchOptions) (*Batch, error)
-    CheckPermissions(ctx context.Context) (*PermissionCheck, error)
-}
-
-type TargetAdapter interface {
-    Connect(ctx context.Context, config ConnectionConfig) error
-    Close() error
-    Ping(ctx context.Context) error
-    ListTables(ctx context.Context) ([]TableSchema, error)
-    GetSchema(ctx context.Context, table string) (*TableSchema, error)
-    CreateTable(ctx context.Context, schema *TableSchema) error
-    AlterTable(ctx context.Context, changes []SchemaChange) error
-    WriteBatch(ctx context.Context, table string, batch *Batch) error
-    CheckPermissions(ctx context.Context) (*PermissionCheck, error)
-}
-```
+Define split interfaces (per ARCHITECTURE.md §8). See `adapters/adapter.go` for the current
+`SourceAdapter`/`TargetAdapter` definitions — they've grown since this plan was written (e.g.
+`GetPKRange`, `GetInfo`, `DropTable`, `TruncateTable`, `CreateIndexes`, `CreateConstraints`), so
+treat the source file as authoritative, not this doc.
 
 ---
 
@@ -110,51 +88,9 @@ Maps type strings ("postgres", "mysql", "sqlite") to constructor functions. Pars
 ### Task #6 — State Manager with projects — blocked by #1
 **Package:** `state/metadb.go`, `state/projects.go`, `state/migrations.go`, `state/checkpoints.go`
 
-SQLite-backed state store. Schema (from ARCHITECTURE.md, with projects added):
-
-```sql
-CREATE TABLE projects (
-    id TEXT PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    description TEXT,
-    source_config JSON NOT NULL,
-    target_config JSON NOT NULL,
-    transfer_config JSON,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE migrations (
-    id TEXT PRIMARY KEY,
-    project_id TEXT REFERENCES projects(id),
-    status TEXT NOT NULL,
-    config JSON NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP,
-    error TEXT
-);
-
-CREATE TABLE migration_tables (
-    migration_id TEXT REFERENCES migrations(id),
-    table_name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    rows_total INTEGER,
-    rows_transferred INTEGER DEFAULT 0,
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP,
-    PRIMARY KEY (migration_id, table_name)
-);
-
-CREATE TABLE checkpoints (
-    migration_id TEXT REFERENCES migrations(id),
-    table_name TEXT NOT NULL,
-    batch_id INTEGER NOT NULL,
-    last_pk TEXT,
-    rows_in_batch INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (migration_id, table_name, batch_id)
-);
-```
+SQLite-backed state store. See `state/metadb.go` for the current schema — it now has more tables
+than the original plan (also `project_tables`, `schema_plans`, `migration_stats`), so treat that
+file as authoritative, not this doc.
 
 ### Task #7 — Migration Engine — blocked by #5, #6
 **Package:** `engine/engine.go`, `engine/checkpoint.go`, `engine/batch.go`, `engine/worker.go`
