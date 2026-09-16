@@ -5,6 +5,19 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Web UI: tables-first project workflow** — clicking a project now lands directly on its
+  table/collection list instead of a connection-settings page (moved to `#/projects/:id/settings`).
+  That screen shows live migration status with Run/Pause/Resume/Cancel, and locks tables (with an
+  explanatory banner) while a migration is active so schema edits can't race a running transfer.
+- **Web UI: schema editor for every adapter pairing** — the split-view type-override editor
+  (dropdown + Save with confirmation) previously only worked end-to-end for MongoDB→PostgreSQL;
+  it's now generalized to Postgres/MySQL/SQLite pairings too. `OverridePlan` upserts instead of
+  requiring a pre-seeded row, and the engine applies saved overrides to the target `CREATE TABLE`
+  for relational sources (falling back off the postgres→postgres `pg_dump` fast path when
+  overrides exist, since that path bypasses `CreateTable` entirely).
+- **CI: xferdb-matrix compatibility gate** — `.gitea/workflows/xferdb-matrix-gate.yaml` triggers
+  the Jenkins `xferdb-matrix` job (real Postgres/MySQL/MongoDB sources, `SIZE=S`) on every push/PR
+  touching Go code, and approves or requests changes on the PR based on the result.
 - **Structured config files (xferdb.yaml / xferdb.json)** — server settings, migration defaults, and named projects can now live in a single file under version control. Loaded from `--config`, `$XFERDB_CONFIG`, `./xferdb.{yaml,yml,json}`, or `~/.xferdb/config.{yaml,yml,json}` in that order. Precedence is CLI flag → env var → config file → built-in default.
 - **`xferdb config` subcommand** — `init` writes a starter file, `show` prints the resolved config, `validate` checks syntax and semantics, `path` prints the resolved path.
 - **DSN safety via `${VAR}` expansion** — DSN strings in config files can reference environment variables, so credentials never have to live in the file. `${VAR}` requires the var to be set; `${VAR:-default}` falls back. Missing required vars fail the load with a clear error pointing at the field.

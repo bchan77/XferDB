@@ -56,6 +56,21 @@ git commit -s
 2. Open a pull request against `main`
 3. Ensure CI passes
 
+## Continuous Integration
+
+PRs (and pushes) touching `**.go` files run two Gitea Actions workflows:
+
+- **Build** (`.gitea/workflows/go-build.yaml`) — `go build`/`go test` inside the runner
+- **XferDB Matrix Gate** (`.gitea/workflows/xferdb-matrix-gate.yaml`) — triggers the Jenkins
+  `xferdb-matrix` job, which seeds real PostgreSQL/MySQL/MongoDB sources in Kubernetes and runs
+  every compatible migration case against them (`SIZE=S`: ~5k rows/table)
+
+Both post a review on the PR when they finish — **APPROVE** on success, **REQUEST_REVIEW** on
+failure — from a bot identity, not a human reviewer, so a PR can show as "approved" before anyone
+has actually looked at it. Maintainers: these need repo secrets `JENKINS_TOKEN` and variables
+`JENKINS_URL`/`JENKINS_USER` configured under Settings → Actions to run at all; without them the
+matrix-gate job fails immediately with no useful log output.
+
 ## Reporting Issues
 
 Please report bugs via the issue tracker with:

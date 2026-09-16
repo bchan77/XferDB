@@ -60,7 +60,8 @@
 git clone https://gitea.homelab.local/nextdevops/XferDB.git
 cd XferDB
 go build -o xferdb ./cmd/xferdb
-sudo mv xferdb /usr/local/bin/
+go build -o xferdb-web ./cmd/xferdb-web  # optional: the web UI, see below
+sudo mv xferdb xferdb-web /usr/local/bin/
 ```
 
 ### Binary releases
@@ -495,9 +496,14 @@ The CLI is a thin wrapper. All operations are available directly:
 POST   /api/v1/projects
 GET    /api/v1/projects
 GET    /api/v1/projects/:id
+PUT    /api/v1/projects/:id                 # edit connection config; blank password/dsn keeps the stored value
 DELETE /api/v1/projects/:id
 POST   /api/v1/projects/:id/preflight
 POST   /api/v1/projects/:id/analyze
+GET    /api/v1/projects/:id/tables/:table   # source + target column schema for one table (split view)
+GET    /api/v1/projects/:id/schema-plan     # saved column-type overrides, keyed by table/collection
+PUT    /api/v1/projects/:id/schema-plan     # body: [{"collection":"orders","field_name":"total","pg_type":"numeric",...}]
+DELETE /api/v1/projects/:id/schema-plan     # wipe overrides for one table (?collection=) or the whole project
 GET    /api/v1/projects/:id/support-bundle  # tar.gz diagnostic archive, credentials redacted
 
 # Migrations
@@ -511,6 +517,36 @@ GET    /api/v1/migrations/:id/stats/history # recorded snapshots (every 5s durin
 
 GET    /api/v1/health
 ```
+
+---
+
+## Web UI
+
+`xferdb-web` is a separate process serving a vanilla-JS single-page app (hash routing, no
+build step) that reverse-proxies `/api/*` to `xferdb server`. The browser only ever talks to
+one origin, and the UI stays up even if the API/engine process crashes (e.g. OOM during a
+large migration).
+
+```bash
+xferdb server --addr :8080 &
+xferdb-web --addr :3000 --api-addr http://localhost:8080
+# open http://localhost:3000
+```
+
+Screens (all reachable via browser back/forward, since routing is hash-based):
+
+- **Projects** (`#/`) — list, create, delete
+- **Tables** (`#/projects/:id`) — a project's default landing page: its tables/collections,
+  live migration status with Run / Pause / Resume / Cancel, and migration history. While a
+  migration is active, tables are locked (not clickable) with a banner explaining why
+- **Table detail** (`#/projects/:id/tables/:table`) — split view: source columns on the left,
+  suggested target schema on the right. The target type is an editable dropdown (per-dialect
+  choices for Postgres/MySQL/SQLite/Mongo→Postgres) with Save-with-confirmation, backed by the
+  `schema-plan` endpoints above — available for every adapter pairing, not just MongoDB→Postgres
+- **Settings** (`#/projects/:id/settings`) — connection config view/edit, preflight/test
+  connection, delete project
+- **Migration progress** (`#/migrations/:id`) — full live progress page (same
+  pause/resume/cancel controls as the tables screen, plus per-table breakdown)
 
 ---
 
@@ -551,7 +587,7 @@ go build -o xferdb ./cmd/xferdb
 - [x] Database info in preflight (type, version, host, table count, size, SSL)
 - [x] Support bundle (`xferdb support-bundle`)
 - [ ] MongoDB target adapter
-- [ ] Web UI
+- [x] Web UI (projects, live table browser, migration status/controls, schema editor for every adapter pairing)
 - [ ] WebSocket live progress
 - [ ] Scheduled / repeated migrations
 - [ ] Data transformation pipeline (column mapping, type casting)
