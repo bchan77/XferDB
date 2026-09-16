@@ -200,6 +200,33 @@ func TestOverridePlan_SetsOverriddenFlag(t *testing.T) {
 	}
 }
 
+// TestOverridePlan_CreatesRowWithoutPriorSavePlan covers relational tables,
+// which have no SavePlan-seeded row (only the Mongo analyze path seeds one) —
+// the first override for a table must still land.
+func TestOverridePlan_CreatesRowWithoutPriorSavePlan(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	projID := seedProject(t, db)
+
+	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanRow{
+		PgColumn: "total", PgType: "numeric", Strategy: "direct", Nullable: true,
+	}); err != nil {
+		t.Fatalf("OverridePlan: %v", err)
+	}
+
+	got, err := db.GetPlan(ctx, projID, "orders")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("GetPlan: err=%v rows=%d", err, len(got))
+	}
+	if got[0].PgType != "numeric" {
+		t.Errorf("PgType = %q, want \"numeric\"", got[0].PgType)
+	}
+	if !got[0].Overridden {
+		t.Error("Overridden = false, want true")
+	}
+}
+
 // ── ListPlanCollections ──────────────────────────────────────────────────────
 
 func TestListPlanCollections(t *testing.T) {

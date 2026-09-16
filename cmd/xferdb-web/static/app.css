@@ -123,6 +123,8 @@ main {
 .list-row .name { font-weight: 600; }
 .list-row .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .list-row .right { display: flex; align-items: center; gap: 10px; }
+.list-row.disabled { cursor: not-allowed; opacity: 0.55; }
+.list-row.disabled:hover { border-color: var(--border); }
 
 .badge {
   display: inline-block;

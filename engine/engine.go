@@ -128,6 +128,16 @@ func (e *Engine) Run(ctx context.Context) error {
 	dataOnly := cfg.DataOnly
 	schemaOnly := cfg.SchemaOnly
 
+	// Relational sources have no automatic schema-plan seeding (only the Mongo
+	// analyze path calls SavePlan), but a user can still save column-type
+	// overrides directly from the table split view via schema-plan overrides.
+	// Load them once so both the pg_dump gating and the CreateTable loop below
+	// can apply them.
+	var relationalPlan []state.SchemaPlanRow
+	if e.project.SourceConfig.Type != "mongodb" {
+		relationalPlan, _ = e.db.GetPlanForProject(ctx, e.project.ID)
+	}
+
 	// nativeSchema is true when pg_dump handled Phase 1; Phase 3 must then use
 	// pg_dump --section=post-data instead of the introspection-based index loop.
 	var nativeSchema bool
@@ -136,12 +146,14 @@ func (e *Engine) Run(ctx context.Context) error {
 	// For postgres→postgres migrations, prefer pg_dump --section=pre-data so that
 	// extensions (pgvector, PostGIS, …), custom types, and sequences are transferred
 	// exactly as they exist on the source. Falls back to introspection-based
-	// CreateTable when pg_dump/psql are not on PATH.
+	// CreateTable when pg_dump/psql are not on PATH, or when the user has saved
+	// column-type overrides for this project — pg_dump bypasses CreateTable
+	// entirely, so overrides would otherwise be silently ignored.
 	// Skipped entirely for --truncate (schema already exists on target).
 	if !dataOnly && !cfg.Truncate {
 		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
 
-		if e.project.SourceConfig.Type == "postgres" && e.project.TargetConfig.Type == "postgres" {
+		if e.project.SourceConfig.Type == "postgres" && e.project.TargetConfig.Type == "postgres" && len(relationalPlan) == 0 {
 			ok, err := e.pgDumpPreData(ctx, e.project.SourceConfig, e.project.TargetConfig, cfg.RecreateSchema)
 			if err != nil {
 				return e.fail(ctx, fmt.Errorf("pg_dump pre-data: %w", err))
@@ -151,6 +163,9 @@ func (e *Engine) Run(ctx context.Context) error {
 
 		if !nativeSchema {
 			for _, schema := range tables {
+				if len(relationalPlan) > 0 {
+					applyPlanOverrides(&schema, relationalPlan)
+				}
 				if cfg.RecreateSchema {
 					if err := e.target.DropTable(ctx, schema.Name); err != nil {
 						return e.fail(ctx, fmt.Errorf("drop table %s: %w", schema.Name, err))
@@ -340,6 +355,28 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.emit(ProgressEvent{Kind: EventComplete, Timestamp: time.Now()})
 	return nil
+}
+
+// applyPlanOverrides rewrites a relational table's column type/nullable/PK
+// flags per any saved schema-plan overrides for that table. Column renames
+// (SchemaPlanRow.PgColumn) are intentionally not applied here — WriteBatch
+// reads row values keyed by the *source* column name, so renaming at
+// CreateTable time without also touching the read/write path would break
+// data transfer.
+func applyPlanOverrides(schema *adapters.TableSchema, plan []state.SchemaPlanRow) {
+	for i, col := range schema.Columns {
+		for _, row := range plan {
+			if row.Collection != schema.Name || row.FieldName != col.Name {
+				continue
+			}
+			if row.PgType != "" {
+				schema.Columns[i].Type = row.PgType
+			}
+			schema.Columns[i].Nullable = row.Nullable
+			schema.Columns[i].PrimaryKey = row.IsPK
+			break
+		}
+	}
 }
 
 // connect instantiates and connects source and target adapters using the project config.

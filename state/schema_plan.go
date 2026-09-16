@@ -64,16 +64,26 @@ func (m *MetaDB) SavePlan(ctx context.Context, rows []SchemaPlanRow) error {
 	return tx.Commit()
 }
 
-// OverridePlan updates a single field decision and marks it overridden=true so
-// future re-analyzes do not clobber it.
+// OverridePlan sets a single field decision and marks it overridden=true so
+// future re-analyzes do not clobber it. It upserts: relational tables have no
+// prior SavePlan-seeded row (only the Mongo analyze path seeds rows), so this
+// must create the row on first use rather than requiring one to already exist.
 func (m *MetaDB) OverridePlan(ctx context.Context, projectID, collection, fieldName string, updates SchemaPlanRow) error {
 	_, err := m.db.ExecContext(ctx, `
-		UPDATE schema_plans
-		SET pg_column = ?, pg_type = ?, strategy = ?, is_pk = ?, nullable = ?, overridden = 1
-		WHERE project_id = ? AND collection = ? AND field_name = ?`,
+		INSERT INTO schema_plans
+		    (project_id, collection, field_name, pg_column, pg_type, strategy, is_pk, nullable, overridden, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+		ON CONFLICT (project_id, collection, field_name) DO UPDATE SET
+		    pg_column  = excluded.pg_column,
+		    pg_type    = excluded.pg_type,
+		    strategy   = excluded.strategy,
+		    is_pk      = excluded.is_pk,
+		    nullable   = excluded.nullable,
+		    overridden = 1`,
+		projectID, collection, fieldName,
 		updates.PgColumn, updates.PgType, updates.Strategy,
 		boolToInt(updates.IsPK), boolToInt(updates.Nullable),
-		projectID, collection, fieldName,
+		time.Now(),
 	)
 	if err != nil {
 		return fmt.Errorf("override plan %s.%s: %w", collection, fieldName, err)

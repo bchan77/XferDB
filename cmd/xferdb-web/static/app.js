@@ -9,7 +9,21 @@ function navigate(hash) { location.hash = hash; }
 
 const PG_TYPES = ['text', 'varchar(255)', 'integer', 'bigint', 'smallint', 'boolean', 'numeric',
   'real', 'double precision', 'date', 'timestamp', 'timestamptz', 'jsonb', 'uuid', 'bytea'];
+const MYSQL_TYPES = ['text', 'varchar(255)', 'int', 'bigint', 'smallint', 'tinyint(1)',
+  'decimal(10,2)', 'float', 'double', 'date', 'datetime', 'timestamp', 'json', 'blob', 'char(36)'];
+const SQLITE_TYPES = ['TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC'];
 const STRATEGIES = ['direct', 'as_jsonb', 'flatten', 'skip'];
+const ACTIVE_STATUSES = ['pending', 'in_progress', 'paused'];
+
+function typesForDialect(type) {
+  if (type === 'mysql') return MYSQL_TYPES;
+  if (type === 'sqlite') return SQLITE_TYPES;
+  return PG_TYPES;
+}
+
+function findActiveMigration(migs) {
+  return (migs || []).find((m) => ACTIVE_STATUSES.includes(m.status));
+}
 
 // ---------------------------------------------------------------------------
 // Connection config editor (shared by create + edit forms)
@@ -387,86 +401,8 @@ async function runPreflight(id) {
   }
 }
 
-async function loadMigSection(projectId) {
-  const sec = document.getElementById('migSection');
-  sec.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading migrations…</div>`;
-  try {
-    const migs = await api.listMigrations(projectId);
-    const active = migs.find((m) => m.status === 'pending' || m.status === 'in_progress' || m.status === 'paused');
-    let startHTML;
-    if (active) {
-      startHTML = `
-        <div class="banner info">
-          <span>A migration is already ${esc(active.status)} for this project.</span>
-          <button class="btn small" id="goActiveBtn">View Progress</button>
-        </div>`;
-    } else {
-      startHTML = `
-        <details class="advanced">
-          <summary>Migration options</summary>
-          <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeNone" value="none" checked><label for="modeNone">Keep existing target schema/data</label></div>
-          <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
-          <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
-          <div class="field-row">
-            <div><label>Table workers</label><input type="number" id="m-workers" value="1"></div>
-            <div><label>Batch size</label><input type="number" id="m-batch" value="1000"></div>
-          </div>
-        </details>
-        <div id="startErr"></div>
-        <button class="btn primary" id="startMigBtn">Start Migration</button>
-      `;
-    }
-    sec.innerHTML = startHTML + '<div style="margin-top:22px;"><h2 style="font-size:13px;">History</h2><div id="migHistory"></div></div>';
-
-    if (active) {
-      document.getElementById('goActiveBtn').addEventListener('click', () => navigate(`#/migrations/${encodeURIComponent(active.id)}`));
-    } else {
-      document.getElementById('startMigBtn').addEventListener('click', async () => {
-        const mode = document.querySelector('input[name=schemaMode]:checked').value;
-        const body = {
-          table_workers: parseInt(document.getElementById('m-workers').value, 10) || 1,
-          batch_size: parseInt(document.getElementById('m-batch').value, 10) || 1000,
-          recreate_schema: mode === 'recreate',
-          truncate: mode === 'truncate',
-        };
-        const btn = document.getElementById('startMigBtn');
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner"></span> Starting…';
-        try {
-          const mig = await api.startMigration(projectId, body);
-          navigate(`#/migrations/${encodeURIComponent(mig.id)}`);
-        } catch (err) {
-          document.getElementById('startErr').innerHTML = errorBanner('Could not start migration: ' + err.message);
-          btn.disabled = false;
-          btn.textContent = 'Start Migration';
-        }
-      });
-    }
-
-    const histEl = document.getElementById('migHistory');
-    if (!migs || migs.length === 0) {
-      histEl.innerHTML = `<div class="hint">No migrations run yet.</div>`;
-    } else {
-      histEl.innerHTML = migs.map((m) => `
-        <div class="list-row" data-id="${esc(m.id)}">
-          <div>
-            <div class="name mono">${esc(m.id.slice(0, 8))}</div>
-            <div class="meta">created ${esc(fmtDate(m.created_at))}${m.error ? ' · ' + esc(m.error) : ''}</div>
-          </div>
-          <span class="badge ${esc(m.status)}">${esc(m.status)}</span>
-        </div>
-      `).join('');
-      histEl.querySelectorAll('.list-row').forEach((row) => {
-        row.addEventListener('click', () => navigate(`#/migrations/${encodeURIComponent(row.dataset.id)}`));
-      });
-    }
-  } catch (err) {
-    sec.innerHTML = errorBanner('Could not load migrations: ' + err.message, { retry: () => loadMigSection(projectId) });
-  }
-}
-
-async function renderProjectDetail(id) {
-  document.title = 'XferDB — Project';
+async function renderProjectSettings(id) {
+  document.title = 'XferDB — Project Settings';
   app.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading project…</div>`;
   let project;
   try {
@@ -479,14 +415,16 @@ async function renderProjectDetail(id) {
     `;
     return;
   }
-  document.title = `XferDB — ${project.name}`;
+  document.title = `XferDB — ${project.name} settings`;
 
   app.innerHTML = `
-    <div class="breadcrumb"><a href="#/">Projects</a> / ${esc(project.name)}</div>
+    <div class="breadcrumb">
+      <a href="#/">Projects</a> / <a href="#/projects/${encodeURIComponent(id)}">${esc(project.name)}</a> / Settings
+    </div>
     <div class="page-header">
       <div><h1>${esc(project.name)}</h1><div class="sub">${esc(project.description || '')}</div></div>
       <div class="actions-row">
-        <button class="btn" id="viewTablesBtn">View Tables</button>
+        <a class="btn" href="#/projects/${encodeURIComponent(id)}">← Back to tables</a>
         <button class="btn danger" id="deleteProjBtn">Delete Project</button>
       </div>
     </div>
@@ -501,13 +439,8 @@ async function renderProjectDetail(id) {
       <div id="editConnArea" data-open="0"></div>
       <div id="preflightArea"></div>
     </div>
-    <div class="section">
-      <h2>Migrations</h2>
-      <div id="migSection"></div>
-    </div>
   `;
 
-  document.getElementById('viewTablesBtn').addEventListener('click', () => navigate(`#/projects/${encodeURIComponent(id)}/tables`));
   document.getElementById('deleteProjBtn').addEventListener('click', async () => {
     const ok = await confirmModal({
       title: 'Delete project?',
@@ -528,7 +461,6 @@ async function renderProjectDetail(id) {
   document.getElementById('editConnBtn').addEventListener('click', () => toggleEditConn(project));
   document.getElementById('retryPreflightBtn').addEventListener('click', () => runPreflight(id));
 
-  await loadMigSection(id);
   await runPreflight(id);
 }
 
@@ -536,57 +468,56 @@ async function renderProjectDetail(id) {
 // Tables / collections list
 // ---------------------------------------------------------------------------
 
-function renderTableCards(area, projectId, items) {
+function renderTableCards(area, projectId, items, locked) {
   if (items.length === 0) {
     area.innerHTML = `<div class="empty-state"><div class="icon">📂</div><p>No tables found.</p></div>`;
     return;
   }
   area.innerHTML = items.map((t) => `
-    <div class="list-row" data-name="${esc(t.name)}">
+    <div class="list-row${locked ? ' disabled' : ''}" data-name="${esc(t.name)}">
       <div class="name mono">${esc(t.name)}</div>
       <span class="badge ${t.badge}">${esc(t.badgeText)}</span>
     </div>
   `).join('');
+  if (locked) return;
   area.querySelectorAll('.list-row').forEach((row) => {
     row.addEventListener('click', () => navigate(`#/projects/${encodeURIComponent(projectId)}/tables/${encodeURIComponent(row.dataset.name)}`));
   });
 }
 
+// loadTables runs analyze and returns the row items for renderTableCards;
+// it throws on failure so the caller can drive the loading/error UI itself
+// (needed so a later lock-state change can re-render from cached items
+// without re-running analyze).
 async function loadTables(id, project) {
   const area = document.getElementById('tablesArea');
-  area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Analyzing…</div>`;
-  try {
-    if (project.source_config.type === 'mongodb') {
-      area.innerHTML = '<div class="hint" id="progressLine">Starting…</div>';
-      const progressLine = document.getElementById('progressLine');
-      const collections = [];
-      await analyzeMongoStream(id, {}, (evt) => {
-        if (evt.type === 'progress') {
-          progressLine.textContent = `Sampling ${evt.collection}: ${fmtInt(evt.scanned)} / ${fmtInt(evt.target)}…`;
-        } else if (evt.type === 'collection') {
-          const fields = (evt.schema && evt.schema.fields) || [];
-          collections.push({ name: evt.collection, fieldCount: fields.length, warnings: evt.warnings || [] });
-        } else if (evt.type === 'error') {
-          throw new Error(evt.error);
-        }
-      });
-      renderTableCards(area, id, collections.map((c) => ({
-        name: c.name,
-        badge: c.warnings.length ? 'warn' : 'ok',
-        badgeText: c.warnings.length ? 'warning' : `${c.fieldCount} fields`,
-      })));
-    } else {
-      const result = await api.analyze(id, {});
-      const tables = result.Tables || [];
-      renderTableCards(area, id, tables.map((t) => ({
-        name: t.Name,
-        badge: t.Status === 'compatible' ? 'ok' : 'warn',
-        badgeText: `${t.Status}${t.Issues && t.Issues.length ? ' · ' + t.Issues.length + ' issue(s)' : ''}`,
-      })));
-    }
-  } catch (err) {
-    area.innerHTML = errorBanner('Analyze failed: ' + err.message, { retry: () => loadTables(id, project) });
+  if (project.source_config.type === 'mongodb') {
+    area.innerHTML = '<div class="hint" id="progressLine">Starting…</div>';
+    const progressLine = document.getElementById('progressLine');
+    const collections = [];
+    await analyzeMongoStream(id, {}, (evt) => {
+      if (evt.type === 'progress') {
+        progressLine.textContent = `Sampling ${evt.collection}: ${fmtInt(evt.scanned)} / ${fmtInt(evt.target)}…`;
+      } else if (evt.type === 'collection') {
+        const fields = (evt.schema && evt.schema.fields) || [];
+        collections.push({ name: evt.collection, fieldCount: fields.length, warnings: evt.warnings || [] });
+      } else if (evt.type === 'error') {
+        throw new Error(evt.error);
+      }
+    });
+    return collections.map((c) => ({
+      name: c.name,
+      badge: c.warnings.length ? 'warn' : 'ok',
+      badgeText: c.warnings.length ? 'warning' : `${c.fieldCount} fields`,
+    }));
   }
+  const result = await api.analyze(id, {});
+  const tables = result.Tables || [];
+  return tables.map((t) => ({
+    name: t.Name,
+    badge: t.Status === 'compatible' ? 'ok' : 'warn',
+    badgeText: `${t.Status}${t.Issues && t.Issues.length ? ' · ' + t.Issues.length + ' issue(s)' : ''}`,
+  }));
 }
 
 async function renderTablesList(id) {
@@ -600,14 +531,55 @@ async function renderTablesList(id) {
     return;
   }
   const label = project.source_config.type === 'mongodb' ? 'Collections' : 'Tables';
-  document.title = `XferDB — ${project.name} ${label.toLowerCase()}`;
+  document.title = `XferDB — ${project.name}`;
   app.innerHTML = `
-    <div class="breadcrumb"><a href="#/">Projects</a> / <a href="#/projects/${encodeURIComponent(id)}">${esc(project.name)}</a> / ${label}</div>
-    <div class="page-header"><h1>${label}</h1><button class="btn" id="reanalyzeBtn">Re-analyze</button></div>
-    <div id="tablesArea"></div>
+    <div class="breadcrumb"><a href="#/">Projects</a> / ${esc(project.name)}</div>
+    <div class="page-header">
+      <div><h1>${esc(project.name)}</h1><div class="sub">${esc(project.description || '')}</div></div>
+      <a class="btn" href="#/projects/${encodeURIComponent(id)}/settings">Settings</a>
+    </div>
+    <div class="section" id="migCardSection"></div>
+    <div class="section">
+      <div class="page-header"><h2>${label}</h2><button class="btn" id="reanalyzeBtn">Re-analyze</button></div>
+      <div id="lockBanner"></div>
+      <div id="tablesArea"></div>
+    </div>
   `;
-  document.getElementById('reanalyzeBtn').addEventListener('click', () => loadTables(id, project));
-  await loadTables(id, project);
+
+  const area = document.getElementById('tablesArea');
+  let cachedItems = [];
+  let locked = false;
+
+  function renderRows() {
+    renderTableCards(area, id, cachedItems, locked);
+  }
+
+  async function refreshTables() {
+    if (locked) return;
+    area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Analyzing…</div>`;
+    try {
+      cachedItems = await loadTables(id, project);
+      renderRows();
+    } catch (err) {
+      area.innerHTML = errorBanner('Analyze failed: ' + err.message, { retry: refreshTables });
+    }
+  }
+
+  document.getElementById('reanalyzeBtn').addEventListener('click', refreshTables);
+
+  const stopMig = mountMigSection(document.getElementById('migCardSection'), id, (isLocked, status) => {
+    locked = isLocked;
+    document.getElementById('lockBanner').innerHTML = locked
+      ? `<div class="banner info">Table changes are disabled while a migration is ${esc(status)}.</div>`
+      : '';
+    const btn = document.getElementById('reanalyzeBtn');
+    if (btn) btn.disabled = locked;
+    renderRows();
+  });
+
+  setCleanup(() => stopMig());
+
+  await refreshTables();
 }
 
 // ---------------------------------------------------------------------------
@@ -623,49 +595,27 @@ function colRowReadOnly(c, pending) {
   `;
 }
 
-async function renderRelationalSplit(area, id, tableName) {
-  area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading schema…</div>`;
-  try {
-    const { source, target } = await api.getTableSchema(id, tableName);
-    const srcCols = (source && source.columns) || [];
-    const tgtCols = (target && target.columns) || [];
-    const tgtExists = tgtCols.length > 0;
-    const tgtByName = {};
-    tgtCols.forEach((c) => { tgtByName[c.name] = c; });
-
-    area.innerHTML = `
-      ${!tgtExists ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created automatically when the migration runs.</div>' : ''}
-      <div class="banner info">Editable type suggestions are currently only available for MongoDB→PostgreSQL projects. This view is read-only.</div>
-      <div class="split">
-        <div><h3>Source</h3>${srcCols.map((c) => colRowReadOnly(c)).join('') || '<div class="hint">No columns.</div>'}</div>
-        <div><h3>Target ${tgtExists ? '' : '(not yet created)'}</h3>
-          ${srcCols.map((c) => colRowReadOnly(tgtByName[c.name] || c, !tgtByName[c.name])).join('') || '<div class="hint">No columns.</div>'}
-        </div>
-      </div>
-    `;
-  } catch (err) {
-    area.innerHTML = errorBanner('Could not load table schema: ' + err.message, { retry: () => renderRelationalSplit(area, id, tableName) });
-  }
-}
-
 function rowId(fieldName) {
   return fieldName.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-function editableRow(r) {
+function editableRow(r, { showRename = true, showStrategy = true, typeOptions = PG_TYPES } = {}) {
   const rid = rowId(r.field_name);
-  const knownType = PG_TYPES.includes(r.pg_type);
+  const knownType = typeOptions.includes(r.pg_type);
   return `
     <div class="col-row" id="row-${rid}">
       <div class="edit-grid">
-        <input type="text" id="col-${rid}" value="${esc(r.pg_column)}" placeholder="column name">
+        ${showRename
+          ? `<input type="text" id="col-${rid}" value="${esc(r.pg_column)}" placeholder="column name">`
+          : `<div class="col-name mono">${esc(r.pg_column)}</div>`}
         <select id="type-${rid}">
-          ${PG_TYPES.map((t) => `<option value="${t}" ${t === r.pg_type ? 'selected' : ''}>${t}</option>`).join('')}
+          ${typeOptions.map((t) => `<option value="${t}" ${t === r.pg_type ? 'selected' : ''}>${t}</option>`).join('')}
           ${!knownType ? `<option value="${esc(r.pg_type)}" selected>${esc(r.pg_type)}</option>` : ''}
         </select>
+        ${showStrategy ? `
         <select id="strat-${rid}">
           ${STRATEGIES.map((s) => `<option value="${s}" ${s === r.strategy ? 'selected' : ''}>${s}</option>`).join('')}
-        </select>
+        </select>` : '<span></span>'}
         <span></span>
       </div>
       <div class="checkbox-row">
@@ -676,52 +626,32 @@ function editableRow(r) {
   `;
 }
 
-async function renderMongoSplit(area, id, tableName) {
-  area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading schema plan…</div>`;
-  let plan;
-  try {
-    plan = await api.getSchemaPlan(id);
-  } catch (err) {
-    area.innerHTML = errorBanner('Could not load schema plan: ' + err.message, { retry: () => renderMongoSplit(area, id, tableName) });
-    return;
-  }
-  const rows = plan[tableName];
-  if (!rows || rows.length === 0) {
-    area.innerHTML = `
-      <div class="banner info">No schema plan found for this collection yet.</div>
-      <a class="btn" href="#/projects/${encodeURIComponent(id)}/tables">Back to collections (Re-analyze there)</a>
-    `;
-    return;
-  }
+function readEditedRow(fieldName, orig, { showRename, showStrategy }) {
+  const rid = rowId(fieldName);
+  return {
+    field_name: fieldName,
+    pg_column: showRename ? document.getElementById(`col-${rid}`).value.trim() : orig.pg_column,
+    pg_type: document.getElementById(`type-${rid}`).value,
+    strategy: showStrategy ? document.getElementById(`strat-${rid}`).value : (orig.strategy || 'direct'),
+    nullable: document.getElementById(`null-${rid}`).checked,
+    is_pk: document.getElementById(`pk-${rid}`).checked,
+  };
+}
 
+// mountEditableTargetPanel mounts editable rows (SchemaPlanRow-shaped) into
+// panelEl with dirty-tracking, a Save button that appears in saveAreaEl once
+// something changed, and a confirm-then-PUT save flow against the
+// project-wide schema-plan override endpoint. Shared by the Mongo→Postgres
+// field editor and the generalized relational column-type editor.
+function mountEditableTargetPanel(panelEl, saveAreaEl, rows, opts) {
+  const { collection, projectId, showRename = true, showStrategy = true, typeOptions = PG_TYPES, onSaved } = opts;
   const original = {};
   rows.forEach((r) => { original[r.field_name] = { ...r }; });
 
-  area.innerHTML = `
-    <div class="split">
-      <div><h3>Source (MongoDB field)</h3><div id="srcCols">
-        ${rows.map((r) => `
-          <div class="col-row">
-            <div class="col-name">${esc(r.field_name)} ${r.is_pk ? '<span class="badge ok">PK</span>' : ''}</div>
-            ${r.overridden ? '<div class="hint">previously overridden</div>' : ''}
-          </div>
-        `).join('')}
-      </div></div>
-      <div><h3>Suggested target (PostgreSQL)</h3><div id="tgtCols">${rows.map((r) => editableRow(r)).join('')}</div></div>
-    </div>
-    <div id="saveArea"></div>
-  `;
+  panelEl.innerHTML = rows.map((r) => editableRow(r, { showRename, showStrategy, typeOptions })).join('');
 
-  function readRow(fieldName) {
-    const rid = rowId(fieldName);
-    return {
-      field_name: fieldName,
-      pg_column: document.getElementById(`col-${rid}`).value.trim(),
-      pg_type: document.getElementById(`type-${rid}`).value,
-      strategy: document.getElementById(`strat-${rid}`).value,
-      nullable: document.getElementById(`null-${rid}`).checked,
-      is_pk: document.getElementById(`pk-${rid}`).checked,
-    };
+  function readCur(fieldName) {
+    return readEditedRow(fieldName, original[fieldName], { showRename, showStrategy });
   }
 
   function isDirty(cur, orig) {
@@ -732,21 +662,20 @@ async function renderMongoSplit(area, id, tableName) {
   function refreshDirty() {
     let anyDirty = false;
     rows.forEach((r) => {
-      const dirty = isDirty(readRow(r.field_name), original[r.field_name]);
+      const dirty = isDirty(readCur(r.field_name), original[r.field_name]);
       const rowEl = document.getElementById('row-' + rowId(r.field_name));
       if (rowEl) rowEl.classList.toggle('dirty', dirty);
       if (dirty) anyDirty = true;
     });
-    const saveArea = document.getElementById('saveArea');
     if (anyDirty) {
-      saveArea.innerHTML = `<div class="actions-row"><button class="btn primary" id="saveSchemaBtn">Save Changes</button></div>`;
+      saveAreaEl.innerHTML = `<div class="actions-row"><button class="btn primary" id="saveSchemaBtn">Save Changes</button></div>`;
       document.getElementById('saveSchemaBtn').addEventListener('click', onSave);
     } else {
-      saveArea.innerHTML = '';
+      saveAreaEl.innerHTML = '';
     }
   }
 
-  area.querySelectorAll('#tgtCols input, #tgtCols select').forEach((el) => {
+  panelEl.querySelectorAll('input, select').forEach((el) => {
     el.addEventListener('input', refreshDirty);
     el.addEventListener('change', refreshDirty);
   });
@@ -755,11 +684,11 @@ async function renderMongoSplit(area, id, tableName) {
     const changed = [];
     const diffLines = [];
     rows.forEach((r) => {
-      const cur = readRow(r.field_name);
+      const cur = readCur(r.field_name);
       const orig = original[r.field_name];
       if (isDirty(cur, orig)) {
-        changed.push({ collection: tableName, ...cur });
-        diffLines.push(`${r.field_name}: ${orig.pg_type} → ${cur.pg_type}${orig.strategy !== cur.strategy ? ` (strategy ${orig.strategy} → ${cur.strategy})` : ''}`);
+        changed.push({ collection, ...cur });
+        diffLines.push(`${r.field_name}: ${orig.pg_type} → ${cur.pg_type}${showStrategy && orig.strategy !== cur.strategy ? ` (strategy ${orig.strategy} → ${cur.strategy})` : ''}`);
       }
     });
     if (changed.length === 0) return;
@@ -773,14 +702,151 @@ async function renderMongoSplit(area, id, tableName) {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Saving…';
     try {
-      await api.putSchemaPlanOverrides(id, changed);
-      await renderMongoSplit(area, id, tableName);
+      await api.putSchemaPlanOverrides(projectId, changed);
+      if (onSaved) await onSaved();
     } catch (err) {
-      document.getElementById('saveArea').insertAdjacentHTML('beforeend', errorBanner('Save failed: ' + err.message));
+      saveAreaEl.insertAdjacentHTML('beforeend', errorBanner('Save failed: ' + err.message));
       btn.disabled = false;
       btn.textContent = 'Save Changes';
     }
   }
+}
+
+async function renderRelationalSplit(area, id, tableName, locked, targetDialect) {
+  area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading schema…</div>`;
+  let schema, plan;
+  try {
+    [schema, plan] = await Promise.all([
+      api.getTableSchema(id, tableName),
+      api.getSchemaPlan(id),
+    ]);
+  } catch (err) {
+    area.innerHTML = errorBanner('Could not load table schema: ' + err.message, { retry: () => renderRelationalSplit(area, id, tableName, locked, targetDialect) });
+    return;
+  }
+  const srcCols = (schema.source && schema.source.columns) || [];
+  const tgtCols = (schema.target && schema.target.columns) || [];
+  const tgtExists = tgtCols.length > 0;
+  const tgtByName = {};
+  tgtCols.forEach((c) => { tgtByName[c.name] = c; });
+  const overrideByField = {};
+  (plan[tableName] || []).forEach((r) => { overrideByField[r.field_name] = r; });
+
+  // Normalize each source column into a SchemaPlanRow-shaped row: a saved
+  // override wins, else the existing target column (table already exists on
+  // the target), else the source column's own type as a starting suggestion.
+  const rows = srcCols.map((c) => {
+    const override = overrideByField[c.name];
+    const tgtCol = tgtByName[c.name];
+    return {
+      field_name: c.name,
+      pg_column: c.name,
+      pg_type: override ? override.pg_type : (tgtCol ? tgtCol.type : c.type),
+      strategy: 'direct',
+      is_pk: override ? override.is_pk : (tgtCol ? tgtCol.primary_key : c.primary_key),
+      nullable: override ? override.nullable : (tgtCol ? tgtCol.nullable : c.nullable),
+      overridden: !!override,
+    };
+  });
+
+  if (locked || rows.length === 0) {
+    area.innerHTML = `
+      ${!tgtExists ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created automatically when the migration runs.</div>' : ''}
+      <div class="split">
+        <div><h3>Source</h3>${srcCols.map((c) => colRowReadOnly(c)).join('') || '<div class="hint">No columns.</div>'}</div>
+        <div><h3>Target ${tgtExists ? '' : '(not yet created)'}</h3>
+          ${rows.map((r) => colRowReadOnly({ name: r.pg_column, type: r.pg_type, nullable: r.nullable, primary_key: r.is_pk }, !tgtByName[r.field_name])).join('') || '<div class="hint">No columns.</div>'}
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  area.innerHTML = `
+    ${!tgtExists
+      ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created with these settings when the migration runs.</div>'
+      : '<div class="banner info">This table already exists on the target. Type overrides only take effect if the migration is run with "Drop &amp; recreate target tables".</div>'}
+    <div class="banner info">Changing the type edits the <code>CREATE TABLE</code> statement only — row values are transferred as-is, so make sure the new type can still hold the source data.</div>
+    <div class="split">
+      <div><h3>Source</h3>${srcCols.map((c) => colRowReadOnly(c)).join('') || '<div class="hint">No columns.</div>'}</div>
+      <div><h3>Suggested target</h3><div id="tgtCols"></div></div>
+    </div>
+    <div id="saveArea"></div>
+  `;
+
+  mountEditableTargetPanel(
+    document.getElementById('tgtCols'),
+    document.getElementById('saveArea'),
+    rows,
+    {
+      collection: tableName,
+      projectId: id,
+      showRename: false,
+      showStrategy: false,
+      typeOptions: typesForDialect(targetDialect),
+      onSaved: () => renderRelationalSplit(area, id, tableName, locked, targetDialect),
+    }
+  );
+}
+
+async function renderMongoSplit(area, id, tableName, locked) {
+  area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading schema plan…</div>`;
+  let plan;
+  try {
+    plan = await api.getSchemaPlan(id);
+  } catch (err) {
+    area.innerHTML = errorBanner('Could not load schema plan: ' + err.message, { retry: () => renderMongoSplit(area, id, tableName, locked) });
+    return;
+  }
+  const rows = plan[tableName];
+  if (!rows || rows.length === 0) {
+    area.innerHTML = `
+      <div class="banner info">No schema plan found for this collection yet.</div>
+      <a class="btn" href="#/projects/${encodeURIComponent(id)}">Back to collections (Re-analyze there)</a>
+    `;
+    return;
+  }
+
+  if (locked) {
+    area.innerHTML = `
+      <div class="split">
+        <div><h3>Source (MongoDB field)</h3>${rows.map((r) => `
+          <div class="col-row"><div class="col-name">${esc(r.field_name)} ${r.is_pk ? '<span class="badge ok">PK</span>' : ''}</div></div>
+        `).join('')}</div>
+        <div><h3>Target (PostgreSQL)</h3>${rows.map((r) => colRowReadOnly({ name: r.pg_column, type: r.pg_type, nullable: r.nullable, primary_key: r.is_pk })).join('')}</div>
+      </div>
+    `;
+    return;
+  }
+
+  area.innerHTML = `
+    <div class="split">
+      <div><h3>Source (MongoDB field)</h3><div id="srcCols">
+        ${rows.map((r) => `
+          <div class="col-row">
+            <div class="col-name">${esc(r.field_name)} ${r.is_pk ? '<span class="badge ok">PK</span>' : ''}</div>
+            ${r.overridden ? '<div class="hint">previously overridden</div>' : ''}
+          </div>
+        `).join('')}
+      </div></div>
+      <div><h3>Suggested target (PostgreSQL)</h3><div id="tgtCols"></div></div>
+    </div>
+    <div id="saveArea"></div>
+  `;
+
+  mountEditableTargetPanel(
+    document.getElementById('tgtCols'),
+    document.getElementById('saveArea'),
+    rows,
+    {
+      collection: tableName,
+      projectId: id,
+      showRename: true,
+      showStrategy: true,
+      typeOptions: PG_TYPES,
+      onSaved: () => renderMongoSplit(area, id, tableName, locked),
+    }
+  );
 }
 
 async function renderTableDetail(id, tableName) {
@@ -793,22 +859,212 @@ async function renderTableDetail(id, tableName) {
     app.innerHTML = errorBanner('Project not found: ' + err.message) + `<a class="btn" href="#/">Back to projects</a>`;
     return;
   }
-  const backHash = `#/projects/${encodeURIComponent(id)}/tables`;
-  const label = project.source_config.type === 'mongodb' ? 'Collections' : 'Tables';
+  let locked = false;
+  let lockedStatus = '';
+  try {
+    const active = findActiveMigration(await api.listMigrations(id));
+    if (active) { locked = true; lockedStatus = active.status; }
+  } catch (err) { /* a failed migrations lookup shouldn't block viewing the table */ }
+
   app.innerHTML = `
     <div class="breadcrumb">
-      <a href="#/">Projects</a> / <a href="#/projects/${encodeURIComponent(id)}">${esc(project.name)}</a> /
-      <a href="${backHash}">${label}</a> / ${esc(tableName)}
+      <a href="#/">Projects</a> / <a href="#/projects/${encodeURIComponent(id)}">${esc(project.name)}</a> / ${esc(tableName)}
     </div>
     <div class="page-header"><h1 class="mono">${esc(tableName)}</h1></div>
+    ${locked ? `<div class="banner info">A migration is currently ${esc(lockedStatus)} for this project — schema editing is disabled until it finishes.</div>` : ''}
     <div id="detailArea"></div>
   `;
   const area = document.getElementById('detailArea');
   if (project.source_config.type === 'mongodb') {
-    await renderMongoSplit(area, id, tableName);
+    await renderMongoSplit(area, id, tableName, locked);
   } else {
-    await renderRelationalSplit(area, id, tableName);
+    await renderRelationalSplit(area, id, tableName, locked, project.target_config.type);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Migration actions + status (shared by the tables screen card and the full
+// progress page)
+// ---------------------------------------------------------------------------
+
+// mountMigActions renders Pause/Resume/Cancel buttons for the given phase
+// into actionsEl and wires them up. onDone fires after a successful action
+// so the caller can refresh its own view; errors render into errorArea.
+function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
+  const buttons = [];
+  if (['in_progress', 'schema', 'post_schema'].includes(phase)) buttons.push('<button class="btn" id="pauseBtn">Pause</button>');
+  if (phase === 'paused') buttons.push('<button class="btn primary" id="resumeBtn">Resume</button>');
+  if (!['complete', 'failed'].includes(phase)) buttons.push('<button class="btn danger" id="cancelBtn">Cancel</button>');
+  actionsEl.innerHTML = buttons.join(' ');
+
+  async function doAction(action) {
+    try {
+      await api.patchMigration(migId, action);
+      if (onDone) onDone();
+    } catch (err) {
+      if (errorArea) errorArea.insertAdjacentHTML('afterbegin', errorBanner(action + ' failed: ' + err.message));
+    }
+  }
+
+  const pauseBtn = actionsEl.querySelector('#pauseBtn');
+  if (pauseBtn) pauseBtn.addEventListener('click', () => doAction('pause'));
+  const resumeBtn = actionsEl.querySelector('#resumeBtn');
+  if (resumeBtn) resumeBtn.addEventListener('click', () => doAction('resume'));
+  const cancelBtn = actionsEl.querySelector('#cancelBtn');
+  if (cancelBtn) cancelBtn.addEventListener('click', async () => {
+    const ok = await confirmModal({
+      title: 'Cancel migration?',
+      body: 'This stops the migration. Rows already written are kept, but the run is marked failed and cannot be resumed.',
+      confirmLabel: 'Cancel Migration',
+      danger: true,
+    });
+    if (!ok) return;
+    await doAction('cancel');
+  });
+}
+
+// mountMigSection renders the migration status/controls card on a project's
+// tables screen: a live-polling progress card with Pause/Resume/Cancel while
+// a migration is pending/in_progress/paused, or a "Run Migration" form plus
+// history otherwise. Returns a cleanup function that stops polling.
+// onLockChange(locked, status) fires whenever table rows should lock/unlock.
+function mountMigSection(container, projectId, onLockChange) {
+  let stopped = false;
+  let timer = null;
+  function clearTimer() {
+    if (timer) { clearTimeout(timer); timer = null; }
+  }
+
+  async function render() {
+    if (stopped) return;
+    container.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading migration status…</div>`;
+    let migs;
+    try {
+      migs = await api.listMigrations(projectId);
+    } catch (err) {
+      container.innerHTML = errorBanner('Could not load migrations: ' + err.message, { retry: render });
+      onLockChange(false, '');
+      return;
+    }
+    if (stopped) return;
+    const active = findActiveMigration(migs);
+    if (active) {
+      onLockChange(true, active.status);
+      mountActiveCard(active.id);
+    } else {
+      onLockChange(false, '');
+      mountStartForm(migs);
+    }
+  }
+
+  function mountActiveCard(migId) {
+    container.innerHTML = `
+      <div class="page-header">
+        <h2>Migration</h2>
+        <div class="actions-row" id="migActions"></div>
+      </div>
+      <div id="migCardBody"></div>
+      <div class="actions-row"><a class="btn small" href="#/migrations/${encodeURIComponent(migId)}">View full progress</a></div>
+    `;
+
+    async function tick() {
+      if (stopped) return;
+      try {
+        const snap = await api.getStats(migId);
+        if (stopped) return;
+        const body = document.getElementById('migCardBody');
+        const actionsEl = document.getElementById('migActions');
+        if (!body || !actionsEl) return;
+        const rows = snap.Rows || {};
+        const pct = rows.Total > 0 ? Math.round((rows.Transferred * 100) / rows.Total) : 0;
+        const phaseBadge = snap.Phase === 'complete' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'paused' ? 'warn' : 'progress';
+        body.innerHTML = `
+          <div class="stat-grid">
+            <div class="stat-box"><div class="label">Phase</div><div class="value"><span class="badge ${phaseBadge}">${esc(snap.Phase)}</span></div></div>
+            <div class="stat-box"><div class="label">Rows</div><div class="value">${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</div></div>
+            <div class="stat-box"><div class="label">ETA</div><div class="value">${snap.ETASeconds ? fmtDuration(snap.ETASeconds) : '—'}</div></div>
+          </div>
+          <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : ''}" style="width:${pct}%"></div></div>
+        `;
+        mountMigActions(actionsEl, migId, snap.Phase, {
+          onDone: () => { clearTimer(); tick(); },
+          errorArea: body,
+        });
+        if (['complete', 'failed'].includes(snap.Phase)) {
+          clearTimer();
+          render();
+          return;
+        }
+      } catch (err) {
+        const body = document.getElementById('migCardBody');
+        if (body) body.insertAdjacentHTML('afterbegin', errorBanner('Stats fetch failed: ' + err.message));
+      }
+      if (!stopped) timer = setTimeout(tick, 1500);
+    }
+    tick();
+  }
+
+  function mountStartForm(migs) {
+    container.innerHTML = `
+      <h2>Migration</h2>
+      <details class="advanced" open>
+        <summary>Run a migration</summary>
+        <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeNone" value="none" checked><label for="modeNone">Keep existing target schema/data</label></div>
+        <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
+        <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
+        <div class="field-row">
+          <div><label>Table workers</label><input type="number" id="m-workers" value="1"></div>
+          <div><label>Batch size</label><input type="number" id="m-batch" value="1000"></div>
+        </div>
+      </details>
+      <div id="startErr"></div>
+      <button class="btn primary" id="startMigBtn">Run Migration</button>
+      <div style="margin-top:18px;">
+        <details class="advanced"><summary>History</summary><div id="migHistory"></div></details>
+      </div>
+    `;
+    document.getElementById('startMigBtn').addEventListener('click', async () => {
+      const mode = document.querySelector('input[name=schemaMode]:checked').value;
+      const body = {
+        table_workers: parseInt(document.getElementById('m-workers').value, 10) || 1,
+        batch_size: parseInt(document.getElementById('m-batch').value, 10) || 1000,
+        recreate_schema: mode === 'recreate',
+        truncate: mode === 'truncate',
+      };
+      const btn = document.getElementById('startMigBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Starting…';
+      try {
+        const mig = await api.startMigration(projectId, body);
+        navigate(`#/migrations/${encodeURIComponent(mig.id)}`);
+      } catch (err) {
+        document.getElementById('startErr').innerHTML = errorBanner('Could not start migration: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'Run Migration';
+      }
+    });
+
+    const histEl = document.getElementById('migHistory');
+    if (!migs || migs.length === 0) {
+      histEl.innerHTML = `<div class="hint">No migrations run yet.</div>`;
+    } else {
+      histEl.innerHTML = migs.map((m) => `
+        <div class="list-row" data-id="${esc(m.id)}">
+          <div>
+            <div class="name mono">${esc(m.id.slice(0, 8))}</div>
+            <div class="meta">created ${esc(fmtDate(m.created_at))}${m.error ? ' · ' + esc(m.error) : ''}</div>
+          </div>
+          <span class="badge ${esc(m.status)}">${esc(m.status)}</span>
+        </div>
+      `).join('');
+      histEl.querySelectorAll('.list-row').forEach((row) => {
+        row.addEventListener('click', () => navigate(`#/migrations/${encodeURIComponent(row.dataset.id)}`));
+      });
+    }
+  }
+
+  render();
+  return () => { stopped = true; clearTimer(); };
 }
 
 // ---------------------------------------------------------------------------
@@ -854,44 +1110,14 @@ async function renderMigrationProgress(migId) {
     if (timer) { clearTimeout(timer); timer = null; }
   }
 
-  function renderActions(phase) {
-    const actionsEl = document.getElementById('migActions');
-    if (!actionsEl) return;
-    const buttons = [];
-    if (['in_progress', 'schema', 'post_schema'].includes(phase)) buttons.push('<button class="btn" id="pauseBtn">Pause</button>');
-    if (phase === 'paused') buttons.push('<button class="btn primary" id="resumeBtn">Resume</button>');
-    if (!['complete', 'failed'].includes(phase)) buttons.push('<button class="btn danger" id="cancelBtn">Cancel</button>');
-    actionsEl.innerHTML = buttons.join(' ');
-    const pauseBtn = document.getElementById('pauseBtn');
-    if (pauseBtn) pauseBtn.addEventListener('click', () => doAction('pause'));
-    const resumeBtn = document.getElementById('resumeBtn');
-    if (resumeBtn) resumeBtn.addEventListener('click', () => doAction('resume'));
-    const cancelBtn = document.getElementById('cancelBtn');
-    if (cancelBtn) cancelBtn.addEventListener('click', async () => {
-      const ok = await confirmModal({
-        title: 'Cancel migration?',
-        body: 'This stops the migration. Rows already written are kept, but the run is marked failed and cannot be resumed.',
-        confirmLabel: 'Cancel Migration',
-        danger: true,
-      });
-      if (!ok) return;
-      await doAction('cancel');
-    });
-  }
-
-  async function doAction(action) {
-    try {
-      await api.patchMigration(migId, action);
-      clearTimer();
-      tick();
-    } catch (err) {
-      const area = document.getElementById('progressArea');
-      if (area) area.insertAdjacentHTML('afterbegin', errorBanner(action + ' failed: ' + err.message));
-    }
-  }
-
   function renderProgress(snap) {
-    renderActions(snap.Phase);
+    const actionsEl = document.getElementById('migActions');
+    if (actionsEl) {
+      mountMigActions(actionsEl, migId, snap.Phase, {
+        onDone: () => { clearTimer(); tick(); },
+        errorArea: document.getElementById('progressArea'),
+      });
+    }
     const rows = snap.Rows || {};
     const pct = rows.Total > 0 ? Math.round((rows.Transferred * 100) / rows.Total) : 0;
     const phaseBadge = snap.Phase === 'complete' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'paused' ? 'warn' : 'progress';
@@ -999,11 +1225,12 @@ function router() {
     if (parts[1] === 'new') return renderProjectCreate();
     const id = parts[1];
     if (!id) return renderProjectsList();
+    if (parts[2] === 'settings') return renderProjectSettings(id);
     if (parts[2] === 'tables') {
       if (parts[3]) return renderTableDetail(id, parts[3]);
-      return renderTablesList(id);
+      return renderTablesList(id); // kept as an alias of the bare project route below
     }
-    return renderProjectDetail(id);
+    return renderTablesList(id); // project's default landing page is now its table list
   }
   if (parts[0] === 'migrations' && parts[1]) return renderMigrationProgress(parts[1]);
   return render404();
