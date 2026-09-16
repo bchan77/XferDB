@@ -92,6 +92,62 @@ func (h *ProjectsHandler) GetProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// UpdateProject handles PUT /api/v1/projects/{id}. It updates name,
+// description, source_config, and target_config. Password fields left empty
+// (in either config) keep the currently stored password — a client that
+// never displays the stored password back to the user (so it has nothing to
+// resubmit) can still edit host/port/etc. without clearing it. The same
+// applies to the dsn field, since for MongoDB it is the only place
+// credentials live.
+func (h *ProjectsHandler) UpdateProject(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	existing, err := h.DB.GetProject(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	var body struct {
+		Name         string                    `json:"name"`
+		Description  string                    `json:"description"`
+		SourceConfig adapters.ConnectionConfig `json:"source_config"`
+		TargetConfig adapters.ConnectionConfig `json:"target_config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	if body.SourceConfig.Password == "" {
+		body.SourceConfig.Password = existing.SourceConfig.Password
+	}
+	if body.SourceConfig.DSN == "" {
+		body.SourceConfig.DSN = existing.SourceConfig.DSN
+	}
+	if body.TargetConfig.Password == "" {
+		body.TargetConfig.Password = existing.TargetConfig.Password
+	}
+	if body.TargetConfig.DSN == "" {
+		body.TargetConfig.DSN = existing.TargetConfig.DSN
+	}
+
+	existing.Name = body.Name
+	existing.Description = body.Description
+	existing.SourceConfig = body.SourceConfig
+	existing.TargetConfig = body.TargetConfig
+
+	if err := h.DB.UpdateProject(r.Context(), existing); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.Log.Info("project.updated", "project_id", id, "name", existing.Name)
+	writeJSON(w, http.StatusOK, existing)
+}
+
 // DeleteProject handles DELETE /api/v1/projects/{id}.
 func (h *ProjectsHandler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -243,6 +299,42 @@ func (h *ProjectsHandler) Analyze(w http.ResponseWriter, r *http.Request) {
 		"compatible", result.Compatible,
 		"issues", issueCount,
 	)
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetTableSchema handles GET /api/v1/projects/{id}/tables/{table}.
+// Returns the source and target column schemas for one table so a client can
+// render a side-by-side view. Target is nil (or empty) when the table
+// doesn't exist there yet — it will be created at migration time. Errors
+// connecting to either side are swallowed per-side (returned as null) rather
+// than failing the whole request, since one side being unreachable shouldn't
+// block viewing the other.
+func (h *ProjectsHandler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	table := r.PathValue("table")
+	p, err := h.DB.GetProject(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	ctx := r.Context()
+	var result struct {
+		Source *adapters.TableSchema `json:"source"`
+		Target *adapters.TableSchema `json:"target"`
+	}
+
+	if src, err := connectSource(ctx, p.SourceConfig); err == nil {
+		defer src.Close()
+		result.Source, _ = src.GetSchema(ctx, table)
+	}
+	if tgt, err := registry.NewTarget(p.TargetConfig.Type); err == nil {
+		if err := tgt.Connect(ctx, p.TargetConfig); err == nil {
+			defer tgt.Close()
+			result.Target, _ = tgt.GetSchema(ctx, table)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, result)
 }
 

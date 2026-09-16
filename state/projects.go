@@ -68,6 +68,38 @@ func (m *MetaDB) CreateProject(ctx context.Context, p *adapters.Project) error {
 	return nil
 }
 
+// UpdateProject persists changes to name, description, source_config, and
+// target_config for an existing project. CreatedAt and TransferConfig are
+// left untouched — TransferConfig is adjusted per-migration via start
+// overrides, not through this endpoint.
+func (m *MetaDB) UpdateProject(ctx context.Context, p *adapters.Project) error {
+	src, err := json.Marshal(p.SourceConfig)
+	if err != nil {
+		return fmt.Errorf("encode source_config: %w", err)
+	}
+	tgt, err := json.Marshal(p.TargetConfig)
+	if err != nil {
+		return fmt.Errorf("encode target_config: %w", err)
+	}
+
+	res, err := m.db.ExecContext(ctx, `
+		UPDATE projects SET name = ?, description = ?, source_config = ?, target_config = ?
+		WHERE id = ?`,
+		p.Name, p.Description, string(src), string(tgt), p.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update project: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update project: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update project: no project with id %s", p.ID)
+	}
+	return nil
+}
+
 // GetProject returns a project by ID.
 func (m *MetaDB) GetProject(ctx context.Context, id string) (*adapters.Project, error) {
 	var row projectRow
