@@ -139,6 +139,7 @@ main {
 .badge.fail, .badge.failed, .badge.incompatible { background: var(--danger-bg); color: var(--danger); }
 .badge.warn, .badge.paused, .badge.pending { background: var(--warn-bg); color: var(--warn); }
 .badge.progress, .badge.in_progress { background: #eff6ff; color: var(--accent); }
+.badge.cancelled { background: var(--border); color: var(--muted); }
 @media (prefers-color-scheme: dark) { .badge.progress, .badge.in_progress { background: #17233a; } }
 
 .empty-state {
@@ -237,6 +238,7 @@ table.kv td:first-child { color: var(--muted); width: 130px; }
 .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
 .progress-bar .fill.done { background: var(--ok); }
 .progress-bar .fill.failed { background: var(--danger); }
+.progress-bar .fill.cancelled { background: var(--muted); }
 
 .table-progress-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .table-progress-row:last-child { border-bottom: none; }

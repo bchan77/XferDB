@@ -10,7 +10,7 @@ import (
 // across migration runs so --status always shows the full picture.
 type ProjectTableStatus struct {
 	TableName       string
-	Status          string // "not_started", "in_progress", "done", "failed"
+	Status          string // "not_started", "in_progress", "done", "failed", "cancelled"
 	RowsTransferred int64
 	RowsTotal       int64
 	LastMigrationID string

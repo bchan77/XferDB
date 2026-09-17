@@ -260,7 +260,11 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 		if hasCancel {
 			cancel()
 		}
-		h.DB.SetMigrationError(r.Context(), id, fmt.Errorf("cancelled by user"))
+		// Fast-path write so the DB reflects "cancelled" immediately; the
+		// engine goroutine converges to the same state itself once it notices
+		// ctx is cancelled (see Engine.fail), so this is a safety net rather
+		// than the only writer.
+		h.DB.SetMigrationCancelled(r.Context(), id) //nolint:errcheck
 		h.Log.Info("migration.cancelled", "migration_id", id)
 	default:
 		writeError(w, http.StatusBadRequest, "action must be 'pause', 'resume', or 'cancel'")

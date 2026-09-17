@@ -17,9 +17,11 @@ const (
 	EventTableStart      EventKind = "table_start"     // row count done; data transfer starting
 	EventBatch           EventKind = "batch"
 	EventTableDone       EventKind = "table_done"
-	EventTableFailed     EventKind = "table_failed" // table failed; migration continues
+	EventTableFailed     EventKind = "table_failed"    // table failed; migration continues
+	EventTableCancelled  EventKind = "table_cancelled" // table's transfer stopped because the migration was cancelled
 	EventComplete        EventKind = "complete"
 	EventError           EventKind = "error"
+	EventCancelled       EventKind = "cancelled" // migration stopped by explicit user cancel/delete, not a real failure
 	EventPaused          EventKind = "paused"
 	EventResumed         EventKind = "resumed"
 	EventSchemaPhase     EventKind = "schema_phase"

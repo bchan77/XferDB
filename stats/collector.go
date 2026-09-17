@@ -102,7 +102,15 @@ func (c *Collector) SetSaver(s StatsSaver) {
 // Start begins consuming events in a background goroutine. It returns when the
 // events channel is closed or ctx is cancelled.
 func (c *Collector) Start(ctx context.Context) {
+	// Closed once the main loop below has applied every event, including
+	// whatever terminal one (EventComplete/EventError/EventCancelled) the
+	// engine emits right before closing c.events. The persist goroutine
+	// waits on this — rather than reacting to ctx.Done() on its own — so its
+	// "final snapshot" write can't race ahead of that terminal event and
+	// persist a stale in-flight phase (e.g. "paused").
+	eventsDone := make(chan struct{})
 	go func() {
+		defer close(eventsDone)
 		// Drain until the engine closes the events channel (always does, via
 		// defer, on every exit path: success, failure, or cancellation) rather
 		// than also racing ctx.Done() here. Cancelling a migration cancels this
@@ -143,9 +151,13 @@ func (c *Collector) Start(ctx context.Context) {
 			defer ticker.Stop()
 			for {
 				select {
-				case <-ctx.Done():
-					// Persist final snapshot on shutdown.
-					c.persistSnapshot(ctx)
+				case <-eventsDone:
+					// Persist the final snapshot now that every event (including
+					// the terminal one) has been applied. Use a ctx that ignores
+					// ctx's own cancellation — otherwise the write silently fails
+					// (e.g. on a user Cancel, which is exactly when we most want
+					// the final "cancelled" data point saved).
+					c.persistSnapshot(context.WithoutCancel(ctx))
 					return
 				case <-ticker.C:
 					c.persistSnapshot(ctx)
@@ -420,6 +432,25 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			"error", ev.Err,
 		)
 
+	case engine.EventTableCancelled:
+		// Ensure table is in tableIndex (earlier events may have been dropped).
+		idx, ok := c.tableIndex[ev.TableName]
+		if !ok {
+			idx = len(s.TableDetails)
+			s.TableDetails = append(s.TableDetails, TableDetail{
+				Name:  ev.TableName,
+				Total: ev.RowsTotal,
+			})
+			c.tableIndex[ev.TableName] = idx
+		} else {
+			if s.TableDetails[idx].Status == "in_progress" {
+				s.Tables.InProgress--
+			}
+		}
+		s.Tables.Cancelled++
+		s.TableDetails[idx].Status = "cancelled"
+		c.log.Info("migration.table_cancelled", "table", ev.TableName)
+
 	case engine.EventComplete:
 		s.Phase = "complete"
 		s.CurrentTable = ""
@@ -442,6 +473,13 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			"error", ev.Err,
 			"elapsed", fmt.Sprintf("%.1fs", elapsed.Seconds()),
 		)
+
+	case engine.EventCancelled:
+		s.Phase = "cancelled"
+		s.CurrentTable = ""
+		s.ETASeconds = 0
+		elapsed := time.Since(c.startedAt)
+		c.log.Info("migration.cancelled_by_user", "elapsed", fmt.Sprintf("%.1fs", elapsed.Seconds()))
 
 	case engine.EventPaused:
 		s.Phase = "paused"

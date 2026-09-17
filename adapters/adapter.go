@@ -63,6 +63,7 @@ const (
 	StatusPaused     MigrationStatus = "paused"
 	StatusCompleted  MigrationStatus = "completed"
 	StatusFailed     MigrationStatus = "failed"
+	StatusCancelled  MigrationStatus = "cancelled"
 )
 
 // Migration represents a single migration run scoped to a project.
