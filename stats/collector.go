@@ -103,16 +103,14 @@ func (c *Collector) SetSaver(s StatsSaver) {
 // events channel is closed or ctx is cancelled.
 func (c *Collector) Start(ctx context.Context) {
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok := <-c.events:
-				if !ok {
-					return
-				}
-				c.apply(ev)
-			}
+		// Drain until the engine closes the events channel (always does, via
+		// defer, on every exit path: success, failure, or cancellation) rather
+		// than also racing ctx.Done() here. Cancelling a migration cancels this
+		// same ctx, and if that raced ahead of the channel it could win before
+		// the engine's final EventError/EventComplete was consumed, freezing
+		// Snapshot() at a stale phase (e.g. "paused") forever.
+		for ev := range c.events {
+			c.apply(ev)
 		}
 	}()
 
