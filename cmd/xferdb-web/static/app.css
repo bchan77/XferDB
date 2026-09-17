@@ -207,6 +207,15 @@ table.kv td:first-child { color: var(--muted); width: 130px; }
 @media (max-width: 640px) { .split { grid-template-columns: 1fr; } }
 .split h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin: 0 0 10px; }
 
+/* Schema split-view rows: source and target cells for the same field are
+   emitted as a single interleaved grid (not two independently-stacked
+   columns), so a field's source and target cell always share one grid row
+   and stay aligned even when the target cell is taller (e.g. it has the
+   nullable/PK checkbox row and the source cell doesn't). */
+.schema-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; align-items: start; }
+.schema-rows .col-row { margin-bottom: 0; }
+@media (max-width: 640px) { .schema-rows { grid-template-columns: 1fr; } }
+
 .col-row {
   display: grid;
   grid-template-columns: 1fr;

@@ -638,17 +638,19 @@ function readEditedRow(fieldName, orig, { showRename, showStrategy }) {
   };
 }
 
-// mountEditableTargetPanel mounts editable rows (SchemaPlanRow-shaped) into
-// panelEl with dirty-tracking, a Save button that appears in saveAreaEl once
-// something changed, and a confirm-then-PUT save flow against the
-// project-wide schema-plan override endpoint. Shared by the Mongo→Postgres
-// field editor and the generalized relational column-type editor.
+// mountEditableTargetPanel wires up dirty-tracking, a Save button that
+// appears in saveAreaEl once something changed, and a confirm-then-PUT save
+// flow against the project-wide schema-plan override endpoint, for editable
+// rows (SchemaPlanRow-shaped) the caller has already rendered into the DOM
+// via editableRow() — each field's target cell interleaved right after its
+// source cell so they share one grid row (see .schema-rows in app.css).
+// panelEl just needs to contain all of it so the input/select listeners
+// below can be scoped to it. Shared by the Mongo→Postgres field editor and
+// the generalized relational column-type editor.
 function mountEditableTargetPanel(panelEl, saveAreaEl, rows, opts) {
-  const { collection, projectId, showRename = true, showStrategy = true, typeOptions = PG_TYPES, onSaved } = opts;
+  const { collection, projectId, showRename = true, showStrategy = true, onSaved } = opts;
   const original = {};
   rows.forEach((r) => { original[r.field_name] = { ...r }; });
-
-  panelEl.innerHTML = rows.map((r) => editableRow(r, { showRename, showStrategy, typeOptions })).join('');
 
   function readCur(fieldName) {
     return readEditedRow(fieldName, original[fieldName], { showRename, showStrategy });
@@ -752,38 +754,38 @@ async function renderRelationalSplit(area, id, tableName, locked, targetDialect)
   if (locked || rows.length === 0) {
     area.innerHTML = `
       ${!tgtExists ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created automatically when the migration runs.</div>' : ''}
-      <div class="split">
-        <div><h3>Source</h3>${srcCols.map((c) => colRowReadOnly(c)).join('') || '<div class="hint">No columns.</div>'}</div>
-        <div><h3>Target ${tgtExists ? '' : '(not yet created)'}</h3>
-          ${rows.map((r) => colRowReadOnly({ name: r.pg_column, type: r.pg_type, nullable: r.nullable, primary_key: r.is_pk }, !tgtByName[r.field_name])).join('') || '<div class="hint">No columns.</div>'}
-        </div>
+      <div class="split"><h3>Source</h3><h3>Target ${tgtExists ? '' : '(not yet created)'}</h3></div>
+      <div class="schema-rows">
+        ${srcCols.map((c, i) => colRowReadOnly(c) +
+          colRowReadOnly({ name: rows[i].pg_column, type: rows[i].pg_type, nullable: rows[i].nullable, primary_key: rows[i].is_pk }, !tgtByName[rows[i].field_name])
+        ).join('') || '<div class="hint">No columns.</div>'}
       </div>
     `;
     return;
   }
+
+  const editOpts = { showRename: false, showStrategy: false, typeOptions: typesForDialect(targetDialect) };
 
   area.innerHTML = `
     ${!tgtExists
       ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created with these settings when the migration runs.</div>'
       : '<div class="banner info">This table already exists on the target. Type overrides only take effect if the migration is run with "Drop &amp; recreate target tables".</div>'}
     <div class="banner info">Changing the type edits the <code>CREATE TABLE</code> statement only — row values are transferred as-is, so make sure the new type can still hold the source data.</div>
-    <div class="split">
-      <div><h3>Source</h3>${srcCols.map((c) => colRowReadOnly(c)).join('') || '<div class="hint">No columns.</div>'}</div>
-      <div><h3>Suggested target</h3><div id="tgtCols"></div></div>
+    <div class="split"><h3>Source</h3><h3>Suggested target</h3></div>
+    <div class="schema-rows" id="schemaRows">
+      ${srcCols.map((c, i) => colRowReadOnly(c) + editableRow(rows[i], editOpts)).join('')}
     </div>
     <div id="saveArea"></div>
   `;
 
   mountEditableTargetPanel(
-    document.getElementById('tgtCols'),
+    document.getElementById('schemaRows'),
     document.getElementById('saveArea'),
     rows,
     {
       collection: tableName,
       projectId: id,
-      showRename: false,
-      showStrategy: false,
-      typeOptions: typesForDialect(targetDialect),
+      ...editOpts,
       onSaved: () => renderRelationalSplit(area, id, tableName, locked, targetDialect),
     }
   );
@@ -807,43 +809,45 @@ async function renderMongoSplit(area, id, tableName, locked) {
     return;
   }
 
+  function sourceCellHTML(r) {
+    return `
+      <div class="col-row">
+        <div class="col-name">${esc(r.field_name)} ${r.is_pk ? '<span class="badge ok">PK</span>' : ''}</div>
+        ${r.overridden ? '<div class="hint">previously overridden</div>' : ''}
+      </div>
+    `;
+  }
+
   if (locked) {
     area.innerHTML = `
-      <div class="split">
-        <div><h3>Source (MongoDB field)</h3>${rows.map((r) => `
-          <div class="col-row"><div class="col-name">${esc(r.field_name)} ${r.is_pk ? '<span class="badge ok">PK</span>' : ''}</div></div>
-        `).join('')}</div>
-        <div><h3>Target (PostgreSQL)</h3>${rows.map((r) => colRowReadOnly({ name: r.pg_column, type: r.pg_type, nullable: r.nullable, primary_key: r.is_pk })).join('')}</div>
+      <div class="split"><h3>Source (MongoDB field)</h3><h3>Target (PostgreSQL)</h3></div>
+      <div class="schema-rows">
+        ${rows.map((r) => sourceCellHTML(r) +
+          colRowReadOnly({ name: r.pg_column, type: r.pg_type, nullable: r.nullable, primary_key: r.is_pk })
+        ).join('')}
       </div>
     `;
     return;
   }
 
+  const editOpts = { showRename: true, showStrategy: true, typeOptions: PG_TYPES };
+
   area.innerHTML = `
-    <div class="split">
-      <div><h3>Source (MongoDB field)</h3><div id="srcCols">
-        ${rows.map((r) => `
-          <div class="col-row">
-            <div class="col-name">${esc(r.field_name)} ${r.is_pk ? '<span class="badge ok">PK</span>' : ''}</div>
-            ${r.overridden ? '<div class="hint">previously overridden</div>' : ''}
-          </div>
-        `).join('')}
-      </div></div>
-      <div><h3>Suggested target (PostgreSQL)</h3><div id="tgtCols"></div></div>
+    <div class="split"><h3>Source (MongoDB field)</h3><h3>Suggested target (PostgreSQL)</h3></div>
+    <div class="schema-rows" id="schemaRows">
+      ${rows.map((r) => sourceCellHTML(r) + editableRow(r, editOpts)).join('')}
     </div>
     <div id="saveArea"></div>
   `;
 
   mountEditableTargetPanel(
-    document.getElementById('tgtCols'),
+    document.getElementById('schemaRows'),
     document.getElementById('saveArea'),
     rows,
     {
       collection: tableName,
       projectId: id,
-      showRename: true,
-      showStrategy: true,
-      typeOptions: PG_TYPES,
+      ...editOpts,
       onSaved: () => renderMongoSplit(area, id, tableName, locked),
     }
   );
