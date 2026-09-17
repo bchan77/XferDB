@@ -7,6 +7,13 @@ let cleanup = null;
 function setCleanup(fn) { cleanup = fn; }
 function navigate(hash) { location.hash = hash; }
 
+// Session-lifetime cache of each project's last analyze() result, keyed by
+// project id. Revisiting a project's tables screen (hash navigation, browser
+// back/forward) shows the last known result instantly instead of re-running
+// analyze — a full page reload naturally clears it. "Re-analyze" always
+// bypasses this and refreshes it.
+const tablesCache = new Map();
+
 const PG_TYPES = ['text', 'varchar(255)', 'integer', 'bigint', 'smallint', 'boolean', 'numeric',
   'real', 'double precision', 'date', 'timestamp', 'timestamptz', 'jsonb', 'uuid', 'bytea'];
 const MYSQL_TYPES = ['text', 'varchar(255)', 'int', 'bigint', 'smallint', 'tinyint(1)',
@@ -485,33 +492,66 @@ function renderTableCards(area, projectId, items, locked) {
   });
 }
 
+// startProgressTicker renders a spinner + a label into container and keeps
+// the label refreshed on its own timer (independent of any server events),
+// so the display visibly moves even during a long gap between them —
+// mirroring the CLI's spinner, which ticks every 100ms regardless of new
+// NDJSON events. Without this, a stretch of no new events (connecting,
+// scanning a large collection, a slow relational diff) reads as a hang.
+// Returns a stop function; call it once the operation settles.
+function startProgressTicker(container, labelFn) {
+  container.innerHTML = `<div class="loading-block"><span class="spinner"></span> <span class="ticker-text"></span></div>`;
+  const textEl = container.querySelector('.ticker-text');
+  const render = () => { textEl.textContent = labelFn(); };
+  render();
+  const timer = setInterval(render, 400);
+  return () => clearInterval(timer);
+}
+
 // loadTables runs analyze and returns the row items for renderTableCards;
 // it throws on failure so the caller can drive the loading/error UI itself
 // (needed so a later lock-state change can re-render from cached items
 // without re-running analyze).
 async function loadTables(id, project) {
   const area = document.getElementById('tablesArea');
+  const startedAt = Date.now();
+  const elapsed = () => fmtDuration(Math.floor((Date.now() - startedAt) / 1000));
+
   if (project.source_config.type === 'mongodb') {
-    area.innerHTML = '<div class="hint" id="progressLine">Starting…</div>';
-    const progressLine = document.getElementById('progressLine');
+    let current = null; // { collection, scanned, target }
+    const stopTicker = startProgressTicker(area, () => current
+      ? `Sampling ${current.collection}: ${fmtInt(current.scanned)} / ${fmtInt(current.target)} — ${elapsed()} elapsed`
+      : `Connecting… ${elapsed()} elapsed`);
     const collections = [];
-    await analyzeMongoStream(id, {}, (evt) => {
-      if (evt.type === 'progress') {
-        progressLine.textContent = `Sampling ${evt.collection}: ${fmtInt(evt.scanned)} / ${fmtInt(evt.target)}…`;
-      } else if (evt.type === 'collection') {
-        const fields = (evt.schema && evt.schema.fields) || [];
-        collections.push({ name: evt.collection, fieldCount: fields.length, warnings: evt.warnings || [] });
-      } else if (evt.type === 'error') {
-        throw new Error(evt.error);
-      }
-    });
+    try {
+      await analyzeMongoStream(id, {}, (evt) => {
+        if (evt.type === 'progress') {
+          current = { collection: evt.collection, scanned: evt.scanned, target: evt.target };
+        } else if (evt.type === 'collection') {
+          const fields = (evt.schema && evt.schema.fields) || [];
+          collections.push({ name: evt.collection, fieldCount: fields.length, warnings: evt.warnings || [] });
+          current = null;
+        } else if (evt.type === 'error') {
+          throw new Error(evt.error);
+        }
+      });
+    } finally {
+      stopTicker();
+    }
     return collections.map((c) => ({
       name: c.name,
       badge: c.warnings.length ? 'warn' : 'ok',
       badgeText: c.warnings.length ? 'warning' : `${c.fieldCount} fields`,
     }));
   }
-  const result = await api.analyze(id, {});
+
+  const stopTicker = startProgressTicker(area, () => `Analyzing — ${elapsed()} elapsed`);
+  let result;
+  try {
+    result = await api.analyze(id, {});
+  } finally {
+    stopTicker();
+  }
   const tables = result.Tables || [];
   return tables.map((t) => ({
     name: t.Name,
@@ -547,7 +587,7 @@ async function renderTablesList(id) {
   `;
 
   const area = document.getElementById('tablesArea');
-  let cachedItems = [];
+  let cachedItems = tablesCache.get(id) || [];
   let locked = false;
 
   function renderRows() {
@@ -556,9 +596,9 @@ async function renderTablesList(id) {
 
   async function refreshTables() {
     if (locked) return;
-    area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Analyzing…</div>`;
     try {
       cachedItems = await loadTables(id, project);
+      tablesCache.set(id, cachedItems);
       renderRows();
     } catch (err) {
       area.innerHTML = errorBanner('Analyze failed: ' + err.message, { retry: refreshTables });
@@ -579,7 +619,15 @@ async function renderTablesList(id) {
 
   setCleanup(() => stopMig());
 
-  await refreshTables();
+  // Show the last known result immediately if we have one (revisiting via
+  // hash nav / browser back-forward shouldn't force a live re-analyze);
+  // Re-analyze above always bypasses this. First visit this session (or a
+  // hard page reload, which clears the cache) still analyzes live.
+  if (tablesCache.has(id)) {
+    renderRows();
+  } else {
+    await refreshTables();
+  }
 }
 
 // ---------------------------------------------------------------------------
