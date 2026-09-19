@@ -1,7 +1,7 @@
 name: XferDB Matrix Gate
 
 # Every push and every PR against XferDB triggers the real compatibility
-# matrix (Jenkins job xferdb-matrix, SIZE=S) instead of just the Go unit
+# matrix (Jenkins job xferdb-matrix, SIZE=SMOKE) instead of just the Go unit
 # tests in go-build.yaml. On a pull_request, the PR is approved when it
 # passes and sent back for changes when it doesn't — mirroring go-build.yaml's
 # own approve/request-changes pattern, just gated on the heavier matrix run.
@@ -32,7 +32,7 @@ jobs:
         run: |
           dnf install -y python3 >/dev/null
 
-      - name: Trigger xferdb-matrix (SIZE=S) and wait for result
+      - name: Trigger xferdb-matrix (SIZE=SMOKE) and wait for result
         id: matrix
         shell: bash
         env:
@@ -46,7 +46,7 @@ jobs:
           resp=$(curl -sS -i -u "$JENKINS_USER:$JENKINS_TOKEN" \
             -X POST "$JENKINS_URL/job/NextDevOps/job/XferDB/job/xferdb-matrix/buildWithParameters" \
             --data-urlencode "XFERDB_REF=$XFERDB_REF" \
-            --data-urlencode "SIZE=S")
+            --data-urlencode "SIZE=SMOKE")
           queue_url=$(printf '%s' "$resp" | grep -i '^Location:' | awk '{print $2}' | tr -d '\r')
           if [ -z "$queue_url" ]; then
             echo "Could not read a queue URL from the Jenkins trigger response:"
@@ -92,7 +92,7 @@ jobs:
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${{ github.event.pull_request.number }}/reviews" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":\"xferdb-matrix (SIZE=S) passed: ${{ steps.matrix.outputs.build_url }}\",\"event\":\"APPROVE\"}"
+            -d "{\"body\":\"xferdb-matrix (SIZE=SMOKE) passed: ${{ steps.matrix.outputs.build_url }}\",\"event\":\"APPROVE\"}"
 
       - name: Request changes on PR on failure
         if: failure() && github.event_name == 'pull_request'
@@ -102,4 +102,4 @@ jobs:
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${{ github.event.pull_request.number }}/reviews" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":\"xferdb-matrix (SIZE=S) did not pass (result: ${{ steps.matrix.outputs.result }}): ${{ steps.matrix.outputs.build_url }}\",\"event\":\"REQUEST_REVIEW\"}"
+            -d "{\"body\":\"xferdb-matrix (SIZE=SMOKE) did not pass (result: ${{ steps.matrix.outputs.result }}): ${{ steps.matrix.outputs.build_url }}\",\"event\":\"REQUEST_REVIEW\"}"
