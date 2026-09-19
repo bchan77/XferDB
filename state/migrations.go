@@ -154,6 +154,21 @@ func (m *MetaDB) SetMigrationError(ctx context.Context, id string, migErr error)
 	return nil
 }
 
+// SetMigrationCancelled marks the migration cancelled — distinct from
+// SetMigrationError/StatusFailed so history shows "cancelled" with a plain
+// message instead of the driver-level error text produced by stopping
+// mid-transfer (e.g. "pq: canceling statement due to user request").
+func (m *MetaDB) SetMigrationCancelled(ctx context.Context, id string) error {
+	_, err := m.db.ExecContext(ctx,
+		`UPDATE migrations SET status = ?, completed_at = ?, error = ? WHERE id = ?`,
+		string(adapters.StatusCancelled), time.Now(), "cancelled by user", id,
+	)
+	if err != nil {
+		return fmt.Errorf("set migration cancelled: %w", err)
+	}
+	return nil
+}
+
 // UpsertTableProgress inserts or updates progress for a single table in a migration.
 func (m *MetaDB) UpsertTableProgress(ctx context.Context, migrationID string, tp adapters.TableProgress) error {
 	_, err := m.db.ExecContext(ctx, `

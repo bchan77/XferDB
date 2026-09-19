@@ -946,7 +946,7 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
   const buttons = [];
   if (['in_progress', 'schema', 'post_schema'].includes(phase)) buttons.push('<button class="btn" id="pauseBtn">Pause</button>');
   if (phase === 'paused') buttons.push('<button class="btn primary" id="resumeBtn">Resume</button>');
-  if (!['complete', 'failed'].includes(phase)) buttons.push('<button class="btn danger" id="cancelBtn">Cancel</button>');
+  if (!['complete', 'failed', 'cancelled'].includes(phase)) buttons.push('<button class="btn danger" id="cancelBtn">Cancel</button>');
   actionsEl.innerHTML = buttons.join(' ');
 
   async function doAction(action) {
@@ -966,7 +966,7 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
   if (cancelBtn) cancelBtn.addEventListener('click', async () => {
     const ok = await confirmModal({
       title: 'Cancel migration?',
-      body: 'This stops the migration. Rows already written are kept, but the run is marked failed and cannot be resumed.',
+      body: 'This stops the migration. Rows already written are kept, but the run is marked cancelled and cannot be resumed.',
       confirmLabel: 'Cancel Migration',
       danger: true,
     });
@@ -1029,20 +1029,21 @@ function mountMigSection(container, projectId, onLockChange) {
         if (!body || !actionsEl) return;
         const rows = snap.Rows || {};
         const pct = rows.Total > 0 ? Math.round((rows.Transferred * 100) / rows.Total) : 0;
-        const phaseBadge = snap.Phase === 'complete' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'paused' ? 'warn' : 'progress';
+        const phaseBadge = snap.Phase === 'complete' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'cancelled' ? 'cancelled' : snap.Phase === 'paused' ? 'warn' : 'progress';
         body.innerHTML = `
           <div class="stat-grid">
             <div class="stat-box"><div class="label">Phase</div><div class="value"><span class="badge ${phaseBadge}">${esc(snap.Phase)}</span></div></div>
             <div class="stat-box"><div class="label">Rows</div><div class="value">${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</div></div>
             <div class="stat-box"><div class="label">ETA</div><div class="value">${snap.ETASeconds ? fmtDuration(snap.ETASeconds) : '—'}</div></div>
           </div>
-          <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : ''}" style="width:${pct}%"></div></div>
+          <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
+          ${snap.Phase === 'cancelled' ? `<div class="banner info"><span>Migration cancelled.</span></div>` : ''}
         `;
         mountMigActions(actionsEl, migId, snap.Phase, {
           onDone: () => { clearTimer(); tick(); },
           errorArea: body,
         });
-        if (['complete', 'failed'].includes(snap.Phase)) {
+        if (['complete', 'failed', 'cancelled'].includes(snap.Phase)) {
           clearTimer();
           render();
           return;
@@ -1125,9 +1126,9 @@ function mountMigSection(container, projectId, onLockChange) {
 
 function tableProgressRow(t) {
   const pct = t.Total > 0 ? Math.round((t.Transferred * 100) / t.Total) : 0;
-  const icons = { done: '✓', in_progress: '●', failed: '✗', pending: '·' };
+  const icons = { done: '✓', in_progress: '●', failed: '✗', cancelled: '–', pending: '·' };
   const icon = icons[t.Status] || '○';
-  const fillClass = t.Status === 'done' ? 'done' : t.Status === 'failed' ? 'failed' : '';
+  const fillClass = t.Status === 'done' ? 'done' : t.Status === 'failed' ? 'failed' : t.Status === 'cancelled' ? 'cancelled' : '';
   return `
     <div class="table-progress-row">
       <div class="top"><span><span class="status-icon">${icon}</span>${esc(t.Name)}</span><span>${fmtInt(t.Transferred)} / ${fmtInt(t.Total)} (${pct}%)</span></div>
@@ -1172,12 +1173,13 @@ async function renderMigrationProgress(migId) {
     }
     const rows = snap.Rows || {};
     const pct = rows.Total > 0 ? Math.round((rows.Transferred * 100) / rows.Total) : 0;
-    const phaseBadge = snap.Phase === 'complete' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'paused' ? 'warn' : 'progress';
+    const phaseBadge = snap.Phase === 'complete' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'cancelled' ? 'cancelled' : snap.Phase === 'paused' ? 'warn' : 'progress';
     const area = document.getElementById('progressArea');
     if (!area) return;
     area.innerHTML = `
       ${snap.Phase === 'complete' ? '<div class="banner ok"><span>Migration complete.</span></div>' : ''}
       ${snap.Phase === 'failed' ? `<div class="banner error"><span>Migration failed.${snap.Errors && snap.Errors.length ? ' ' + esc(snap.Errors.join('; ')) : ''}</span></div>` : ''}
+      ${snap.Phase === 'cancelled' ? '<div class="banner info"><span>Migration cancelled.</span></div>' : ''}
       <div class="stat-grid">
         <div class="stat-box"><div class="label">Phase</div><div class="value"><span class="badge ${phaseBadge}">${esc(snap.Phase)}</span></div></div>
         <div class="stat-box"><div class="label">Elapsed</div><div class="value">${fmtDuration(snap.ElapsedSeconds)}</div></div>
@@ -1186,7 +1188,7 @@ async function renderMigrationProgress(migId) {
       </div>
       <div class="card">
         <strong>Rows: ${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</strong>
-        <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : ''}" style="width:${pct}%"></div></div>
+        <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
       </div>
       <div class="card">
         <strong>Tables</strong>
@@ -1200,7 +1202,7 @@ async function renderMigrationProgress(migId) {
     try {
       const snap = await api.getStats(migId);
       renderProgress(snap);
-      if (snap.Phase === 'complete' || snap.Phase === 'failed') {
+      if (snap.Phase === 'complete' || snap.Phase === 'failed' || snap.Phase === 'cancelled') {
         clearTimer();
         return;
       }

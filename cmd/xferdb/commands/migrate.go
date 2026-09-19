@@ -426,6 +426,9 @@ func pollStats(migrationID string) error {
 		case "failed":
 			fmt.Println()
 			return fmt.Errorf("migration failed: %s", strings.Join(snap.Errors, "; "))
+		case "cancelled":
+			fmt.Println()
+			return fmt.Errorf("migration cancelled")
 		}
 	}
 }
@@ -476,6 +479,9 @@ func renderProgress(snap stats.StatsSnapshot) []string {
 		case "failed":
 			marker = "✗"
 			detail = "failed"
+		case "cancelled":
+			marker = "–"
+			detail = "cancelled"
 		case "not_started":
 			marker = "·"
 			detail = "not started"

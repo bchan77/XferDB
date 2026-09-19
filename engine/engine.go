@@ -230,21 +230,41 @@ func (e *Engine) Run(ctx context.Context) error {
 				defer wg.Done()
 				for schema := range work {
 					if err := e.transferTable(ctx, schema); err != nil {
-						// Mark only this table as failed; other tables keep going.
+						// Mark only this table as failed (or cancelled, when this
+						// stems from ctx being cancelled by an explicit user
+						// Cancel/Delete rather than a real error); other tables
+						// keep going. Cancelled writes use a ctx that ignores that
+						// same cancellation so they still land.
 						now := time.Now()
-						e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
-							TableName:   schema.Name,
-							Status:      adapters.StatusFailed,
-							CompletedAt: &now,
-						})
-						e.emit(ProgressEvent{
-							Kind:      EventTableFailed,
-							TableName: schema.Name,
-							Err:       err,
-							Timestamp: now,
-						})
-						e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
-							"failed", e.migrationID, 0, 0)
+						if ctx.Err() != nil {
+							writeCtx := context.WithoutCancel(ctx)
+							e.db.UpsertTableProgress(writeCtx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+								TableName:   schema.Name,
+								Status:      adapters.StatusCancelled,
+								CompletedAt: &now,
+							})
+							e.emit(ProgressEvent{
+								Kind:      EventTableCancelled,
+								TableName: schema.Name,
+								Timestamp: now,
+							})
+							e.db.UpdateProjectTableStatus(writeCtx, e.project.ID, schema.Name, //nolint:errcheck
+								"cancelled", e.migrationID, 0, 0)
+						} else {
+							e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+								TableName:   schema.Name,
+								Status:      adapters.StatusFailed,
+								CompletedAt: &now,
+							})
+							e.emit(ProgressEvent{
+								Kind:      EventTableFailed,
+								TableName: schema.Name,
+								Err:       err,
+								Timestamp: now,
+							})
+							e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
+								"failed", e.migrationID, 0, 0)
+						}
 						mu.Lock()
 						tableErrors = append(tableErrors, fmt.Errorf("%s: %w", schema.Name, err))
 						mu.Unlock()
@@ -435,9 +455,22 @@ func (e *Engine) disconnect() {
 	}
 }
 
-// fail marks the migration as failed, emits an error event, and returns err.
+// fail marks the migration as failed and returns err — unless ctx has
+// already been cancelled (the only way that happens mid-Run is an explicit
+// user Cancel/Delete, since this ctx is never wired to any request deadline
+// or shutdown signal), in which case it's marked cancelled instead so
+// history shows "cancelled" rather than the driver-level error text
+// produced by stopping mid-transfer (e.g. a Postgres "canceling statement
+// due to user request"). The DB write uses context.WithoutCancel so it
+// still lands even though ctx may be the very thing that was cancelled.
 func (e *Engine) fail(ctx context.Context, err error) error {
-	e.db.SetMigrationError(ctx, e.migrationID, err) //nolint:errcheck
+	writeCtx := context.WithoutCancel(ctx)
+	if ctx.Err() != nil {
+		e.db.SetMigrationCancelled(writeCtx, e.migrationID) //nolint:errcheck
+		e.emit(ProgressEvent{Kind: EventCancelled, Timestamp: time.Now()})
+		return err
+	}
+	e.db.SetMigrationError(writeCtx, e.migrationID, err) //nolint:errcheck
 	e.emit(ProgressEvent{Kind: EventError, Err: err, Timestamp: time.Now()})
 	return err
 }

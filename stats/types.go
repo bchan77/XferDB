@@ -35,12 +35,13 @@ type TableStats struct {
 	InProgress int
 	Pending    int
 	Failed     int
+	Cancelled  int
 }
 
 // TableDetail holds per-table progress for display.
 type TableDetail struct {
 	Name        string
-	Status      string // "pending", "in_progress", "done", "failed"
+	Status      string // "pending", "in_progress", "done", "failed", "cancelled"
 	Transferred int64
 	Total       int64
 	Error       string // set when Status == "failed"
