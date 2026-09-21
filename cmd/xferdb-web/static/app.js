@@ -1418,10 +1418,10 @@ async function renderMigrationProgress(migId) {
       <div class="card">
         <strong>Resource Usage</strong>
         <div class="stat-grid" style="margin-top:8px;">
-          <div class="stat-box"><div class="label">CPU</div><div class="value">${(snap.CPUPercent || 0).toFixed(1)}%</div></div>
-          <div class="stat-box"><div class="label">Memory</div><div class="value">${(snap.MemAllocMB || 0).toFixed(1)} MB</div></div>
-          <div class="stat-box"><div class="label">Goroutines</div><div class="value">${snap.Goroutines || 0}</div></div>
-          <div class="stat-box"><div class="label">Sys Memory</div><div class="value">${(snap.MemSysMB || 0).toFixed(1)} MB</div></div>
+          <div class="stat-box"><div class="label">CPU</div><div class="value">${((snap.resource?.CPUPercent) || 0).toFixed(1)}%</div></div>
+          <div class="stat-box"><div class="label">Memory</div><div class="value">${((snap.resource?.MemAllocMB) || 0).toFixed(1)} MB</div></div>
+          <div class="stat-box"><div class="label">Goroutines</div><div class="value">${snap.resource?.Goroutines || 0}</div></div>
+          <div class="stat-box"><div class="label">Sys Memory</div><div class="value">${((snap.resource?.MemSysMB) || 0).toFixed(1)} MB</div></div>
         </div>
       </div>
     `;
