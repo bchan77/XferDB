@@ -145,6 +145,8 @@ async function renderProjectsList() {
 
 async function loadProjectsList() {
   const list = document.getElementById('list');
+  let refreshInterval = null;
+
   try {
     const projects = await api.listProjects();
     if (!projects || projects.length === 0) {
@@ -167,33 +169,50 @@ async function loadProjectsList() {
         <div class="right"><button class="btn small danger" data-del="${esc(p.id)}">Delete</button></div>
       </div>
     `).join('');
-    // Check for active migrations in parallel
-    projects.forEach(async (p) => {
-      try {
-        const migs = await api.listMigrations(p.id);
-        const active = migs.find((m) => m.status === 'pending' || m.status === 'in_progress' || m.status === 'paused');
-        if (active) {
+
+    // Function to update migration progress for all projects
+    async function updateMigrationProgress() {
+      for (const p of projects) {
+        try {
+          const migs = await api.listMigrations(p.id);
+          const active = migs.find((m) => m.status === 'pending' || m.status === 'in_progress' || m.status === 'paused');
           const progressEl = list.querySelector(`.mig-progress[data-proj="${p.id}"]`);
-          if (progressEl) {
+          if (!progressEl) continue;
+
+          if (active) {
             progressEl.style.display = 'block';
-            // Try to get stats for progress percentage
             try {
               const snap = await api.getStats(active.id);
               const pct = snap.Rows.Total > 0 ? Math.round(snap.Rows.Transferred / snap.Rows.Total * 100) : 0;
+              const statusLabel = active.status === 'in_progress' ? 'migrating' : active.status;
               progressEl.innerHTML = `
                 <div style="display:flex;align-items:center;gap:8px;">
-                  <span class="badge ${esc(active.status)}">${active.status === 'in_progress' ? 'migrating' : esc(active.status)}</span>
-                  <div class="progress-bar" style="flex:1;max-width:150px;"><div class="fill" style="width:${pct}%"></div></div>
+                  <span class="badge ${esc(active.status)}">${esc(statusLabel)}</span>
+                  <div class="progress-bar" style="flex:1;max-width:150px;"><div class="fill${pct >= 100 ? ' done' : ''}" style="width:${pct}%"></div></div>
                   <span style="font-size:12px;color:var(--muted);">${pct}%</span>
                 </div>`;
             } catch {
-              // Stats not available (e.g., paused/orphaned), just show status
               progressEl.innerHTML = `<span class="badge ${esc(active.status)}">${esc(active.status)}</span>`;
             }
+          } else {
+            // Check if last migration completed
+            const lastMig = migs.length > 0 ? migs[0] : null;
+            if (lastMig && (lastMig.status === 'completed' || lastMig.status === 'failed' || lastMig.status === 'cancelled')) {
+              progressEl.style.display = 'block';
+              progressEl.innerHTML = `<span class="badge ${esc(lastMig.status)}">${esc(lastMig.status)}</span>`;
+            } else {
+              progressEl.style.display = 'none';
+            }
           }
-        }
-      } catch { /* ignore errors */ }
-    });
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Initial update
+    updateMigrationProgress();
+    // Refresh every 3 seconds
+    refreshInterval = setInterval(updateMigrationProgress, 3000);
+
     list.querySelectorAll('.list-row').forEach((row) => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('[data-del]')) return;
@@ -219,6 +238,11 @@ async function loadProjectsList() {
           list.insertAdjacentHTML('afterbegin', errorBanner('Delete failed: ' + err.message));
         }
       });
+    });
+
+    // Set cleanup function to stop the refresh interval
+    setCleanup(() => {
+      if (refreshInterval) clearInterval(refreshInterval);
     });
   } catch (err) {
     list.innerHTML = errorBanner('Could not load projects: ' + err.message, { retry: loadProjectsList });
