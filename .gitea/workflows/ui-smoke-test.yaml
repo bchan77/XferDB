@@ -19,7 +19,6 @@ jobs:
         id: trigger
         shell: bash
         env:
-          JENKINS_USER: ${{ secrets.JENKINS_USER }}
           JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
         run: |
           set -eu
@@ -31,7 +30,7 @@ jobs:
           # Trigger Jenkins build with smoke test suite
           echo "Triggering Jenkins UI smoke test..."
           QUEUE_URL=$(curl -s -X POST \
-            -u "$JENKINS_USER:$JENKINS_TOKEN" \
+            -u "bchan:$JENKINS_TOKEN" \
             "http://jenkins.homelab.local:8080/job/NextDevOps/job/XferDB/job/xferdb-ui/buildWithParameters?XFERDB_REF=$REF&TEST_SUITE=smoke" \
             -D - | grep -i "Location:" | sed 's/Location: //' | tr -d '\r')
 
@@ -75,7 +74,6 @@ jobs:
         id: wait
         shell: bash
         env:
-          JENKINS_USER: ${{ secrets.JENKINS_USER }}
           JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
         run: |
           set -eu
@@ -87,7 +85,7 @@ jobs:
 
           # Poll for completion (max 10 minutes)
           for i in {1..60}; do
-            RESULT=$(curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" "${BUILD_URL}api/json?tree=building,result,duration")
+            RESULT=$(curl -s -u "bchan:$JENKINS_TOKEN" "${BUILD_URL}api/json?tree=building,result,duration")
             BUILDING=$(echo "$RESULT" | jq -r '.building')
 
             if [ "$BUILDING" = "false" ]; then
