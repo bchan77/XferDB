@@ -1289,10 +1289,6 @@ function mountMigSection(container, projectId, sourceType, onLockChange) {
           <div><label>Segment workers</label><input type="number" id="m-segment" value="0" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
           <div></div>
         </div>
-        ${sourceType === 'mongodb' ? `
-        <div class="checkbox-row">
-          <input type="checkbox" id="m-accurate"><label for="m-accurate">Accurate counts</label><span class="hint">(slower but shows correct progress)</span>
-        </div>` : ''}
       </details>
       <div id="startErr"></div>
       <button class="btn primary" id="startMigBtn">Run Migration</button>
@@ -1302,14 +1298,12 @@ function mountMigSection(container, projectId, sourceType, onLockChange) {
     `;
     document.getElementById('startMigBtn').addEventListener('click', async () => {
       const mode = document.querySelector('input[name=schemaMode]:checked').value;
-      const accurateEl = document.getElementById('m-accurate');
       const body = {
         table_workers: parseInt(document.getElementById('m-workers').value, 10) || 1,
         segment_workers: parseInt(document.getElementById('m-segment').value, 10) || 0,
         batch_size: parseInt(document.getElementById('m-batch').value, 10) || 1000,
         recreate_schema: mode === 'recreate',
         truncate: mode === 'truncate',
-        accurate_counts: accurateEl ? accurateEl.checked : false,
       };
       const btn = document.getElementById('startMigBtn');
       btn.disabled = true;
