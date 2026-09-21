@@ -159,13 +159,41 @@ async function loadProjectsList() {
     }
     list.innerHTML = projects.map((p) => `
       <div class="list-row" data-id="${esc(p.id)}">
-        <div>
+        <div style="flex:1;">
           <div class="name">${esc(p.name)}</div>
           <div class="meta">${esc(p.source_config.type)} → ${esc(p.target_config.type)}${p.description ? ' · ' + esc(p.description) : ''} · created ${esc(fmtDate(p.created_at))}</div>
+          <div class="mig-progress" data-proj="${esc(p.id)}" style="display:none;margin-top:6px;"></div>
         </div>
         <div class="right"><button class="btn small danger" data-del="${esc(p.id)}">Delete</button></div>
       </div>
     `).join('');
+    // Check for active migrations in parallel
+    projects.forEach(async (p) => {
+      try {
+        const migs = await api.listMigrations(p.id);
+        const active = migs.find((m) => m.status === 'pending' || m.status === 'in_progress' || m.status === 'paused');
+        if (active) {
+          const progressEl = list.querySelector(`.mig-progress[data-proj="${p.id}"]`);
+          if (progressEl) {
+            progressEl.style.display = 'block';
+            // Try to get stats for progress percentage
+            try {
+              const snap = await api.getStats(active.id);
+              const pct = snap.Rows.Total > 0 ? Math.round(snap.Rows.Transferred / snap.Rows.Total * 100) : 0;
+              progressEl.innerHTML = `
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span class="badge ${esc(active.status)}">${active.status === 'in_progress' ? 'migrating' : esc(active.status)}</span>
+                  <div class="progress-bar" style="flex:1;max-width:150px;"><div class="fill" style="width:${pct}%"></div></div>
+                  <span style="font-size:12px;color:var(--muted);">${pct}%</span>
+                </div>`;
+            } catch {
+              // Stats not available (e.g., paused/orphaned), just show status
+              progressEl.innerHTML = `<span class="badge ${esc(active.status)}">${esc(active.status)}</span>`;
+            }
+          }
+        }
+      } catch { /* ignore errors */ }
+    });
     list.querySelectorAll('.list-row').forEach((row) => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('[data-del]')) return;
