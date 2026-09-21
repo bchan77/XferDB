@@ -533,9 +533,9 @@ xferdb-web --addr :3000 --api-addr http://localhost:8080
 # open http://localhost:3000
 ```
 
-Screens (all reachable via browser back/forward, since routing is hash-based):
+### Screens
 
-- **Projects** (`#/`) — list, create, delete
+- **Projects** (`#/`) — list, create, delete projects with live migration status badges
 - **Tables** (`#/projects/:id`) — a project's default landing page: its tables/collections,
   live migration status with Run / Pause / Resume / Cancel, and migration history. While a
   migration is active, tables are locked (not clickable) with a banner explaining why
@@ -544,9 +544,41 @@ Screens (all reachable via browser back/forward, since routing is hash-based):
   choices for Postgres/MySQL/SQLite/Mongo→Postgres) with Save-with-confirmation, backed by the
   `schema-plan` endpoints above — available for every adapter pairing, not just MongoDB→Postgres
 - **Settings** (`#/projects/:id/settings`) — connection config view/edit, preflight/test
-  connection, delete project
-- **Migration progress** (`#/migrations/:id`) — full live progress page (same
-  pause/resume/cancel controls as the tables screen, plus per-table breakdown)
+  connection, download support bundle, reset schema plans, delete project
+- **Migration progress** (`#/migrations/:id`) — full live progress page with real-time stats,
+  per-table breakdown, resource usage, pause/resume/cancel controls, and stats history
+
+### Migration options (Web UI)
+
+The "Run a migration" form exposes all CLI migration options:
+
+| Option | Description |
+|--------|-------------|
+| **Schema mode** | Keep existing, Truncate first, or Drop & recreate target tables |
+| **Table workers** | Number of tables to migrate concurrently |
+| **Batch size** | Rows per INSERT batch |
+| **Segment workers** | Parallel workers per table (splits by PK range) |
+| **Tables to migrate** | Select/deselect individual tables (appears after analyze) |
+
+**Performance options** (expandable section):
+
+| Option | Description |
+|--------|-------------|
+| **Async pipeline** | Overlap reading and writing for faster throughput |
+| **Bulk copy** | Use PostgreSQL COPY protocol (PostgreSQL targets only) |
+| **Accurate row counts** | Use exact counts instead of estimates (slower) |
+| **Force OFFSET segments** | Use OFFSET-based splitting instead of PK range (when segment workers > 0) |
+
+### MongoDB sampling options
+
+For MongoDB source projects, additional options appear:
+
+| Option | Description |
+|--------|-------------|
+| **Sample size** | Documents to sample per small collection (default: 2000) |
+| **Sample %** | Percentage to sample for large collections (default: 1%) |
+| **Threshold** | Document count above which percentage sampling kicks in |
+| **AI annotations** | Enable AI-powered field type inference |
 
 ---
 
