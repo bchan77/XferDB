@@ -125,13 +125,16 @@ func (h *ProjectsHandler) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	if body.SourceConfig.Password == "" {
 		body.SourceConfig.Password = existing.SourceConfig.Password
 	}
-	if body.SourceConfig.DSN == "" {
+	// Only preserve DSN if the user didn't provide host/port fields.
+	// If host is provided, the user wants to use individual fields, not a DSN.
+	if body.SourceConfig.DSN == "" && body.SourceConfig.Host == "" {
 		body.SourceConfig.DSN = existing.SourceConfig.DSN
 	}
 	if body.TargetConfig.Password == "" {
 		body.TargetConfig.Password = existing.TargetConfig.Password
 	}
-	if body.TargetConfig.DSN == "" {
+	// Only preserve DSN if the user didn't provide host/port fields.
+	if body.TargetConfig.DSN == "" && body.TargetConfig.Host == "" {
 		body.TargetConfig.DSN = existing.TargetConfig.DSN
 	}
 
