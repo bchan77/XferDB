@@ -775,7 +775,7 @@ async function renderTablesList(id) {
 
   document.getElementById('reanalyzeBtn').addEventListener('click', refreshTables);
 
-  const stopMig = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, (isLocked, status) => {
+  const stopMig = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, () => cachedItems, (isLocked, status) => {
     locked = isLocked;
     document.getElementById('lockBanner').innerHTML = locked
       ? `<div class="banner info">Table changes are disabled while a migration is ${esc(status)}.</div>`
@@ -1205,8 +1205,9 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
 // tables screen: a live-polling progress card with Pause/Resume/Cancel while
 // a migration is pending/in_progress/paused, or a "Run Migration" form plus
 // history otherwise. Returns a cleanup function that stops polling.
+// getTables() returns the current list of tables for selection.
 // onLockChange(locked, status) fires whenever table rows should lock/unlock.
-function mountMigSection(container, projectId, sourceType, onLockChange) {
+function mountMigSection(container, projectId, sourceType, getTables, onLockChange) {
   let stopped = false;
   let timer = null;
   function clearTimer() {
@@ -1231,7 +1232,7 @@ function mountMigSection(container, projectId, sourceType, onLockChange) {
       mountActiveCard(active.id, active.status);
     } else {
       onLockChange(false, '');
-      mountStartForm(migs, sourceType);
+      mountStartForm(migs, sourceType, getTables());
     }
   }
 
@@ -1350,8 +1351,9 @@ function mountMigSection(container, projectId, sourceType, onLockChange) {
     }
   }
 
-  function mountStartForm(migs, sourceType) {
+  function mountStartForm(migs, sourceType, tables) {
     const segmentDisabled = sourceType === 'mongodb';
+    const tableNames = (tables || []).map(t => t.name);
     container.innerHTML = `
       <h2>Migration</h2>
       <details class="advanced" open>
@@ -1367,6 +1369,26 @@ function mountMigSection(container, projectId, sourceType, onLockChange) {
           <div><label>Segment workers</label><input type="number" id="m-segment" value="0" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
           <div></div>
         </div>
+        ${tableNames.length > 0 ? `
+        <div style="margin-top:12px;">
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            Tables to migrate
+            <span style="font-weight:normal;color:var(--muted);">(<span id="tableCount">${tableNames.length}</span> of ${tableNames.length} selected)</span>
+          </label>
+          <div class="checkbox-row" style="margin-bottom:6px;">
+            <input type="checkbox" id="selectAllTables" checked>
+            <label for="selectAllTables">Select all</label>
+          </div>
+          <div id="tableCheckboxes" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;">
+            ${tableNames.map(name => `
+              <div class="checkbox-row" style="margin:4px 0;">
+                <input type="checkbox" class="table-cb" id="tbl-${esc(name)}" value="${esc(name)}" checked>
+                <label for="tbl-${esc(name)}" class="mono" style="font-size:12px;">${esc(name)}</label>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        ` : ''}
       </details>
       <div id="startErr"></div>
       <button class="btn primary" id="startMigBtn">Run Migration</button>
@@ -1374,6 +1396,25 @@ function mountMigSection(container, projectId, sourceType, onLockChange) {
         <details class="advanced"><summary>History</summary><div id="migHistory"></div></details>
       </div>
     `;
+
+    // Table selection handlers
+    if (tableNames.length > 0) {
+      const updateCount = () => {
+        const checked = container.querySelectorAll('.table-cb:checked').length;
+        document.getElementById('tableCount').textContent = checked;
+      };
+      document.getElementById('selectAllTables').addEventListener('change', (e) => {
+        container.querySelectorAll('.table-cb').forEach(cb => { cb.checked = e.target.checked; });
+        updateCount();
+      });
+      container.querySelectorAll('.table-cb').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const allChecked = container.querySelectorAll('.table-cb:checked').length === tableNames.length;
+          document.getElementById('selectAllTables').checked = allChecked;
+          updateCount();
+        });
+      });
+    }
     document.getElementById('startMigBtn').addEventListener('click', async () => {
       const mode = document.querySelector('input[name=schemaMode]:checked').value;
       const body = {
@@ -1383,6 +1424,17 @@ function mountMigSection(container, projectId, sourceType, onLockChange) {
         recreate_schema: mode === 'recreate',
         truncate: mode === 'truncate',
       };
+      // Add selected tables if not all are selected
+      if (tableNames.length > 0) {
+        const selectedTables = Array.from(container.querySelectorAll('.table-cb:checked')).map(cb => cb.value);
+        if (selectedTables.length === 0) {
+          document.getElementById('startErr').innerHTML = errorBanner('Please select at least one table to migrate.');
+          return;
+        }
+        if (selectedTables.length < tableNames.length) {
+          body.tables = selectedTables;
+        }
+      }
       const btn = document.getElementById('startMigBtn');
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> Starting…';
