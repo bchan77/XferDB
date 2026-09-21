@@ -19,7 +19,8 @@ jobs:
         id: trigger
         shell: bash
         env:
-          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_URL: ${{ vars.JENKINS_URL }}
+          JENKINS_USER: ${{ vars.JENKINS_USER }}
           JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
         run: |
           set -eu
@@ -32,7 +33,7 @@ jobs:
           echo "Triggering Jenkins UI smoke test..."
           QUEUE_URL=$(curl -s -X POST \
             -u "$JENKINS_USER:$JENKINS_TOKEN" \
-            "http://jenkins.homelab.local:8080/job/NextDevOps/job/XferDB/job/xferdb-ui/buildWithParameters?XFERDB_REF=$REF&TEST_SUITE=smoke" \
+            "$JENKINS_URL/job/NextDevOps/job/XferDB/job/xferdb-ui/buildWithParameters?XFERDB_REF=$REF&TEST_SUITE=smoke" \
             -D - | grep -i "Location:" | sed 's/Location: //' | tr -d '\r')
 
           if [ -z "$QUEUE_URL" ]; then
@@ -75,7 +76,7 @@ jobs:
         id: wait
         shell: bash
         env:
-          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_USER: ${{ vars.JENKINS_USER }}
           JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
         run: |
           set -eu
