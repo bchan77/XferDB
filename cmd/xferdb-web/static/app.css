@@ -275,3 +275,9 @@ table.kv td:first-child { color: var(--muted); width: 130px; }
 .section { margin: 26px 0; }
 .section h2 { font-size: 15px; margin: 0 0 10px; }
 .footer-note { color: var(--muted); font-size: 12px; margin-top: 30px; }
+
+.stats-history-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.stats-history-table th, .stats-history-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+.stats-history-table th { font-weight: 600; color: var(--muted); text-transform: uppercase; font-size: 11px; }
+.stats-history-table tr:last-child td { border-bottom: none; }
+.stats-history-table tr:hover { background: var(--bg); }

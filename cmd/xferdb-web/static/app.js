@@ -1510,6 +1510,10 @@ async function renderMigrationProgress(migId) {
 
   let stopped = false;
   let timer = null;
+  let historyLoaded = false;
+  let historyOpen = false;
+  let cachedHistoryHTML = '<div class="loading-block"><span class="spinner"></span> Loading history…</div>';
+
   function clearTimer() {
     if (timer) { clearTimeout(timer); timer = null; }
   }
@@ -1538,14 +1542,6 @@ async function renderMigrationProgress(migId) {
         <div class="stat-box"><div class="label">Rate</div><div class="value">${Math.round(rows.RatePerSecond || 0)}/s</div></div>
       </div>
       <div class="card">
-        <strong>Rows: ${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</strong>
-        <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
-      </div>
-      <div class="card">
-        <strong>Tables</strong>
-        ${(snap.TableDetails || []).map(tableProgressRow).join('') || '<div class="hint">No tables yet.</div>'}
-      </div>
-      <div class="card">
         <strong>Resource Usage</strong>
         <div class="stat-grid" style="margin-top:8px;">
           <div class="stat-box"><div class="label">CPU</div><div class="value">${((snap.resource?.CPUPercent) || 0).toFixed(1)}%</div></div>
@@ -1554,7 +1550,74 @@ async function renderMigrationProgress(migId) {
           <div class="stat-box"><div class="label">Sys Memory</div><div class="value">${((snap.resource?.MemSysMB) || 0).toFixed(1)} MB</div></div>
         </div>
       </div>
+      <div class="card">
+        <strong>Rows: ${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</strong>
+        <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
+      </div>
+      <div class="card">
+        <strong>Tables</strong>
+        ${(snap.TableDetails || []).map(tableProgressRow).join('') || '<div class="hint">No tables yet.</div>'}
+      </div>
+      <details class="advanced" id="statsHistoryDetails" ${historyOpen ? 'open' : ''}>
+        <summary>Stats History</summary>
+        <div id="statsHistoryContent">${cachedHistoryHTML}</div>
+      </details>
     `;
+    // Set up event listener for stats history toggle
+    const detailsEl = document.getElementById('statsHistoryDetails');
+    if (detailsEl) {
+      detailsEl.addEventListener('toggle', async () => {
+        historyOpen = detailsEl.open;
+        if (detailsEl.open && !historyLoaded) {
+          historyLoaded = true;
+          await loadStatsHistory();
+        }
+      });
+    }
+  }
+
+  async function loadStatsHistory() {
+    const container = document.getElementById('statsHistoryContent');
+    if (!container) return;
+    try {
+      const records = await api.getStatsHistory(migId);
+      if (!records || records.length === 0) {
+        cachedHistoryHTML = '<div class="hint">No history recorded yet.</div>';
+        container.innerHTML = cachedHistoryHTML;
+        return;
+      }
+      // Build table showing key metrics over time
+      const tableRows = records.map(r => {
+        const pct = r.rows_total > 0 ? Math.round((r.rows_transferred * 100) / r.rows_total) : 0;
+        const ts = new Date(r.timestamp).toLocaleTimeString();
+        return `
+          <tr>
+            <td>${ts}</td>
+            <td>${fmtDuration(r.elapsed_secs)}</td>
+            <td><span class="badge ${r.phase === 'complete' ? 'ok' : r.phase === 'failed' ? 'fail' : 'progress'}">${esc(r.phase)}</span></td>
+            <td>${fmtInt(r.rows_transferred)} / ${fmtInt(r.rows_total)} (${pct}%)</td>
+            <td>${Math.round(r.rate_per_sec || 0)}/s</td>
+            <td>${r.tables_done}/${r.tables_total}</td>
+            <td>${(r.cpu_percent || 0).toFixed(1)}%</td>
+            <td>${(r.mem_alloc_mb || 0).toFixed(1)} MB</td>
+          </tr>
+        `;
+      }).join('');
+      cachedHistoryHTML = `
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="stats-history-table">
+            <thead>
+              <tr><th>Time</th><th>Elapsed</th><th>Phase</th><th>Rows</th><th>Rate</th><th>Tables</th><th>CPU</th><th>Memory</th></tr>
+            </thead>
+            <tbody>${tableRows}</tbody>
+          </table>
+        </div>
+      `;
+      container.innerHTML = cachedHistoryHTML;
+    } catch (err) {
+      cachedHistoryHTML = `<div class="banner error">Failed to load history: ${esc(err.message)}</div>`;
+      container.innerHTML = cachedHistoryHTML;
+    }
   }
 
   async function tick() {
@@ -1577,7 +1640,56 @@ async function renderMigrationProgress(migId) {
     stopped = true;
     clearTimer();
   });
-  tick();
+
+  // For completed/failed/cancelled migrations, load from history instead of live stats
+  const finishedStatuses = ['completed', 'failed', 'cancelled'];
+  if (finishedStatuses.includes(mig.status)) {
+    // Load last stats from history
+    try {
+      const records = await api.getStatsHistory(migId);
+      if (records && records.length > 0) {
+        const last = records[records.length - 1];
+        // Build a snap-like object from the history record
+        const snap = {
+          Phase: last.phase,
+          ElapsedSeconds: last.elapsed_secs,
+          ETASeconds: 0,
+          Rows: {
+            Total: last.rows_total,
+            Transferred: last.rows_transferred,
+            RatePerSecond: last.rate_per_sec,
+          },
+          resource: {
+            CPUPercent: last.cpu_percent,
+            MemAllocMB: last.mem_alloc_mb,
+            MemSysMB: last.mem_sys_mb,
+            Goroutines: last.goroutines,
+          },
+          TableDetails: [], // Not stored in history records
+          Errors: mig.error ? [mig.error] : [],
+        };
+        renderProgress(snap);
+      } else {
+        // No history, show minimal info from migration record
+        const snap = {
+          Phase: mig.status === 'completed' ? 'complete' : mig.status,
+          ElapsedSeconds: 0,
+          ETASeconds: 0,
+          Rows: { Total: 0, Transferred: 0, RatePerSecond: 0 },
+          resource: {},
+          TableDetails: [],
+          Errors: mig.error ? [mig.error] : [],
+        };
+        renderProgress(snap);
+      }
+    } catch (err) {
+      const area = document.getElementById('progressArea');
+      if (area) area.innerHTML = errorBanner('Failed to load migration stats: ' + err.message);
+    }
+  } else {
+    // Active migration - use live polling
+    tick();
+  }
 }
 
 // ---------------------------------------------------------------------------
