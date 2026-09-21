@@ -1,0 +1,149 @@
+name: UI Smoke Test
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/xferdb-web/**'
+  workflow_dispatch:
+
+jobs:
+  ui-smoke-test:
+    runs-on: rocky9.8
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        env:
+          GIT_SSL_NO_VERIFY: "true"
+
+      - name: Trigger Jenkins UI smoke test
+        id: trigger
+        shell: bash
+        env:
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
+        run: |
+          set -eu
+
+          # Get the current branch/ref
+          REF="${{ github.head_ref || github.ref_name }}"
+          echo "Testing ref: $REF"
+
+          # Trigger Jenkins build with smoke test suite
+          echo "Triggering Jenkins UI smoke test..."
+          QUEUE_URL=$(curl -s -X POST \
+            -u "$JENKINS_USER:$JENKINS_TOKEN" \
+            "http://jenkins.homelab.local:8080/job/NextDevOps/job/XferDB/job/xferdb-ui/buildWithParameters?XFERDB_REF=$REF&TEST_SUITE=smoke" \
+            -D - | grep -i "Location:" | sed 's/Location: //' | tr -d '\r')
+
+          if [ -z "$QUEUE_URL" ]; then
+            echo "Failed to get queue URL"
+            exit 1
+          fi
+
+          echo "Queue URL: $QUEUE_URL"
+
+          # Wait for build to start and get build number
+          echo "Waiting for build to start..."
+          for i in {1..30}; do
+            BUILD_INFO=$(curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" "${QUEUE_URL}api/json")
+            BUILD_URL=$(echo "$BUILD_INFO" | jq -r '.executable.url // empty')
+
+            if [ -n "$BUILD_URL" ]; then
+              BUILD_NUM=$(echo "$BUILD_INFO" | jq -r '.executable.number')
+              echo "Build started: #$BUILD_NUM"
+              echo "build_url=$BUILD_URL" >> "$GITHUB_OUTPUT"
+              echo "build_num=$BUILD_NUM" >> "$GITHUB_OUTPUT"
+              break
+            fi
+
+            # Check if cancelled
+            CANCELLED=$(echo "$BUILD_INFO" | jq -r '.cancelled // false')
+            if [ "$CANCELLED" = "true" ]; then
+              echo "Build was cancelled"
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          if [ -z "$BUILD_URL" ]; then
+            echo "Timeout waiting for build to start"
+            exit 1
+          fi
+
+      - name: Wait for Jenkins build to complete
+        id: wait
+        shell: bash
+        env:
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
+        run: |
+          set -eu
+
+          BUILD_URL="${{ steps.trigger.outputs.build_url }}"
+          BUILD_NUM="${{ steps.trigger.outputs.build_num }}"
+
+          echo "Waiting for build #$BUILD_NUM to complete..."
+
+          # Poll for completion (max 10 minutes)
+          for i in {1..60}; do
+            RESULT=$(curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" "${BUILD_URL}api/json?tree=building,result,duration")
+            BUILDING=$(echo "$RESULT" | jq -r '.building')
+
+            if [ "$BUILDING" = "false" ]; then
+              BUILD_RESULT=$(echo "$RESULT" | jq -r '.result')
+              DURATION=$(echo "$RESULT" | jq -r '.duration')
+              echo "Build completed: $BUILD_RESULT (${DURATION}ms)"
+              echo "result=$BUILD_RESULT" >> "$GITHUB_OUTPUT"
+              break
+            fi
+
+            echo "Still running... (attempt $i/60)"
+            sleep 10
+          done
+
+          if [ "$BUILDING" = "true" ]; then
+            echo "Timeout waiting for build to complete"
+            echo "result=TIMEOUT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report results
+        shell: bash
+        run: |
+          RESULT="${{ steps.wait.outputs.result }}"
+          BUILD_NUM="${{ steps.trigger.outputs.build_num }}"
+
+          echo "=========================================="
+          echo "UI Smoke Test Result: $RESULT"
+          echo "Jenkins Build: #$BUILD_NUM"
+          echo "=========================================="
+
+          if [ "$RESULT" != "SUCCESS" ]; then
+            echo "UI smoke tests failed!"
+            exit 1
+          fi
+
+          echo "UI smoke tests passed!"
+
+      - name: Approve PR on success
+        if: success() && github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+          curl -s -k -X POST \
+            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUM}/reviews" \
+            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"body":"UI smoke tests passed ✓","event":"APPROVE"}'
+
+      - name: Request changes on failure
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+          BUILD_NUM="${{ steps.trigger.outputs.build_num }}"
+          curl -s -k -X POST \
+            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUM}/reviews" \
+            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\":\"UI smoke tests failed. See Jenkins build #${BUILD_NUM}\",\"event\":\"REQUEST_REVIEW\"}"
