@@ -761,21 +761,7 @@ async function renderTablesList(id) {
     };
   }
 
-  async function refreshTables() {
-    if (locked) return;
-    try {
-      const analyzeOpts = readAnalyzeOpts();
-      cachedItems = await loadTables(id, project, analyzeOpts);
-      tablesCache.set(id, cachedItems);
-      renderRows();
-    } catch (err) {
-      area.innerHTML = errorBanner('Analyze failed: ' + err.message, { retry: refreshTables });
-    }
-  }
-
-  document.getElementById('reanalyzeBtn').addEventListener('click', refreshTables);
-
-  const stopMig = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, () => cachedItems, (isLocked, status) => {
+  const migSection = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, () => cachedItems, (isLocked, status) => {
     locked = isLocked;
     document.getElementById('lockBanner').innerHTML = locked
       ? `<div class="banner info">Table changes are disabled while a migration is ${esc(status)}.</div>`
@@ -785,7 +771,23 @@ async function renderTablesList(id) {
     renderRows();
   });
 
-  setCleanup(() => stopMig());
+  async function refreshTables() {
+    if (locked) return;
+    try {
+      const analyzeOpts = readAnalyzeOpts();
+      cachedItems = await loadTables(id, project, analyzeOpts);
+      tablesCache.set(id, cachedItems);
+      renderRows();
+      // Refresh migration section so table checkboxes appear
+      migSection.refresh();
+    } catch (err) {
+      area.innerHTML = errorBanner('Analyze failed: ' + err.message, { retry: refreshTables });
+    }
+  }
+
+  document.getElementById('reanalyzeBtn').addEventListener('click', refreshTables);
+
+  setCleanup(() => migSection.stop());
 
   // Show the last known result immediately if we have one (revisiting via
   // hash nav / browser back-forward shouldn't force a live re-analyze);
@@ -1468,7 +1470,10 @@ function mountMigSection(container, projectId, sourceType, getTables, onLockChan
   }
 
   render();
-  return () => { stopped = true; clearTimer(); };
+  return {
+    stop: () => { stopped = true; clearTimer(); },
+    refresh: render,
+  };
 }
 
 // ---------------------------------------------------------------------------
