@@ -159,7 +159,7 @@ async function loadProjectsList() {
     }
     list.innerHTML = projects.map((p) => `
       <div class="list-row" data-id="${esc(p.id)}">
-        <div style="flex:1;">
+        <div style="flex:1;text-align:left;">
           <div class="name">${esc(p.name)}</div>
           <div class="meta">${esc(p.source_config.type)} → ${esc(p.target_config.type)}${p.description ? ' · ' + esc(p.description) : ''} · created ${esc(fmtDate(p.created_at))}</div>
           <div class="mig-progress" data-proj="${esc(p.id)}" style="display:none;margin-top:6px;"></div>
