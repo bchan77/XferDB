@@ -15,6 +15,9 @@ jobs:
         env:
           GIT_SSL_NO_VERIFY: "true"
 
+      - name: Install dependencies
+        run: sudo dnf install -y jq
+
       - name: Trigger Jenkins UI smoke test
         id: trigger
         shell: bash
