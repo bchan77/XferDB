@@ -761,7 +761,7 @@ async function renderTablesList(id) {
     };
   }
 
-  const migSection = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, () => cachedItems, (isLocked, status) => {
+  const migSection = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, project.target_config.type, () => cachedItems, (isLocked, status) => {
     locked = isLocked;
     document.getElementById('lockBanner').innerHTML = locked
       ? `<div class="banner info">Table changes are disabled while a migration is ${esc(status)}.</div>`
@@ -1209,7 +1209,7 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
 // history otherwise. Returns a cleanup function that stops polling.
 // getTables() returns the current list of tables for selection.
 // onLockChange(locked, status) fires whenever table rows should lock/unlock.
-function mountMigSection(container, projectId, sourceType, getTables, onLockChange) {
+function mountMigSection(container, projectId, sourceType, targetType, getTables, onLockChange) {
   let stopped = false;
   let timer = null;
   function clearTimer() {
@@ -1234,7 +1234,7 @@ function mountMigSection(container, projectId, sourceType, getTables, onLockChan
       mountActiveCard(active.id, active.status);
     } else {
       onLockChange(false, '');
-      mountStartForm(migs, sourceType, getTables());
+      mountStartForm(migs, sourceType, targetType, getTables());
     }
   }
 
@@ -1353,8 +1353,9 @@ function mountMigSection(container, projectId, sourceType, getTables, onLockChan
     }
   }
 
-  function mountStartForm(migs, sourceType, tables) {
+  function mountStartForm(migs, sourceType, targetType, tables) {
     const segmentDisabled = sourceType === 'mongodb';
+    const isPgTarget = targetType === 'postgres';
     const tableNames = (tables || []).map(t => t.name);
     container.innerHTML = `
       <h2>Migration</h2>
@@ -1371,6 +1372,13 @@ function mountMigSection(container, projectId, sourceType, getTables, onLockChan
           <div><label>Segment workers</label><input type="number" id="m-segment" value="0" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
           <div></div>
         </div>
+        <details class="advanced" style="margin-top:12px;">
+          <summary>Performance options</summary>
+          <div class="checkbox-row"><input type="checkbox" id="m-async"><label for="m-async">Async pipeline</label><span class="hint" style="margin-left:8px;">Overlap reading and writing for faster throughput</span></div>
+          ${isPgTarget ? `<div class="checkbox-row"><input type="checkbox" id="m-bulk"><label for="m-bulk">Bulk copy (COPY protocol)</label><span class="hint" style="margin-left:8px;">Faster writes; requires empty target tables</span></div>` : ''}
+          <div class="checkbox-row"><input type="checkbox" id="m-accurate"><label for="m-accurate">Accurate row counts</label><span class="hint" style="margin-left:8px;">Use exact counts instead of estimates (slower)</span></div>
+          <div class="checkbox-row" id="m-offset-row" style="display:none;"><input type="checkbox" id="m-offset"><label for="m-offset">Force OFFSET segments</label><span class="hint" style="margin-left:8px;">Use OFFSET-based splitting instead of PK range</span></div>
+        </details>
         ${tableNames.length > 0 ? `
         <div style="margin-top:12px;">
           <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -1399,6 +1407,18 @@ function mountMigSection(container, projectId, sourceType, getTables, onLockChan
       </div>
     `;
 
+    // Show offset option when segment workers > 0
+    const segmentInput = document.getElementById('m-segment');
+    const offsetRow = document.getElementById('m-offset-row');
+    if (segmentInput && offsetRow) {
+      const updateOffsetVisibility = () => {
+        const val = parseInt(segmentInput.value, 10) || 0;
+        offsetRow.style.display = val > 0 ? 'flex' : 'none';
+      };
+      segmentInput.addEventListener('input', updateOffsetVisibility);
+      updateOffsetVisibility();
+    }
+
     // Table selection handlers
     if (tableNames.length > 0) {
       const updateCount = () => {
@@ -1425,6 +1445,10 @@ function mountMigSection(container, projectId, sourceType, getTables, onLockChan
         batch_size: parseInt(document.getElementById('m-batch').value, 10) || 1000,
         recreate_schema: mode === 'recreate',
         truncate: mode === 'truncate',
+        async_pipeline: document.getElementById('m-async')?.checked || false,
+        bulk_copy: document.getElementById('m-bulk')?.checked || false,
+        accurate_counts: document.getElementById('m-accurate')?.checked || false,
+        offset_fallback: document.getElementById('m-offset')?.checked || false,
       };
       // Add selected tables if not all are selected
       if (tableNames.length > 0) {
