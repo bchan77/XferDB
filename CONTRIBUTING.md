@@ -65,11 +65,17 @@ PRs (and pushes) touching `**.go` files run two Gitea Actions workflows:
   `xferdb-matrix` job, which seeds real PostgreSQL/MySQL/MongoDB sources in Kubernetes and runs
   every compatible migration case against them (`SIZE=S`: ~5k rows/table)
 
-Both post a review on the PR when they finish — **APPROVE** on success, **REQUEST_REVIEW** on
-failure — from a bot identity, not a human reviewer, so a PR can show as "approved" before anyone
-has actually looked at it. Maintainers: these need repo secrets `JENKINS_TOKEN` and variables
-`JENKINS_URL`/`JENKINS_USER` configured under Settings → Actions to run at all; without them the
-matrix-gate job fails immediately with no useful log output.
+PRs touching `cmd/xferdb-web/**` (the web UI) also run:
+
+- **UI Smoke Test** (`.gitea/workflows/ui-smoke-test.yaml`) — triggers the Jenkins `xferdb-ui`
+  job, which deploys the XferDB API + web server in Kubernetes and runs Playwright E2E tests
+  (project CRUD, basic smoke tests). Can also be triggered manually via `workflow_dispatch`.
+
+All three workflows post a review on the PR when they finish — **APPROVE** on success,
+**REQUEST_REVIEW** on failure — from a bot identity, not a human reviewer, so a PR can show as
+"approved" before anyone has actually looked at it. Maintainers: these need repo secrets
+`JENKINS_TOKEN` (and `GH_TOKEN` for PR reviews) plus variables `JENKINS_URL`/`JENKINS_USER`
+configured under Settings → Actions to run at all; without them the jobs fail immediately.
 
 ## Reporting Issues
 
