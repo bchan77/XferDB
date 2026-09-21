@@ -145,6 +145,8 @@ async function renderProjectsList() {
 
 async function loadProjectsList() {
   const list = document.getElementById('list');
+  let refreshInterval = null;
+
   try {
     const projects = await api.listProjects();
     if (!projects || projects.length === 0) {
@@ -159,13 +161,58 @@ async function loadProjectsList() {
     }
     list.innerHTML = projects.map((p) => `
       <div class="list-row" data-id="${esc(p.id)}">
-        <div>
+        <div style="flex:1;text-align:left;">
           <div class="name">${esc(p.name)}</div>
           <div class="meta">${esc(p.source_config.type)} → ${esc(p.target_config.type)}${p.description ? ' · ' + esc(p.description) : ''} · created ${esc(fmtDate(p.created_at))}</div>
+          <div class="mig-progress" data-proj="${esc(p.id)}" style="display:none;margin-top:6px;"></div>
         </div>
         <div class="right"><button class="btn small danger" data-del="${esc(p.id)}">Delete</button></div>
       </div>
     `).join('');
+
+    // Function to update migration progress for all projects
+    async function updateMigrationProgress() {
+      for (const p of projects) {
+        try {
+          const migs = await api.listMigrations(p.id);
+          const active = migs.find((m) => m.status === 'pending' || m.status === 'in_progress' || m.status === 'paused');
+          const progressEl = list.querySelector(`.mig-progress[data-proj="${p.id}"]`);
+          if (!progressEl) continue;
+
+          if (active) {
+            progressEl.style.display = 'block';
+            try {
+              const snap = await api.getStats(active.id);
+              const pct = snap.Rows.Total > 0 ? Math.round(snap.Rows.Transferred / snap.Rows.Total * 100) : 0;
+              const statusLabel = active.status === 'in_progress' ? 'migrating' : active.status;
+              progressEl.innerHTML = `
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span class="badge ${esc(active.status)}">${esc(statusLabel)}</span>
+                  <div class="progress-bar" style="flex:1;max-width:150px;"><div class="fill${pct >= 100 ? ' done' : ''}" style="width:${pct}%"></div></div>
+                  <span style="font-size:12px;color:var(--muted);">${pct}%</span>
+                </div>`;
+            } catch {
+              progressEl.innerHTML = `<span class="badge ${esc(active.status)}">${esc(active.status)}</span>`;
+            }
+          } else {
+            // Check if last migration completed
+            const lastMig = migs.length > 0 ? migs[0] : null;
+            if (lastMig && (lastMig.status === 'completed' || lastMig.status === 'failed' || lastMig.status === 'cancelled')) {
+              progressEl.style.display = 'block';
+              progressEl.innerHTML = `<span class="badge ${esc(lastMig.status)}">${esc(lastMig.status)}</span>`;
+            } else {
+              progressEl.style.display = 'none';
+            }
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Initial update
+    updateMigrationProgress();
+    // Refresh every 3 seconds
+    refreshInterval = setInterval(updateMigrationProgress, 3000);
+
     list.querySelectorAll('.list-row').forEach((row) => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('[data-del]')) return;
@@ -192,6 +239,11 @@ async function loadProjectsList() {
         }
       });
     });
+
+    // Set cleanup function to stop the refresh interval
+    setCleanup(() => {
+      if (refreshInterval) clearInterval(refreshInterval);
+    });
   } catch (err) {
     list.innerHTML = errorBanner('Could not load projects: ' + err.message, { retry: loadProjectsList });
   }
@@ -215,8 +267,12 @@ async function renderProjectCreate() {
     <details class="advanced">
       <summary>Advanced transfer options</summary>
       <div class="field-row">
-        <div><label>Batch size</label><input type="number" id="p-batch" value="1000"></div>
-        <div><label>Table workers</label><input type="number" id="p-workers" value="1"></div>
+        <div><label>Batch size</label><input type="number" id="p-batch" value="1000"><div class="hint">Rows per INSERT batch</div></div>
+        <div><label>Table workers</label><input type="number" id="p-workers" value="1"><div class="hint">Parallel tables to migrate</div></div>
+      </div>
+      <div class="field-row">
+        <div id="p-segment-row"><label>Segment workers</label><input type="number" id="p-segment" value="0"><div class="hint" id="p-segment-hint">Workers per table (0 = disabled)</div></div>
+        <div></div>
       </div>
     </details>
     <div id="createErr"></div>
@@ -229,6 +285,22 @@ async function renderProjectCreate() {
   const tgtEditor = document.getElementById('tgtEditor');
   mountConnEditor(srcEditor, 'src', { type: 'postgres' }, false);
   mountConnEditor(tgtEditor, 'tgt', { type: 'postgres' }, true);
+
+  // Disable segment workers for MongoDB sources
+  function updateSegmentState() {
+    const srcType = document.getElementById('src-type').value;
+    const segmentInput = document.getElementById('p-segment');
+    const segmentHint = document.getElementById('p-segment-hint');
+    if (srcType === 'mongodb') {
+      segmentInput.disabled = true;
+      segmentInput.value = '0';
+      segmentHint.textContent = 'Not supported for MongoDB sources';
+    } else {
+      segmentInput.disabled = false;
+      segmentHint.textContent = 'Workers per table (0 = disabled)';
+    }
+  }
+  document.getElementById('src-type').addEventListener('change', updateSegmentState);
 
   document.getElementById('createBtn').addEventListener('click', async () => {
     const name = document.getElementById('p-name').value.trim();
@@ -246,6 +318,7 @@ async function renderProjectCreate() {
       transfer_config: {
         batch_size: parseInt(document.getElementById('p-batch').value, 10) || 1000,
         table_workers: parseInt(document.getElementById('p-workers').value, 10) || 1,
+        segment_workers: parseInt(document.getElementById('p-segment').value, 10) || 0,
         on_error: 'abort',
       },
     };
@@ -446,6 +519,17 @@ async function renderProjectSettings(id) {
       <div id="editConnArea" data-open="0"></div>
       <div id="preflightArea"></div>
     </div>
+    <div class="section">
+      <h2>Schema Plan</h2>
+      <p>The schema plan stores auto-detected column types and any manual overrides you've made.</p>
+      <div id="resetAllArea"></div>
+      <button class="btn danger" id="resetAllBtn">Reset All Schema Plans</button>
+    </div>
+    <div class="section">
+      <h2>Support &amp; Diagnostics</h2>
+      <p>Download a support bundle containing project configuration, migration history, and schema information for troubleshooting. Credentials are automatically redacted.</p>
+      <button class="btn" id="downloadBundleBtn">Download Support Bundle</button>
+    </div>
   `;
 
   document.getElementById('deleteProjBtn').addEventListener('click', async () => {
@@ -461,6 +545,51 @@ async function renderProjectSettings(id) {
       navigate('#/');
     } catch (err) {
       document.getElementById('connBanner').innerHTML = errorBanner('Delete failed: ' + err.message);
+    }
+  });
+
+  document.getElementById('resetAllBtn').addEventListener('click', async () => {
+    const ok = await confirmModal({
+      title: 'Reset all schema plans?',
+      body: 'This removes all schema plans and overrides for every table/collection in this project. You can re-analyze to regenerate them.',
+      confirmLabel: 'Reset All',
+      danger: true,
+    });
+    if (!ok) return;
+    const btn = document.getElementById('resetAllBtn');
+    const area = document.getElementById('resetAllArea');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Resetting…';
+    try {
+      await api.resetSchemaPlan(id, null);
+      area.innerHTML = `<div class="banner ok"><span>All schema plans have been reset.</span></div>`;
+      btn.disabled = false;
+      btn.textContent = 'Reset All Schema Plans';
+    } catch (err) {
+      area.innerHTML = errorBanner('Reset failed: ' + err.message);
+      btn.disabled = false;
+      btn.textContent = 'Reset All Schema Plans';
+    }
+  });
+
+  document.getElementById('downloadBundleBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('downloadBundleBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Generating…';
+    try {
+      // Trigger download via hidden link
+      const url = `/api/v1/projects/${encodeURIComponent(id)}/support-bundle`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      btn.disabled = false;
+      btn.textContent = 'Download Support Bundle';
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Download Support Bundle';
     }
   });
 
@@ -512,24 +641,27 @@ function startProgressTicker(container, labelFn) {
 // it throws on failure so the caller can drive the loading/error UI itself
 // (needed so a later lock-state change can re-render from cached items
 // without re-running analyze).
-async function loadTables(id, project) {
+async function loadTables(id, project, analyzeOpts = {}) {
   const area = document.getElementById('tablesArea');
   const startedAt = Date.now();
   const elapsed = () => fmtDuration(Math.floor((Date.now() - startedAt) / 1000));
 
   if (project.source_config.type === 'mongodb') {
     let current = null; // { collection, scanned, target }
-    const stopTicker = startProgressTicker(area, () => current
-      ? `Sampling ${current.collection}: ${fmtInt(current.scanned)} / ${fmtInt(current.target)} — ${elapsed()} elapsed`
-      : `Connecting… ${elapsed()} elapsed`);
+    const stopTicker = startProgressTicker(area, () => {
+      if (!current) return `Listing collections… ${elapsed()} elapsed`;
+      if (current.scanned === 0) return `Counting ${current.collection}… ${elapsed()} elapsed`;
+      return `Sampling ${current.collection}: ${fmtInt(current.scanned)} / ${fmtInt(current.target)} — ${elapsed()} elapsed`;
+    });
     const collections = [];
     try {
-      await analyzeMongoStream(id, {}, (evt) => {
+      await analyzeMongoStream(id, analyzeOpts, (evt) => {
         if (evt.type === 'progress') {
           current = { collection: evt.collection, scanned: evt.scanned, target: evt.target };
         } else if (evt.type === 'collection') {
           const fields = (evt.schema && evt.schema.fields) || [];
-          collections.push({ name: evt.collection, fieldCount: fields.length, warnings: evt.warnings || [] });
+          const docCount = (evt.schema && evt.schema.estimated_count) || 0;
+          collections.push({ name: evt.collection, fieldCount: fields.length, docCount, warnings: evt.warnings || [] });
           current = null;
         } else if (evt.type === 'error') {
           throw new Error(evt.error);
@@ -541,14 +673,14 @@ async function loadTables(id, project) {
     return collections.map((c) => ({
       name: c.name,
       badge: c.warnings.length ? 'warn' : 'ok',
-      badgeText: c.warnings.length ? 'warning' : `${c.fieldCount} fields`,
+      badgeText: c.warnings.length ? 'warning' : `${fmtInt(c.docCount)} docs · ${c.fieldCount} fields`,
     }));
   }
 
   const stopTicker = startProgressTicker(area, () => `Analyzing — ${elapsed()} elapsed`);
   let result;
   try {
-    result = await api.analyze(id, {});
+    result = await api.analyze(id, analyzeOpts);
   } finally {
     stopTicker();
   }
@@ -571,6 +703,7 @@ async function renderTablesList(id) {
     return;
   }
   const label = project.source_config.type === 'mongodb' ? 'Collections' : 'Tables';
+  const isMongo = project.source_config.type === 'mongodb';
   document.title = `XferDB — ${project.name}`;
   app.innerHTML = `
     <div class="breadcrumb"><a href="#/">Projects</a> / ${esc(project.name)}</div>
@@ -581,6 +714,24 @@ async function renderTablesList(id) {
     <div class="section" id="migCardSection"></div>
     <div class="section">
       <div class="page-header"><h2>${label}</h2><button class="btn" id="reanalyzeBtn">Re-analyze</button></div>
+      ${isMongo ? `
+      <details class="advanced" id="analyzeOptions">
+        <summary>Sampling options</summary>
+        <div class="field-row">
+          <div><label>Sample size</label><input type="number" id="opt-sampleSize" value="2000"><div class="hint">Docs to sample for small collections</div></div>
+          <div><label>Sample %</label><input type="number" id="opt-samplePct" value="1" step="0.1"><div class="hint">% of docs to sample for large collections</div></div>
+        </div>
+        <div class="field-row">
+          <div><label>Threshold</label><input type="number" id="opt-sampleThreshold" value="100000"><div class="hint">Doc count to switch from size to %</div></div>
+          <div></div>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="opt-ai" disabled><label for="opt-ai">Enable AI annotations</label><span class="hint">(coming soon)</span>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="opt-accurateCounts"><label for="opt-accurateCounts">Accurate counts</label><span class="hint">Use exact counts instead of estimates (slower)</span>
+        </div>
+      </details>` : ''}
       <div id="lockBanner"></div>
       <div id="tablesArea"></div>
     </div>
@@ -594,10 +745,27 @@ async function renderTablesList(id) {
     renderTableCards(area, id, cachedItems, locked);
   }
 
+  function readAnalyzeOpts() {
+    if (!isMongo) return {};
+    const sampleSize = parseInt(document.getElementById('opt-sampleSize')?.value, 10);
+    const samplePct = parseFloat(document.getElementById('opt-samplePct')?.value);
+    const sampleThreshold = parseInt(document.getElementById('opt-sampleThreshold')?.value, 10);
+    const ai = document.getElementById('opt-ai')?.checked;
+    const accurateCounts = document.getElementById('opt-accurateCounts')?.checked;
+    return {
+      sample_size: sampleSize || 2000,
+      sample_pct: samplePct || 1,
+      sample_threshold: sampleThreshold || 100000,
+      ai: ai || false,
+      accurate_counts: accurateCounts || false,
+    };
+  }
+
   async function refreshTables() {
     if (locked) return;
     try {
-      cachedItems = await loadTables(id, project);
+      const analyzeOpts = readAnalyzeOpts();
+      cachedItems = await loadTables(id, project, analyzeOpts);
       tablesCache.set(id, cachedItems);
       renderRows();
     } catch (err) {
@@ -607,7 +775,7 @@ async function renderTablesList(id) {
 
   document.getElementById('reanalyzeBtn').addEventListener('click', refreshTables);
 
-  const stopMig = mountMigSection(document.getElementById('migCardSection'), id, (isLocked, status) => {
+  const stopMig = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, () => cachedItems, (isLocked, status) => {
     locked = isLocked;
     document.getElementById('lockBanner').innerHTML = locked
       ? `<div class="banner info">Table changes are disabled while a migration is ${esc(status)}.</div>`
@@ -814,6 +982,7 @@ async function renderRelationalSplit(area, id, tableName, locked, targetDialect)
 
   const editOpts = { showRename: false, showStrategy: false, typeOptions: typesForDialect(targetDialect) };
 
+  const hasOverrides = rows.some((r) => r.overridden);
   area.innerHTML = `
     ${!tgtExists
       ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created with these settings when the migration runs.</div>'
@@ -824,6 +993,12 @@ async function renderRelationalSplit(area, id, tableName, locked, targetDialect)
       ${srcCols.map((c, i) => colRowReadOnly(c) + editableRow(rows[i], editOpts)).join('')}
     </div>
     <div id="saveArea"></div>
+    ${hasOverrides ? `
+    <details class="advanced">
+      <summary>Reset schema plan</summary>
+      <p>This removes any overrides for this table and reverts to the auto-detected schema.</p>
+      <button class="btn danger" id="resetTableBtn">Reset this table's schema</button>
+    </details>` : ''}
   `;
 
   mountEditableTargetPanel(
@@ -837,6 +1012,29 @@ async function renderRelationalSplit(area, id, tableName, locked, targetDialect)
       onSaved: () => renderRelationalSplit(area, id, tableName, locked, targetDialect),
     }
   );
+
+  const resetBtn = document.getElementById('resetTableBtn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      const ok = await confirmModal({
+        title: 'Reset schema plan?',
+        body: `This removes all overrides for "${tableName}" and reverts to the auto-detected schema.`,
+        confirmLabel: 'Reset',
+        danger: true,
+      });
+      if (!ok) return;
+      resetBtn.disabled = true;
+      resetBtn.innerHTML = '<span class="spinner"></span> Resetting…';
+      try {
+        await api.resetSchemaPlan(id, tableName);
+        navigate(`#/projects/${encodeURIComponent(id)}`);
+      } catch (err) {
+        area.insertAdjacentHTML('beforeend', errorBanner('Reset failed: ' + err.message));
+        resetBtn.disabled = false;
+        resetBtn.textContent = "Reset this table's schema";
+      }
+    });
+  }
 }
 
 async function renderMongoSplit(area, id, tableName, locked) {
@@ -886,6 +1084,11 @@ async function renderMongoSplit(area, id, tableName, locked) {
       ${rows.map((r) => sourceCellHTML(r) + editableRow(r, editOpts)).join('')}
     </div>
     <div id="saveArea"></div>
+    <details class="advanced">
+      <summary>Reset schema plan</summary>
+      <p>This removes the schema plan for this collection. You can re-analyze from the collections list to regenerate it.</p>
+      <button class="btn danger" id="resetCollectionBtn">Reset this collection's schema</button>
+    </details>
   `;
 
   mountEditableTargetPanel(
@@ -899,6 +1102,29 @@ async function renderMongoSplit(area, id, tableName, locked) {
       onSaved: () => renderMongoSplit(area, id, tableName, locked),
     }
   );
+
+  const resetBtn = document.getElementById('resetCollectionBtn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      const ok = await confirmModal({
+        title: 'Reset schema plan?',
+        body: `This removes the schema plan for "${tableName}". You can re-analyze from the collections list to regenerate it.`,
+        confirmLabel: 'Reset',
+        danger: true,
+      });
+      if (!ok) return;
+      resetBtn.disabled = true;
+      resetBtn.innerHTML = '<span class="spinner"></span> Resetting…';
+      try {
+        await api.resetSchemaPlan(id, tableName);
+        navigate(`#/projects/${encodeURIComponent(id)}`);
+      } catch (err) {
+        area.insertAdjacentHTML('beforeend', errorBanner('Reset failed: ' + err.message));
+        resetBtn.disabled = false;
+        resetBtn.textContent = "Reset this collection's schema";
+      }
+    });
+  }
 }
 
 async function renderTableDetail(id, tableName) {
@@ -979,8 +1205,9 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
 // tables screen: a live-polling progress card with Pause/Resume/Cancel while
 // a migration is pending/in_progress/paused, or a "Run Migration" form plus
 // history otherwise. Returns a cleanup function that stops polling.
+// getTables() returns the current list of tables for selection.
 // onLockChange(locked, status) fires whenever table rows should lock/unlock.
-function mountMigSection(container, projectId, onLockChange) {
+function mountMigSection(container, projectId, sourceType, getTables, onLockChange) {
   let stopped = false;
   let timer = null;
   function clearTimer() {
@@ -1002,14 +1229,14 @@ function mountMigSection(container, projectId, onLockChange) {
     const active = findActiveMigration(migs);
     if (active) {
       onLockChange(true, active.status);
-      mountActiveCard(active.id);
+      mountActiveCard(active.id, active.status);
     } else {
       onLockChange(false, '');
-      mountStartForm(migs);
+      mountStartForm(migs, sourceType, getTables());
     }
   }
 
-  function mountActiveCard(migId) {
+  function mountActiveCard(migId, initialStatus) {
     container.innerHTML = `
       <div class="page-header">
         <h2>Migration</h2>
@@ -1019,11 +1246,55 @@ function mountMigSection(container, projectId, onLockChange) {
       <div class="actions-row"><a class="btn small" href="#/migrations/${encodeURIComponent(migId)}">View full progress</a></div>
     `;
 
+    let currentStatus = initialStatus;
+
+    function renderPausedState(isOrphaned = false) {
+      const body = document.getElementById('migCardBody');
+      const actionsEl = document.getElementById('migActions');
+      if (!body || !actionsEl) return;
+      body.innerHTML = `
+        <div class="stat-grid">
+          <div class="stat-box"><div class="label">Phase</div><div class="value"><span class="badge warn">paused</span></div></div>
+          <div class="stat-box"><div class="label">Status</div><div class="value">${isOrphaned ? 'Migration is orphaned' : 'Migration is paused'}</div></div>
+        </div>
+        <div class="hint">${isOrphaned
+          ? 'This migration was paused when the server restarted. Delete it to start a new migration.'
+          : 'Stats are not available while paused. Resume to continue.'}</div>
+        ${isOrphaned ? '<div id="deleteArea" style="margin-top:12px;"></div>' : ''}
+      `;
+      if (isOrphaned) {
+        const deleteArea = document.getElementById('deleteArea');
+        deleteArea.innerHTML = `<button class="btn danger" id="deleteMigBtn">Delete Migration</button>`;
+        document.getElementById('deleteMigBtn').addEventListener('click', async () => {
+          const ok = await confirmModal({
+            title: 'Delete migration?',
+            body: 'This removes the orphaned migration record. Any partial data written to the target remains.',
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!ok) return;
+          try {
+            await api.deleteMigration(migId);
+            render();
+          } catch (err) {
+            deleteArea.innerHTML = errorBanner('Delete failed: ' + err.message);
+          }
+        });
+        actionsEl.innerHTML = ''; // No resume/cancel for orphaned
+      } else {
+        mountMigActions(actionsEl, migId, 'paused', {
+          onDone: () => { clearTimer(); render(); },
+          errorArea: body,
+        });
+      }
+    }
+
     async function tick() {
       if (stopped) return;
       try {
         const snap = await api.getStats(migId);
         if (stopped) return;
+        currentStatus = snap.Phase;
         const body = document.getElementById('migCardBody');
         const actionsEl = document.getElementById('migActions');
         if (!body || !actionsEl) return;
@@ -1049,15 +1320,40 @@ function mountMigSection(container, projectId, onLockChange) {
           return;
         }
       } catch (err) {
+        // Stats not available - migration may be paused or orphaned
+        if (currentStatus === 'paused') {
+          // Stats fail for paused migration = orphaned (server restarted)
+          renderPausedState(true);
+          // Poll to detect if user deletes via API
+          if (!stopped) timer = setTimeout(render, 5000);
+          return;
+        }
         const body = document.getElementById('migCardBody');
         if (body) body.insertAdjacentHTML('afterbegin', errorBanner('Stats fetch failed: ' + err.message));
       }
       if (!stopped) timer = setTimeout(tick, 1500);
     }
-    tick();
+
+    // Try to get stats first - if it fails and we're paused, it's orphaned
+    if (initialStatus === 'paused') {
+      // Try stats to check if migration is actually running
+      api.getStats(migId).then(() => {
+        // Stats available = migration is actually running, just paused
+        renderPausedState(false);
+        timer = setTimeout(render, 3000);
+      }).catch(() => {
+        // Stats unavailable = orphaned
+        renderPausedState(true);
+        timer = setTimeout(render, 5000);
+      });
+    } else {
+      tick();
+    }
   }
 
-  function mountStartForm(migs) {
+  function mountStartForm(migs, sourceType, tables) {
+    const segmentDisabled = sourceType === 'mongodb';
+    const tableNames = (tables || []).map(t => t.name);
     container.innerHTML = `
       <h2>Migration</h2>
       <details class="advanced" open>
@@ -1066,9 +1362,33 @@ function mountMigSection(container, projectId, onLockChange) {
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
         <div class="field-row">
-          <div><label>Table workers</label><input type="number" id="m-workers" value="1"></div>
-          <div><label>Batch size</label><input type="number" id="m-batch" value="1000"></div>
+          <div><label>Table workers</label><input type="number" id="m-workers" value="1"><div class="hint">Parallel tables to migrate</div></div>
+          <div><label>Batch size</label><input type="number" id="m-batch" value="1000"><div class="hint">Rows per INSERT batch</div></div>
         </div>
+        <div class="field-row">
+          <div><label>Segment workers</label><input type="number" id="m-segment" value="0" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
+          <div></div>
+        </div>
+        ${tableNames.length > 0 ? `
+        <div style="margin-top:12px;">
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            Tables to migrate
+            <span style="font-weight:normal;color:var(--muted);">(<span id="tableCount">${tableNames.length}</span> of ${tableNames.length} selected)</span>
+          </label>
+          <div class="checkbox-row" style="margin-bottom:6px;">
+            <input type="checkbox" id="selectAllTables" checked>
+            <label for="selectAllTables">Select all</label>
+          </div>
+          <div id="tableCheckboxes" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;">
+            ${tableNames.map(name => `
+              <div class="checkbox-row" style="margin:4px 0;">
+                <input type="checkbox" class="table-cb" id="tbl-${esc(name)}" value="${esc(name)}" checked>
+                <label for="tbl-${esc(name)}" class="mono" style="font-size:12px;">${esc(name)}</label>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        ` : ''}
       </details>
       <div id="startErr"></div>
       <button class="btn primary" id="startMigBtn">Run Migration</button>
@@ -1076,14 +1396,45 @@ function mountMigSection(container, projectId, onLockChange) {
         <details class="advanced"><summary>History</summary><div id="migHistory"></div></details>
       </div>
     `;
+
+    // Table selection handlers
+    if (tableNames.length > 0) {
+      const updateCount = () => {
+        const checked = container.querySelectorAll('.table-cb:checked').length;
+        document.getElementById('tableCount').textContent = checked;
+      };
+      document.getElementById('selectAllTables').addEventListener('change', (e) => {
+        container.querySelectorAll('.table-cb').forEach(cb => { cb.checked = e.target.checked; });
+        updateCount();
+      });
+      container.querySelectorAll('.table-cb').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const allChecked = container.querySelectorAll('.table-cb:checked').length === tableNames.length;
+          document.getElementById('selectAllTables').checked = allChecked;
+          updateCount();
+        });
+      });
+    }
     document.getElementById('startMigBtn').addEventListener('click', async () => {
       const mode = document.querySelector('input[name=schemaMode]:checked').value;
       const body = {
         table_workers: parseInt(document.getElementById('m-workers').value, 10) || 1,
+        segment_workers: parseInt(document.getElementById('m-segment').value, 10) || 0,
         batch_size: parseInt(document.getElementById('m-batch').value, 10) || 1000,
         recreate_schema: mode === 'recreate',
         truncate: mode === 'truncate',
       };
+      // Add selected tables if not all are selected
+      if (tableNames.length > 0) {
+        const selectedTables = Array.from(container.querySelectorAll('.table-cb:checked')).map(cb => cb.value);
+        if (selectedTables.length === 0) {
+          document.getElementById('startErr').innerHTML = errorBanner('Please select at least one table to migrate.');
+          return;
+        }
+        if (selectedTables.length < tableNames.length) {
+          body.tables = selectedTables;
+        }
+      }
       const btn = document.getElementById('startMigBtn');
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> Starting…';
@@ -1159,6 +1510,10 @@ async function renderMigrationProgress(migId) {
 
   let stopped = false;
   let timer = null;
+  let historyLoaded = false;
+  let historyOpen = false;
+  let cachedHistoryHTML = '<div class="loading-block"><span class="spinner"></span> Loading history…</div>';
+
   function clearTimer() {
     if (timer) { clearTimeout(timer); timer = null; }
   }
@@ -1187,6 +1542,15 @@ async function renderMigrationProgress(migId) {
         <div class="stat-box"><div class="label">Rate</div><div class="value">${Math.round(rows.RatePerSecond || 0)}/s</div></div>
       </div>
       <div class="card">
+        <strong>Resource Usage</strong>
+        <div class="stat-grid" style="margin-top:8px;">
+          <div class="stat-box"><div class="label">CPU</div><div class="value">${((snap.resource?.CPUPercent) || 0).toFixed(1)}%</div></div>
+          <div class="stat-box"><div class="label">Memory</div><div class="value">${((snap.resource?.MemAllocMB) || 0).toFixed(1)} MB</div></div>
+          <div class="stat-box"><div class="label">Goroutines</div><div class="value">${snap.resource?.Goroutines || 0}</div></div>
+          <div class="stat-box"><div class="label">Sys Memory</div><div class="value">${((snap.resource?.MemSysMB) || 0).toFixed(1)} MB</div></div>
+        </div>
+      </div>
+      <div class="card">
         <strong>Rows: ${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</strong>
         <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
       </div>
@@ -1194,7 +1558,66 @@ async function renderMigrationProgress(migId) {
         <strong>Tables</strong>
         ${(snap.TableDetails || []).map(tableProgressRow).join('') || '<div class="hint">No tables yet.</div>'}
       </div>
+      <details class="advanced" id="statsHistoryDetails" ${historyOpen ? 'open' : ''}>
+        <summary>Stats History</summary>
+        <div id="statsHistoryContent">${cachedHistoryHTML}</div>
+      </details>
     `;
+    // Set up event listener for stats history toggle
+    const detailsEl = document.getElementById('statsHistoryDetails');
+    if (detailsEl) {
+      detailsEl.addEventListener('toggle', async () => {
+        historyOpen = detailsEl.open;
+        if (detailsEl.open && !historyLoaded) {
+          historyLoaded = true;
+          await loadStatsHistory();
+        }
+      });
+    }
+  }
+
+  async function loadStatsHistory() {
+    const container = document.getElementById('statsHistoryContent');
+    if (!container) return;
+    try {
+      const records = await api.getStatsHistory(migId);
+      if (!records || records.length === 0) {
+        cachedHistoryHTML = '<div class="hint">No history recorded yet.</div>';
+        container.innerHTML = cachedHistoryHTML;
+        return;
+      }
+      // Build table showing key metrics over time
+      const tableRows = records.map(r => {
+        const pct = r.rows_total > 0 ? Math.round((r.rows_transferred * 100) / r.rows_total) : 0;
+        const ts = new Date(r.timestamp).toLocaleTimeString();
+        return `
+          <tr>
+            <td>${ts}</td>
+            <td>${fmtDuration(r.elapsed_secs)}</td>
+            <td><span class="badge ${r.phase === 'complete' ? 'ok' : r.phase === 'failed' ? 'fail' : 'progress'}">${esc(r.phase)}</span></td>
+            <td>${fmtInt(r.rows_transferred)} / ${fmtInt(r.rows_total)} (${pct}%)</td>
+            <td>${Math.round(r.rate_per_sec || 0)}/s</td>
+            <td>${r.tables_done}/${r.tables_total}</td>
+            <td>${(r.cpu_percent || 0).toFixed(1)}%</td>
+            <td>${(r.mem_alloc_mb || 0).toFixed(1)} MB</td>
+          </tr>
+        `;
+      }).join('');
+      cachedHistoryHTML = `
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="stats-history-table">
+            <thead>
+              <tr><th>Time</th><th>Elapsed</th><th>Phase</th><th>Rows</th><th>Rate</th><th>Tables</th><th>CPU</th><th>Memory</th></tr>
+            </thead>
+            <tbody>${tableRows}</tbody>
+          </table>
+        </div>
+      `;
+      container.innerHTML = cachedHistoryHTML;
+    } catch (err) {
+      cachedHistoryHTML = `<div class="banner error">Failed to load history: ${esc(err.message)}</div>`;
+      container.innerHTML = cachedHistoryHTML;
+    }
   }
 
   async function tick() {
@@ -1217,7 +1640,56 @@ async function renderMigrationProgress(migId) {
     stopped = true;
     clearTimer();
   });
-  tick();
+
+  // For completed/failed/cancelled migrations, load from history instead of live stats
+  const finishedStatuses = ['completed', 'failed', 'cancelled'];
+  if (finishedStatuses.includes(mig.status)) {
+    // Load last stats from history
+    try {
+      const records = await api.getStatsHistory(migId);
+      if (records && records.length > 0) {
+        const last = records[records.length - 1];
+        // Build a snap-like object from the history record
+        const snap = {
+          Phase: last.phase,
+          ElapsedSeconds: last.elapsed_secs,
+          ETASeconds: 0,
+          Rows: {
+            Total: last.rows_total,
+            Transferred: last.rows_transferred,
+            RatePerSecond: last.rate_per_sec,
+          },
+          resource: {
+            CPUPercent: last.cpu_percent,
+            MemAllocMB: last.mem_alloc_mb,
+            MemSysMB: last.mem_sys_mb,
+            Goroutines: last.goroutines,
+          },
+          TableDetails: [], // Not stored in history records
+          Errors: mig.error ? [mig.error] : [],
+        };
+        renderProgress(snap);
+      } else {
+        // No history, show minimal info from migration record
+        const snap = {
+          Phase: mig.status === 'completed' ? 'complete' : mig.status,
+          ElapsedSeconds: 0,
+          ETASeconds: 0,
+          Rows: { Total: 0, Transferred: 0, RatePerSecond: 0 },
+          resource: {},
+          TableDetails: [],
+          Errors: mig.error ? [mig.error] : [],
+        };
+        renderProgress(snap);
+      }
+    } catch (err) {
+      const area = document.getElementById('progressArea');
+      if (area) area.innerHTML = errorBanner('Failed to load migration stats: ' + err.message);
+    }
+  } else {
+    // Active migration - use live polling
+    tick();
+  }
 }
 
 // ---------------------------------------------------------------------------

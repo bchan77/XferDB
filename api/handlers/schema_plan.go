@@ -24,6 +24,7 @@ func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, p
 		SamplePct       float64 `json:"sample_pct"`
 		SampleThreshold int64   `json:"sample_threshold"`
 		AI              bool    `json:"ai"`
+		AccurateCounts  bool    `json:"accurate_counts"`
 	}
 	// Decode optional body; ignore errors (all fields have safe defaults).
 	json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
@@ -31,9 +32,10 @@ func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, p
 	ctx := r.Context()
 
 	sampler, err := mongoanalyzer.NewSampler(ctx, dsn, mongoanalyzer.SamplerOptions{
-		SampleSize: req.SampleSize,
-		Threshold:  req.SampleThreshold,
-		SamplePct:  req.SamplePct,
+		SampleSize:     req.SampleSize,
+		Threshold:      req.SampleThreshold,
+		SamplePct:      req.SamplePct,
+		AccurateCounts: req.AccurateCounts,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "connect to MongoDB: "+err.Error())

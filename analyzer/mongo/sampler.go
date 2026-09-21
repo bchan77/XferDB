@@ -80,11 +80,16 @@ type ProgressFunc func(collection string, scanned, target int)
 // instead (capped at MaxSampled), so large collections get a proportionally
 // larger sample rather than the same fixed slice as a tiny one. Zero-valued
 // fields fall back to the Default* constants.
+//
+// AccurateCounts uses CountDocuments() instead of EstimatedDocumentCount().
+// This is slower but gives exact counts, which is useful when estimated
+// counts are stale or inaccurate (e.g. after bulk deletes).
 type SamplerOptions struct {
-	SampleSize int
-	Threshold  int64
-	SamplePct  float64
-	MaxSampled int
+	SampleSize     int
+	Threshold      int64
+	SamplePct      float64
+	MaxSampled     int
+	AccurateCounts bool
 }
 
 func (o SamplerOptions) withDefaults() SamplerOptions {
@@ -208,11 +213,20 @@ func (s *Sampler) SampleCollection(ctx context.Context, collection string) (*Col
 func (s *Sampler) SampleCollectionWithProgress(ctx context.Context, collection string, progressFn ProgressFunc) (*CollectionSample, error) {
 	coll := s.client.Database(s.database).Collection(collection)
 
-	estimatedCount, err := coll.EstimatedDocumentCount(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("estimated count %s: %w", collection, err)
+	var docCount int64
+	var err error
+	if s.opts.AccurateCounts {
+		docCount, err = coll.CountDocuments(ctx, bson.D{})
+		if err != nil {
+			return nil, fmt.Errorf("count documents %s: %w", collection, err)
+		}
+	} else {
+		docCount, err = coll.EstimatedDocumentCount(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("estimated count %s: %w", collection, err)
+		}
 	}
-	sampleSize := s.effectiveSampleSize(estimatedCount)
+	sampleSize := s.effectiveSampleSize(docCount)
 
 	// Report initial progress (0 scanned).
 	if progressFn != nil {
@@ -223,7 +237,7 @@ func (s *Sampler) SampleCollectionWithProgress(ctx context.Context, collection s
 
 	// When sampling 100% (or more than estimated), use find() instead of $sample.
 	// $sample is slow for large samples because it randomly shuffles documents.
-	if sampleSize >= int(estimatedCount) {
+	if sampleSize >= int(docCount) {
 		cursor, err = coll.Find(ctx, bson.D{},
 			options.Find().SetBatchSize(10000))
 		if err != nil {
@@ -303,7 +317,7 @@ func (s *Sampler) SampleCollectionWithProgress(ctx context.Context, collection s
 
 	return &CollectionSample{
 		Collection:     collection,
-		EstimatedCount: estimatedCount,
+		EstimatedCount: docCount,
 		SampleSize:     totalDocs,
 		Fields:         fields,
 	}, nil
