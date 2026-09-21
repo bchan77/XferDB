@@ -525,6 +525,11 @@ async function renderProjectSettings(id) {
       <div id="resetAllArea"></div>
       <button class="btn danger" id="resetAllBtn">Reset All Schema Plans</button>
     </div>
+    <div class="section">
+      <h2>Support &amp; Diagnostics</h2>
+      <p>Download a support bundle containing project configuration, migration history, and schema information for troubleshooting. Credentials are automatically redacted.</p>
+      <button class="btn" id="downloadBundleBtn">Download Support Bundle</button>
+    </div>
   `;
 
   document.getElementById('deleteProjBtn').addEventListener('click', async () => {
@@ -564,6 +569,27 @@ async function renderProjectSettings(id) {
       area.innerHTML = errorBanner('Reset failed: ' + err.message);
       btn.disabled = false;
       btn.textContent = 'Reset All Schema Plans';
+    }
+  });
+
+  document.getElementById('downloadBundleBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('downloadBundleBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Generating…';
+    try {
+      // Trigger download via hidden link
+      const url = `/api/v1/projects/${encodeURIComponent(id)}/support-bundle`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      btn.disabled = false;
+      btn.textContent = 'Download Support Bundle';
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Download Support Bundle';
     }
   });
 
