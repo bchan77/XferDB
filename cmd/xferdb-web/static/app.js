@@ -1375,7 +1375,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         <details class="advanced" style="margin-top:12px;">
           <summary>Performance options</summary>
           <div class="checkbox-row"><input type="checkbox" id="m-async"><label for="m-async">Async pipeline</label><span class="hint" style="margin-left:8px;">Overlap reading and writing for faster throughput</span></div>
-          ${isPgTarget ? `<div class="checkbox-row"><input type="checkbox" id="m-bulk"><label for="m-bulk">Bulk copy (COPY protocol)</label><span class="hint" style="margin-left:8px;">Faster writes; requires empty target tables</span></div>` : ''}
+          ${isPgTarget ? `<div class="checkbox-row"><input type="checkbox" id="m-bulk"><label for="m-bulk">Bulk copy (COPY protocol)</label><span class="hint" style="margin-left:8px;">Faster writes; only available with truncate or drop &amp; recreate above</span></div>` : ''}
           <div class="checkbox-row"><input type="checkbox" id="m-accurate"><label for="m-accurate">Accurate row counts</label><span class="hint" style="margin-left:8px;">Use exact counts instead of estimates (slower)</span></div>
           <div class="checkbox-row" id="m-offset-row" style="display:none;"><input type="checkbox" id="m-offset"><label for="m-offset">Force OFFSET segments</label><span class="hint" style="margin-left:8px;">Use OFFSET-based splitting instead of PK range</span></div>
         </details>
@@ -1417,6 +1417,23 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
       };
       segmentInput.addEventListener('input', updateOffsetVisibility);
       updateOffsetVisibility();
+    }
+
+    // Bulk copy (COPY protocol) has no ON CONFLICT support, so it only
+    // produces correct results when the target tables are guaranteed empty
+    // going in -- tie its checkbox to the truncate/recreate schema mode
+    // instead of letting it be picked alongside "keep existing data", which
+    // fails every table with a duplicate-key error.
+    const bulkInput = document.getElementById('m-bulk');
+    if (bulkInput) {
+      const updateBulkAvailability = () => {
+        const mode = document.querySelector('input[name=schemaMode]:checked').value;
+        const allowed = mode !== 'none';
+        bulkInput.disabled = !allowed;
+        if (!allowed) bulkInput.checked = false;
+      };
+      document.querySelectorAll('input[name=schemaMode]').forEach(r => r.addEventListener('change', updateBulkAvailability));
+      updateBulkAvailability();
     }
 
     // Table selection handlers
