@@ -341,6 +341,21 @@ func (t *Target) writeBatchCopy(ctx context.Context, table string, batch *adapte
 	}
 	sort.Strings(cols)
 
+	// lib/pq's COPY encoder always renders a []byte value as a hex-escaped
+	// bytea literal, regardless of the target column's actual type. Source
+	// drivers commonly hand back non-binary columns (e.g. MySQL DECIMAL) as
+	// []byte, which would otherwise get corrupted into bytea gibberish for
+	// any non-bytea column. Convert those to string first so they're copied
+	// as plain text; only genuine bytea columns keep []byte encoding.
+	schema, err := t.cachedSchema(ctx, table)
+	if err != nil {
+		return fmt.Errorf("copy into %s: %w", table, err)
+	}
+	isBytea := make(map[string]bool, len(schema.Columns))
+	for _, c := range schema.Columns {
+		isBytea[c.Name] = strings.EqualFold(c.Type, "bytea")
+	}
+
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -356,7 +371,11 @@ func (t *Target) writeBatchCopy(ctx context.Context, table string, batch *adapte
 	vals := make([]interface{}, len(cols))
 	for _, rec := range batch.Records {
 		for i, col := range cols {
-			vals[i] = rec[col]
+			v := rec[col]
+			if b, ok := v.([]byte); ok && !isBytea[col] {
+				v = string(b)
+			}
+			vals[i] = v
 		}
 		if _, err := stmt.ExecContext(ctx, vals...); err != nil {
 			return fmt.Errorf("copy row into %s: %w", table, err)

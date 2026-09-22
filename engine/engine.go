@@ -200,7 +200,11 @@ func (e *Engine) Run(ctx context.Context) error {
 			}
 		}
 
-		if cfg.BulkCopy {
+		// BulkCopy uses the COPY protocol, which has no ON CONFLICT support and
+		// therefore only produces correct results when every target table is
+		// guaranteed empty going in. Silently honoring it otherwise turns any
+		// pre-existing row into a duplicate-key failure on every single table.
+		if cfg.BulkCopy && (cfg.Truncate || cfg.RecreateSchema) {
 			if bw, ok := e.target.(adapters.BulkCopyWriter); ok {
 				bw.EnableCopy()
 			}
