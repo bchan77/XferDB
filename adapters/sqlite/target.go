@@ -12,12 +12,27 @@ import (
 
 // Target implements adapters.TargetAdapter for SQLite.
 type Target struct {
-	db     *sql.DB
-	config adapters.ConnectionConfig
+	db      *sql.DB
+	config  adapters.ConnectionConfig
+	useCopy bool // use writeBatchFast instead of the per-row path; only safe when target table is clean
 }
 
 func NewTarget() adapters.TargetAdapter {
 	return &Target{}
+}
+
+// EnableCopy switches WriteBatch to writeBatchFast: multi-row INSERT OR
+// REPLACE statements (fewer round-trips/less parsing overhead than one
+// statement per row) plus PRAGMA synchronous = OFF (skip the fsync SQLite
+// normally does on every transaction commit). Implements
+// adapters.BulkCopyWriter. Mirrored here for consistency with the other
+// adapters' precondition (empty target via truncate/recreate-schema), though
+// INSERT OR REPLACE tolerates a non-empty target fine, same as the regular
+// path — the real reason not to enable this outside that precondition is
+// durability, not correctness: synchronous=OFF means a crash or power loss
+// mid-load can leave the table incomplete with no error ever surfaced.
+func (t *Target) EnableCopy() {
+	t.useCopy = true
 }
 
 func (t *Target) Connect(ctx context.Context, config adapters.ConnectionConfig) error {
@@ -165,6 +180,9 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	if len(batch.Records) == 0 {
 		return nil
 	}
+	if t.useCopy {
+		return t.writeBatchFast(ctx, table, batch)
+	}
 
 	// Stable column order from first record.
 	cols := make([]string, 0, len(batch.Records[0]))
@@ -206,6 +224,77 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		}
 		if _, err := stmt.ExecContext(ctx, vals...); err != nil {
 			return fmt.Errorf("insert record into %s: %w", table, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// writeBatchFast is the bulk-copy write path (see EnableCopy). It disables
+// per-commit fsync for this transaction and batches many rows into each
+// INSERT OR REPLACE statement instead of one row per Exec call, chunked to
+// stay under SQLite's bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER;
+// 900 total params is a safe ceiling across the SQLite versions this project
+// targets, including older builds capped at 999).
+func (t *Target) writeBatchFast(ctx context.Context, table string, batch *adapters.Batch) error {
+	cols := make([]string, 0, len(batch.Records[0]))
+	for col := range batch.Records[0] {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+
+	quotedCols := make([]string, len(cols))
+	for i, c := range cols {
+		quotedCols[i] = quote(c)
+	}
+
+	maxRows := 900 / len(cols)
+	if maxRows < 1 {
+		maxRows = 1
+	}
+
+	// PRAGMA synchronous can't be changed inside a transaction, and it's
+	// scoped to the connection it runs on — so this must claim a single
+	// connection from the pool up front and run both the PRAGMA and the
+	// transaction on it, rather than letting BeginTx grab whichever
+	// connection happens to be free.
+	conn, err := t.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("get connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `PRAGMA synchronous = OFF`); err != nil {
+		return fmt.Errorf("set synchronous=off: %w", err)
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for start := 0; start < len(batch.Records); start += maxRows {
+		end := start + maxRows
+		if end > len(batch.Records) {
+			end = len(batch.Records)
+		}
+		chunk := batch.Records[start:end]
+
+		rowPlaceholders := make([]string, len(chunk))
+		allVals := make([]interface{}, 0, len(chunk)*len(cols))
+		ph := "(" + strings.TrimRight(strings.Repeat("?, ", len(cols)), ", ") + ")"
+		for i, rec := range chunk {
+			rowPlaceholders[i] = ph
+			for _, col := range cols {
+				allVals = append(allVals, rec[col])
+			}
+		}
+
+		query := fmt.Sprintf(`INSERT OR REPLACE INTO %s (%s) VALUES %s`,
+			quote(table), strings.Join(quotedCols, ", "), strings.Join(rowPlaceholders, ", "))
+		if _, err := tx.ExecContext(ctx, query, allVals...); err != nil {
+			return fmt.Errorf("insert chunk into %s: %w", table, err)
 		}
 	}
 

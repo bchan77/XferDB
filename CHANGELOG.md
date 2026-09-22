@@ -5,6 +5,8 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Bulk copy for MySQL and SQLite targets** — `--bulk-copy` previously only did something on postgres targets (COPY protocol); it's now implemented for mysql (`LOAD DATA LOCAL INFILE` via a registered `io.Reader`, using `REPLACE INTO TABLE` so a non-empty target degrades gracefully instead of erroring) and sqlite (multi-row `INSERT OR REPLACE` chunked under the bound-parameter limit, plus `PRAGMA synchronous = OFF` for the duration of the write). Still gated by the engine on `--truncate`/`--recreate-schema`. Web UI's "Bulk copy" option is no longer hidden for non-postgres targets.
+- **Adapter test coverage** — `adapters/postgres`, `adapters/mysql`, and `adapters/sqlite` had zero unit tests; each now has a bulk-copy regression suite (postgres/mysql are opt-in via `XFERDB_TEST_TARGET_DSN` against a live database, sqlite runs unconditionally against a temp file) that would have caught the two adapter-specific bugs found while building this: postgres's COPY encoder bytea-mangling non-bytea `[]byte` values (e.g. a MySQL-sourced `DECIMAL` scanned as `[]byte`), and sqlite's `PRAGMA synchronous` rejecting changes inside an active transaction.
 - **Web UI: tables-first project workflow** — clicking a project now lands directly on its
   table/collection list instead of a connection-settings page (moved to `#/projects/:id/settings`).
   That screen shows live migration status with Run/Pause/Resume/Cancel, and locks tables (with an

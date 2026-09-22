@@ -349,7 +349,7 @@ xferdb migrate --truncate
 # Drop and recreate target tables (schema changed on source)
 xferdb migrate --recreate-schema
 
-# Use PostgreSQL COPY protocol for faster writes (combine with --truncate or --recreate-schema)
+# Use the target's fast bulk-load path for writes (combine with --truncate or --recreate-schema)
 xferdb migrate --bulk-copy --recreate-schema
 
 # Async pipeline mode — decouples read/write for higher throughput
@@ -565,7 +565,7 @@ The "Run a migration" form exposes all CLI migration options:
 | Option | Description |
 |--------|-------------|
 | **Async pipeline** | Overlap reading and writing for faster throughput |
-| **Bulk copy** | Use PostgreSQL COPY protocol (PostgreSQL targets only) |
+| **Bulk copy** | Fast bulk-load write path (postgres: COPY, mysql: LOAD DATA LOCAL INFILE, sqlite: batched inserts); only available with truncate or drop & recreate |
 | **Accurate row counts** | Use exact counts instead of estimates (slower) |
 | **Force OFFSET segments** | Use OFFSET-based splitting instead of PK range (when segment workers > 0) |
 

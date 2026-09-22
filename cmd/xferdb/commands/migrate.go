@@ -144,7 +144,7 @@ func init() {
 	migrateCmd.Flags().Int("segment-workers", 1, "Number of parallel workers per table (splits by PK range; falls back to OFFSET when no integer PK)")
 	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --segment-workers)")
 	migrateCmd.Flags().Int("batch-size", 0, "Rows per batch (overrides the project default; 0 = use project default)")
-	migrateCmd.Flags().Bool("bulk-copy", false, "Use PostgreSQL COPY protocol for writes (faster; requires target table to be empty — combine with --truncate or --recreate-schema)")
+	migrateCmd.Flags().Bool("bulk-copy", false, "Use the target's fast bulk-load path for writes — postgres: COPY, mysql: LOAD DATA LOCAL INFILE, sqlite: batched inserts (faster; combine with --truncate or --recreate-schema)")
 	migrateCmd.Flags().String("tables", "", "Comma-separated list of tables to migrate (e.g. orders,public.customers)")
 	migrateCmd.Flags().Bool("accurate-counts", false, "Use accurate row counts instead of estimates (slower for MongoDB but shows correct progress)")
 	migrateCmd.Flags().Bool("async-pipeline", false, "Overlap reading and writing for faster throughput (reads batch N+1 while writing batch N)")

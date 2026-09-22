@@ -32,7 +32,8 @@ defaults:
   segment_workers: 1
   # Rows per batch read from the source.
   batch_size: 5000
-  # Use PostgreSQL COPY protocol when supported (faster).
+  # Use the target's fast bulk-load path when supported (faster). Only takes
+  # effect when combined with truncate or recreate_schema below.
   bulk_copy: true
   # Overlap reads and writes for higher throughput.
   async_pipeline: true
