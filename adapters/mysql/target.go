@@ -1,13 +1,18 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
 
@@ -17,10 +22,21 @@ type Target struct {
 	config  adapters.ConnectionConfig
 	mu      sync.RWMutex
 	schemas map[string]*adapters.TableSchema
+	useCopy bool // use LOAD DATA LOCAL INFILE instead of INSERT; only safe when target table is clean
 }
 
 func NewTarget() adapters.TargetAdapter {
 	return &Target{schemas: make(map[string]*adapters.TableSchema)}
+}
+
+// EnableCopy switches WriteBatch to use LOAD DATA LOCAL INFILE instead of
+// multi-row INSERT. Implements adapters.BulkCopyWriter. Must only be called
+// when the target table is guaranteed empty (truncate or recreate-schema
+// mode) — mirrored here for consistency with the postgres adapter, though
+// LOAD DATA REPLACE (see writeBatchLoadData) tolerates a non-empty target
+// too, unlike postgres's raw COPY.
+func (t *Target) EnableCopy() {
+	t.useCopy = true
 }
 
 func (t *Target) Connect(ctx context.Context, config adapters.ConnectionConfig) error {
@@ -230,6 +246,9 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	if len(batch.Records) == 0 {
 		return nil
 	}
+	if t.useCopy {
+		return t.writeBatchLoadData(ctx, table, batch)
+	}
 
 	schema, err := t.cachedSchema(ctx, table)
 	if err != nil {
@@ -310,6 +329,100 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	}
 
 	return tx.Commit()
+}
+
+// loadDataHandlerSeq gives each writeBatchLoadData call a unique reader-handler
+// name — go-sql-driver/mysql's registry is process-global, and multiple
+// tables can be migrated concurrently (cfg.TableWorkers) against the same
+// *Target, so names must never collide.
+var loadDataHandlerSeq int64
+
+// writeBatchLoadData uses LOAD DATA LOCAL INFILE to stream rows into the
+// table via an in-memory io.Reader registered with the driver. This is
+// dramatically faster than multi-row INSERT for large batches. It uses
+// REPLACE INTO TABLE rather than a bare LOAD DATA, so — unlike postgres's
+// raw COPY — a row that collides with an existing primary key is overwritten
+// rather than aborting the whole batch; EnableCopy's precondition (empty
+// target) should still hold, but this makes the fast path fail closed rather
+// than open if that precondition is ever violated.
+func (t *Target) writeBatchLoadData(ctx context.Context, table string, batch *adapters.Batch) error {
+	cols := make([]string, 0, len(batch.Records[0]))
+	for col := range batch.Records[0] {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+
+	var buf bytes.Buffer
+	for _, rec := range batch.Records {
+		for i, col := range cols {
+			if i > 0 {
+				buf.WriteByte('\t')
+			}
+			writeLoadDataField(&buf, rec[col])
+		}
+		buf.WriteByte('\n')
+	}
+
+	handlerName := fmt.Sprintf("xferdb_%s_%d", table, atomic.AddInt64(&loadDataHandlerSeq, 1))
+	mysql.RegisterReaderHandler(handlerName, func() io.Reader { return bytes.NewReader(buf.Bytes()) })
+	defer mysql.DeregisterReaderHandler(handlerName)
+
+	quotedCols := make([]string, len(cols))
+	for i, c := range cols {
+		quotedCols[i] = quote(c)
+	}
+
+	// CHARACTER SET binary tells the server not to validate/transcode the
+	// input against the connection's charset (utf8mb4 by default), which
+	// otherwise rejects raw binary column values (e.g. BLOB/VARBINARY) as
+	// invalid multi-byte sequences. Plain text columns round-trip unaffected
+	// since their bytes are copied through as-is.
+	query := fmt.Sprintf(
+		`LOAD DATA LOCAL INFILE 'Reader::%s' REPLACE INTO TABLE %s CHARACTER SET binary FIELDS TERMINATED BY '\t' ESCAPED BY '\\' LINES TERMINATED BY '\n' (%s)`,
+		handlerName, quote(table), strings.Join(quotedCols, ", "),
+	)
+	if _, err := t.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("load data into %s: %w", table, err)
+	}
+	return nil
+}
+
+// writeLoadDataField appends v's LOAD DATA text representation to buf,
+// backslash-escaping the characters that are significant to the default
+// FIELDS TERMINATED BY '\t' / LINES TERMINATED BY '\n' / ESCAPED BY '\\'
+// format (there is no bytea-style binary encoding to worry about here, unlike
+// postgres's COPY protocol — every value, []byte or not, becomes escaped
+// text, which is exactly the representation LOAD DATA expects for BLOB
+// columns too).
+func writeLoadDataField(buf *bytes.Buffer, v interface{}) {
+	if v == nil {
+		buf.WriteString(`\N`)
+		return
+	}
+	var s string
+	switch x := v.(type) {
+	case []byte:
+		s = string(x)
+	case string:
+		s = x
+	case time.Time:
+		s = x.Format("2006-01-02 15:04:05.999999")
+	case bool:
+		if x {
+			s = "1"
+		} else {
+			s = "0"
+		}
+	default:
+		s = fmt.Sprint(x)
+	}
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\', '\t', '\n', '\r', 0:
+			buf.WriteByte('\\')
+		}
+		buf.WriteByte(s[i])
+	}
 }
 
 func (t *Target) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {

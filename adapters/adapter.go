@@ -212,10 +212,15 @@ type SourceAdapter interface {
 	GetInfo(ctx context.Context) (*DatabaseInfo, error)
 }
 
-// BulkCopyWriter is an optional interface for target adapters that support the
-// PostgreSQL COPY protocol for fast bulk loading. The engine enables this when
-// the target table is guaranteed clean (truncate or recreate-schema mode).
-// COPY is not safe in upsert mode because it lacks ON CONFLICT support.
+// BulkCopyWriter is an optional interface for target adapters that support a
+// fast bulk-loading write path in place of their normal upsert-capable one —
+// postgres's COPY protocol, mysql's LOAD DATA LOCAL INFILE, sqlite's
+// multi-row inserts with synchronous=OFF. The engine enables this when the
+// target table is guaranteed clean (truncate or recreate-schema mode): the
+// postgres and sqlite implementations aren't safe in upsert mode (postgres's
+// raw COPY has no ON CONFLICT support at all; sqlite's synchronous=OFF trades
+// away crash durability), though mysql's REPLACE-based LOAD DATA tolerates a
+// non-empty target same as its regular path.
 type BulkCopyWriter interface {
 	EnableCopy()
 }
