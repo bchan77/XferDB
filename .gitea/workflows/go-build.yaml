@@ -45,22 +45,36 @@ jobs:
         if: success()
         shell: bash
         run: |
+          set -euo pipefail
           echo "Approving PR..."
           PR_NUM="${{ github.event.pull_request.number }}"
-          curl -s -k -X POST \
+          resp=$(curl -sS -k -w '\n%{http_code}' -X POST \
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUM}/reviews" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"body":"Build passed","event":"APPROVE"}'
+            -d '{"body":"Build passed","event":"APPROVED"}')
+          status="${resp##*$'\n'}"
+          echo "${resp%$'\n'*}"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Posting the APPROVED review failed (HTTP $status)"
+            exit 1
+          fi
 
       - name: Request changes on PR on failure
         if: failure()
         shell: bash
         run: |
+          set -euo pipefail
           echo "Requesting changes on PR..."
           PR_NUM="${{ github.event.pull_request.number }}"
-          curl -s -k -X POST \
+          resp=$(curl -sS -k -w '\n%{http_code}' -X POST \
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUM}/reviews" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"body":"Build failed","event":"REQUEST_REVIEW"}'
+            -d '{"body":"Build failed","event":"REQUEST_CHANGES"}')
+          status="${resp##*$'\n'}"
+          echo "${resp%$'\n'*}"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Posting the REQUEST_CHANGES review failed (HTTP $status)"
+            exit 1
+          fi

@@ -128,18 +128,32 @@ jobs:
         if: success() && github.event_name == 'pull_request'
         shell: bash
         run: |
-          curl -s -k -X POST \
+          set -euo pipefail
+          resp=$(curl -sS -k -w '\n%{http_code}' -X POST \
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${{ github.event.pull_request.number }}/reviews" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":\"UI smoke tests passed: ${{ steps.trigger.outputs.build_url }}\",\"event\":\"APPROVE\"}"
+            -d "{\"body\":\"UI smoke tests passed: ${{ steps.trigger.outputs.build_url }}\",\"event\":\"APPROVED\"}")
+          status="${resp##*$'\n'}"
+          echo "${resp%$'\n'*}"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Posting the APPROVED review failed (HTTP $status)"
+            exit 1
+          fi
 
       - name: Request changes on failure
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         run: |
-          curl -s -k -X POST \
+          set -euo pipefail
+          resp=$(curl -sS -k -w '\n%{http_code}' -X POST \
             "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${{ github.event.pull_request.number }}/reviews" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":\"UI smoke tests failed (result: ${{ steps.wait.outputs.result }}): ${{ steps.trigger.outputs.build_url }}\",\"event\":\"REQUEST_REVIEW\"}"
+            -d "{\"body\":\"UI smoke tests failed (result: ${{ steps.wait.outputs.result }}): ${{ steps.trigger.outputs.build_url }}\",\"event\":\"REQUEST_CHANGES\"}")
+          status="${resp##*$'\n'}"
+          echo "${resp%$'\n'*}"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Posting the REQUEST_CHANGES review failed (HTTP $status)"
+            exit 1
+          fi
