@@ -1,4 +1,4 @@
-# xferdb.yaml — XferDB configuration file (v0.6.0+)
+# xferdb.yaml — XferDB configuration file (v1.0.0+)
 #
 # This file is the canonical reference for all supported fields. Place it in
 # any of these locations and XferDB will pick it up automatically:
