@@ -9,8 +9,8 @@
 | Database | Source | Target | Tested Versions |
 |----------|--------|--------|-----------------|
 | PostgreSQL | ✅ | ✅ | 14, 15, 16, 17 |
-| YugabyteDB | ✅ | ✅ | 2024.2 |
-| MySQL | ✅ | ✅ | 8.4 |
+| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified) |
+| MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
 | Cassandra | 🔜 | 🔜 | — |
@@ -19,13 +19,19 @@
 
 ### Tested Migration Paths
 
+Most of these are the pairs covered by the automated compatibility matrix (real
+Postgres/MySQL/MongoDB instances in Kubernetes, run on every push/PR touching Go code — see
+[`XferDB-jenkins`](https://gitea.homelab.local/nextdevops/XferDB-jenkins)); each includes at
+least one case exercising `--bulk-copy`'s write path, not just the default one. Rows noted
+"manually verified" aren't automated yet.
+
 | Source | Target | Status |
 |--------|--------|--------|
-| MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 20/20 passing |
-| MySQL 8.4 | PostgreSQL 17 | ✅ Tested |
-| PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested |
-| PostgreSQL | YugabyteDB 2024.2 | ✅ Tested |
-| SQLite | PostgreSQL | ✅ Tested |
+| MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 21/21 passing |
+| MySQL (8.0, 8.4, 9.7, 26.7) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 17/17 passing |
+| PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 7/7 passing |
+| PostgreSQL | YugabyteDB 2025.2.5.2 | ✅ Manually verified. The automated case (pinned to the older 2024.2.11.0-b36) is disabled — it hangs during execution (`config/matrix.yaml`) — so this pairing isn't yet covered by CI |
+| SQLite | PostgreSQL | Implemented; not yet covered by the automated compatibility matrix or an e2e test |
 
 ---
 
@@ -36,7 +42,7 @@
 - **Post-schema progress** — shows each index and constraint as it builds so the display never appears hung
 - **Parallel table migration** — migrate N tables concurrently with `--table-workers`
 - **Intra-table parallel segments** — split each table into N PK-range segments with `--segment-workers`; falls back to OFFSET for tables without an integer PK
-- **Bulk copy mode** — `--bulk-copy` uses the PostgreSQL `COPY` protocol for high-throughput writes (combine with `--truncate` or `--recreate-schema`)
+- **Bulk copy mode** — `--bulk-copy` uses each target's fast bulk-load path for high-throughput writes (postgres: `COPY`, mysql: `LOAD DATA LOCAL INFILE`, sqlite: batched inserts); combine with `--truncate` or `--recreate-schema`
 - **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
 - **Live progress display** — per-table status, rows/s, read/write rates, ETA, and live resource usage (goroutines, heap, CPU%)
@@ -70,7 +76,7 @@ Binaries are published to Gitea on tagged releases. Download and move to your `P
 
 ---
 
-## Configuration file (xferdb.yaml) — new in v0.6.0
+## Configuration file (xferdb.yaml) — new in v1.0.0
 
 XferDB now reads a structured config file (YAML or JSON) so projects, server settings, and migration defaults live in version control instead of on the command line.
 
@@ -393,7 +399,7 @@ xferdb list
 | Delta sync (default) | `xferdb migrate` | Upsert — new rows inserted, changed rows updated, nothing deleted. Safe to re-run. |
 | Truncate reload | `xferdb migrate --truncate` | Wipes target table data first, then loads fresh. Schema is kept. |
 | Recreate schema | `xferdb migrate --recreate-schema` | Drops and recreates target tables, then loads. Use when source schema has changed. |
-| Bulk copy | `xferdb migrate --bulk-copy` | Uses PostgreSQL `COPY` for maximum write throughput. Requires empty target tables — combine with `--truncate` or `--recreate-schema`. |
+| Bulk copy | `xferdb migrate --bulk-copy` | Uses each target's fast bulk-load path (postgres: `COPY`, mysql: `LOAD DATA LOCAL INFILE`, sqlite: batched inserts) for maximum write throughput. Combine with `--truncate` or `--recreate-schema`. |
 | Selective tables | `xferdb migrate --tables t1,t2` | Only migrate the named tables; all others are skipped. Supports `schema.table` notation. |
 | Parallel per-table | `xferdb migrate --segment-workers 4` | Split each table into N segments; workers read/write in parallel. Uses PK ranges by default (no OFFSET scan penalty); falls back to OFFSET for tables without an integer PK. Add `--offset-segments` to force OFFSET mode. |
 | Async pipeline | `xferdb migrate --async-pipeline` | Decouples reading and writing with buffered channels. Readers fetch the next batch while writers flush the previous one. Combine with `--bulk-copy` for best throughput. |
@@ -604,7 +610,7 @@ go build -o xferdb ./cmd/xferdb
 - [x] Post-schema progress display (per-index / per-constraint visibility)
 - [x] Parallel table migration (`--table-workers`)
 - [x] Intra-table parallel workers (`--segment-workers`) with PK-range splitting and OFFSET fallback
-- [x] Bulk copy mode (`--bulk-copy`) using PostgreSQL `COPY` protocol
+- [x] Bulk copy mode (`--bulk-copy`) — postgres `COPY`, mysql `LOAD DATA LOCAL INFILE`, sqlite batched inserts
 - [x] Preflight checks with actionable error hints
 - [x] Pause / resume / cancel
 - [x] Checkpoint-based crash recovery

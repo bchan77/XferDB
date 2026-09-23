@@ -4,6 +4,15 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-23
+
+First stable release. Every adapter (PostgreSQL, MySQL, SQLite, MongoDB), the migration engine
+(pause/resume/checkpointing), schema analysis, the REST API, CLI, and Web UI are complete. The
+write path — default upsert and `--bulk-copy` — is implemented and has regression test coverage
+for all three target adapters, and the full compatibility matrix (45 cases across every
+supported source/target pairing, including dedicated bulk-copy cases) passes against real
+infrastructure.
+
 ### Added
 - **Bulk copy for MySQL and SQLite targets** — `--bulk-copy` previously only did something on postgres targets (COPY protocol); it's now implemented for mysql (`LOAD DATA LOCAL INFILE` via a registered `io.Reader`, using `REPLACE INTO TABLE` so a non-empty target degrades gracefully instead of erroring) and sqlite (multi-row `INSERT OR REPLACE` chunked under the bound-parameter limit, plus `PRAGMA synchronous = OFF` for the duration of the write). Still gated by the engine on `--truncate`/`--recreate-schema`. Web UI's "Bulk copy" option is no longer hidden for non-postgres targets.
 - **Adapter test coverage** — `adapters/postgres`, `adapters/mysql`, and `adapters/sqlite` had zero unit tests; each now has a bulk-copy regression suite (postgres/mysql are opt-in via `XFERDB_TEST_TARGET_DSN` against a live database, sqlite runs unconditionally against a temp file) that would have caught the two adapter-specific bugs found while building this: postgres's COPY encoder bytea-mangling non-bytea `[]byte` values (e.g. a MySQL-sourced `DECIMAL` scanned as `[]byte`), and sqlite's `PRAGMA synchronous` rejecting changes inside an active transaction.
@@ -18,8 +27,9 @@ All notable changes to XferDB are documented here.
   for relational sources (falling back off the postgres→postgres `pg_dump` fast path when
   overrides exist, since that path bypasses `CreateTable` entirely).
 - **CI: xferdb-matrix compatibility gate** — `.gitea/workflows/xferdb-matrix-gate.yaml` triggers
-  the Jenkins `xferdb-matrix` job (real Postgres/MySQL/MongoDB sources, `SIZE=S`) on every push/PR
-  touching Go code, and approves or requests changes on the PR based on the result.
+  the Jenkins `xferdb-matrix` job (real Postgres/MySQL/MongoDB sources, `SIZE=SMOKE`) on every
+  push/PR touching Go code, and posts an APPROVED or REQUEST_CHANGES review on the PR based on
+  the result.
 - **Structured config files (xferdb.yaml / xferdb.json)** — server settings, migration defaults, and named projects can now live in a single file under version control. Loaded from `--config`, `$XFERDB_CONFIG`, `./xferdb.{yaml,yml,json}`, or `~/.xferdb/config.{yaml,yml,json}` in that order. Precedence is CLI flag → env var → config file → built-in default.
 - **`xferdb config` subcommand** — `init` writes a starter file, `show` prints the resolved config, `validate` checks syntax and semantics, `path` prints the resolved path.
 - **DSN safety via `${VAR}` expansion** — DSN strings in config files can reference environment variables, so credentials never have to live in the file. `${VAR}` requires the var to be set; `${VAR:-default}` falls back. Missing required vars fail the load with a clear error pointing at the field.
@@ -28,7 +38,7 @@ All notable changes to XferDB are documented here.
 - **Tests** — `config/` covers YAML/JSON load, env expansion (set, default, missing), missing-file fallback, validation errors (duplicate names, unknown adapters, bad log level, negative values), and precedence (CLI > env > file > default).
 
 ### Notes
-- **TOML is not yet supported** in v0.6.0 (kept the dependency surface minimal). It returns a clear error explaining how to convert with `yq` / `toml2json`. Tracked for v0.6.1.
+- **TOML is not yet supported** as of v1.0.0 (kept the dependency surface minimal). It returns a clear error explaining how to convert with `yq` / `toml2json`.
 
 ## [0.5.0] - 2026-09-09
 
