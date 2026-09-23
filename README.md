@@ -9,7 +9,7 @@
 | Database | Source | Target | Tested Versions |
 |----------|--------|--------|-----------------|
 | PostgreSQL | ✅ | ✅ | 14, 15, 16, 17 |
-| YugabyteDB | ✅ | ✅ | 2024.2 (target — automated case currently disabled, see below) |
+| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified); 2024.2 automated matrix case currently disabled, see below |
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
@@ -19,17 +19,18 @@
 
 ### Tested Migration Paths
 
-These are the pairs covered by the automated compatibility matrix (real Postgres/MySQL/MongoDB
-instances in Kubernetes, run on every push/PR touching Go code — see
-[`XferDB-jenkins`](https://gitea.homelab.local/nextdevops/XferDB-jenkins)). Each includes at
-least one case exercising `--bulk-copy`'s write path, not just the default one.
+Most of these are the pairs covered by the automated compatibility matrix (real
+Postgres/MySQL/MongoDB instances in Kubernetes, run on every push/PR touching Go code — see
+[`XferDB-jenkins`](https://gitea.homelab.local/nextdevops/XferDB-jenkins)); each includes at
+least one case exercising `--bulk-copy`'s write path, not just the default one. Rows noted
+"manually verified" aren't automated yet.
 
 | Source | Target | Status |
 |--------|--------|--------|
 | MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 21/21 passing |
 | MySQL (8.0, 8.4, 9.7, 26.7) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 17/17 passing |
 | PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 7/7 passing |
-| PostgreSQL | YugabyteDB 2024.2 | ⚠️ Disabled — the automated case hangs during execution (`config/matrix.yaml`); not currently covered until that's investigated |
+| PostgreSQL | YugabyteDB 2025.2.5.2 | ✅ Manually verified. The automated case (pinned to the older 2024.2.11.0-b36) is disabled — it hangs during execution (`config/matrix.yaml`) — so this pairing isn't yet covered by CI |
 | SQLite | PostgreSQL | Implemented; not yet covered by the automated compatibility matrix or an e2e test |
 
 ---
