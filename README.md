@@ -9,7 +9,7 @@
 | Database | Source | Target | Tested Versions |
 |----------|--------|--------|-----------------|
 | PostgreSQL | ✅ | ✅ | 14, 15, 16, 17 |
-| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified); 2024.2 automated matrix case currently disabled, see below |
+| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified) |
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
