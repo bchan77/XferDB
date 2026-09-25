@@ -8,6 +8,7 @@ name: XferDB Matrix Gate
 
 on:
   push:
+    branches: [main]
     paths:
       - '**.go'
   pull_request:
