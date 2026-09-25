@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 
@@ -239,12 +238,13 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	}
 	pks := pkColumns(schema)
 
-	// Stable column order.
-	cols := make([]string, 0, len(batch.Records[0]))
-	for col := range batch.Records[0] {
-		cols = append(cols, col)
+	// Derive columns from the schema, not from Records[0].
+	// This ensures all columns are included even if the first record
+	// is missing some fields (which would become NULL).
+	cols := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		cols = append(cols, c.Name)
 	}
-	sort.Strings(cols)
 
 	// Build INSERT ... ON CONFLICT (...) DO UPDATE SET ...
 	quotedCols := make([]string, len(cols))
@@ -335,24 +335,24 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 // This is 10–50x faster than multi-row INSERT but does not support ON CONFLICT,
 // so it is only valid when the target table is guaranteed empty.
 func (t *Target) writeBatchCopy(ctx context.Context, table string, batch *adapters.Batch) error {
-	cols := make([]string, 0, len(batch.Records[0]))
-	for col := range batch.Records[0] {
-		cols = append(cols, col)
-	}
-	sort.Strings(cols)
-
-	// lib/pq's COPY encoder always renders a []byte value as a hex-escaped
-	// bytea literal, regardless of the target column's actual type. Source
-	// drivers commonly hand back non-binary columns (e.g. MySQL DECIMAL) as
-	// []byte, which would otherwise get corrupted into bytea gibberish for
-	// any non-bytea column. Convert those to string first so they're copied
-	// as plain text; only genuine bytea columns keep []byte encoding.
+	// Fetch schema first so we can derive columns from it, not from Records[0].
+	// This ensures all columns are included even if the first record is missing
+	// some fields (which would become NULL).
 	schema, err := t.cachedSchema(ctx, table)
 	if err != nil {
 		return fmt.Errorf("copy into %s: %w", table, err)
 	}
+
+	cols := make([]string, 0, len(schema.Columns))
 	isBytea := make(map[string]bool, len(schema.Columns))
 	for _, c := range schema.Columns {
+		cols = append(cols, c.Name)
+		// lib/pq's COPY encoder always renders a []byte value as a hex-escaped
+		// bytea literal, regardless of the target column's actual type. Source
+		// drivers commonly hand back non-binary columns (e.g. MySQL DECIMAL) as
+		// []byte, which would otherwise get corrupted into bytea gibberish for
+		// any non-bytea column. Convert those to string first so they're copied
+		// as plain text; only genuine bytea columns keep []byte encoding.
 		isBytea[c.Name] = strings.EqualFold(c.Type, "bytea")
 	}
 

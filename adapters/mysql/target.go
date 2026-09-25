@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -256,12 +255,13 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	}
 	pks := pkColumns(schema)
 
-	// Stable column order.
-	cols := make([]string, 0, len(batch.Records[0]))
-	for col := range batch.Records[0] {
-		cols = append(cols, col)
+	// Derive columns from the schema, not from Records[0].
+	// This ensures all columns are included even if the first record
+	// is missing some fields (which would become NULL).
+	cols := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		cols = append(cols, c.Name)
 	}
-	sort.Strings(cols)
 
 	quotedCols := make([]string, len(cols))
 	placeholders := make([]string, len(cols))
@@ -346,11 +346,18 @@ var loadDataHandlerSeq int64
 // target) should still hold, but this makes the fast path fail closed rather
 // than open if that precondition is ever violated.
 func (t *Target) writeBatchLoadData(ctx context.Context, table string, batch *adapters.Batch) error {
-	cols := make([]string, 0, len(batch.Records[0]))
-	for col := range batch.Records[0] {
-		cols = append(cols, col)
+	// Fetch schema so we can derive columns from it, not from Records[0].
+	// This ensures all columns are included even if the first record is missing
+	// some fields (which would become NULL).
+	schema, err := t.cachedSchema(ctx, table)
+	if err != nil {
+		return fmt.Errorf("load data into %s: %w", table, err)
 	}
-	sort.Strings(cols)
+
+	cols := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		cols = append(cols, c.Name)
+	}
 
 	var buf bytes.Buffer
 	for _, rec := range batch.Records {
