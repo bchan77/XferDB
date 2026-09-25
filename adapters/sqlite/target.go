@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -15,6 +14,7 @@ type Target struct {
 	db      *sql.DB
 	config  adapters.ConnectionConfig
 	useCopy bool // use writeBatchFast instead of the per-row path; only safe when target table is clean
+	schemas map[string]*adapters.TableSchema
 }
 
 func NewTarget() adapters.TargetAdapter {
@@ -42,6 +42,7 @@ func (t *Target) Connect(ctx context.Context, config adapters.ConnectionConfig) 
 	}
 	t.db = db
 	t.config = config
+	t.schemas = make(map[string]*adapters.TableSchema)
 	return t.Ping(ctx)
 }
 
@@ -74,6 +75,19 @@ func (t *Target) ListTables(ctx context.Context) ([]adapters.TableSchema, error)
 
 func (t *Target) GetSchema(ctx context.Context, table string) (*adapters.TableSchema, error) {
 	return getSchema(ctx, t.db, table)
+}
+
+// cachedSchema returns the schema for a table, fetching and caching it if needed.
+func (t *Target) cachedSchema(ctx context.Context, table string) (*adapters.TableSchema, error) {
+	if schema, ok := t.schemas[table]; ok {
+		return schema, nil
+	}
+	schema, err := getSchema(ctx, t.db, table)
+	if err != nil {
+		return nil, err
+	}
+	t.schemas[table] = schema
+	return schema, nil
 }
 
 func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) error {
@@ -184,12 +198,17 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		return t.writeBatchFast(ctx, table, batch)
 	}
 
-	// Stable column order from first record.
-	cols := make([]string, 0, len(batch.Records[0]))
-	for col := range batch.Records[0] {
-		cols = append(cols, col)
+	// Derive columns from the schema, not from Records[0].
+	// This ensures all columns are included even if the first record
+	// is missing some fields (which would become NULL).
+	schema, err := t.cachedSchema(ctx, table)
+	if err != nil {
+		return err
 	}
-	sort.Strings(cols)
+	cols := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		cols = append(cols, c.Name)
+	}
 
 	quotedCols := make([]string, len(cols))
 	placeholders := make([]string, len(cols))
@@ -237,11 +256,17 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 // 900 total params is a safe ceiling across the SQLite versions this project
 // targets, including older builds capped at 999).
 func (t *Target) writeBatchFast(ctx context.Context, table string, batch *adapters.Batch) error {
-	cols := make([]string, 0, len(batch.Records[0]))
-	for col := range batch.Records[0] {
-		cols = append(cols, col)
+	// Derive columns from the schema, not from Records[0].
+	// This ensures all columns are included even if the first record
+	// is missing some fields (which would become NULL).
+	schema, err := t.cachedSchema(ctx, table)
+	if err != nil {
+		return err
 	}
-	sort.Strings(cols)
+	cols := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		cols = append(cols, c.Name)
+	}
 
 	quotedCols := make([]string, len(cols))
 	for i, c := range cols {
