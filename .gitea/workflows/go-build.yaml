@@ -41,40 +41,40 @@ jobs:
           echo "Running tests..."
           go test -v ./...
 
-      - name: Approve PR on success
-        if: success()
+      # Report the result as a PR comment rather than an approving review:
+      # Gitea refuses "approve your own pull" (422), so a review only works
+      # when the CI token and the PR author are different accounts. A comment
+      # always posts. Merge gating is the check status, not this.
+      - name: Comment result on PR
+        if: success() && github.event_name == 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          echo "Approving PR..."
-          PR_NUM="${{ github.event.pull_request.number }}"
           resp=$(curl -sS -k -w '\n%{http_code}' -X POST \
-            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUM}/reviews" \
+            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/issues/${{ github.event.pull_request.number }}/comments" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"body":"Build passed","event":"APPROVED"}')
+            -d '{"body":"Build and tests passed."}')
           status="${resp##*$'\n'}"
           echo "${resp%$'\n'*}"
           if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-            echo "Posting the APPROVED review failed (HTTP $status)"
+            echo "Posting the result comment failed (HTTP $status)"
             exit 1
           fi
 
-      - name: Request changes on PR on failure
-        if: failure()
+      - name: Comment failure on PR
+        if: failure() && github.event_name == 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          echo "Requesting changes on PR..."
-          PR_NUM="${{ github.event.pull_request.number }}"
           resp=$(curl -sS -k -w '\n%{http_code}' -X POST \
-            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/pulls/${PR_NUM}/reviews" \
+            "https://gitea.homelab.local/api/v1/repos/nextdevops/XferDB/issues/${{ github.event.pull_request.number }}/comments" \
             -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"body":"Build failed","event":"REQUEST_CHANGES"}')
+            -d '{"body":"Build or tests failed."}')
           status="${resp##*$'\n'}"
           echo "${resp%$'\n'*}"
           if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-            echo "Posting the REQUEST_CHANGES review failed (HTTP $status)"
+            echo "Posting the result comment failed (HTTP $status)"
             exit 1
           fi
