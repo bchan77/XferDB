@@ -778,8 +778,9 @@ async function renderTablesList(id) {
       cachedItems = await loadTables(id, project, analyzeOpts);
       tablesCache.set(id, cachedItems);
       renderRows();
-      // Refresh migration section so table checkboxes appear
-      migSection.refresh();
+      // Fill in the table checkboxes. Deliberately not a full refresh(): that
+      // rebuilds the form and would wipe anything already entered in it.
+      migSection.updateTables();
     } catch (err) {
       area.innerHTML = errorBanner('Analyze failed: ' + err.message, { retry: refreshTables });
     }
@@ -1212,6 +1213,8 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
 function mountMigSection(container, projectId, sourceType, targetType, getTables, onLockChange) {
   let stopped = false;
   let timer = null;
+  // Set while the start form is mounted; refills just its table-selection block.
+  let updateTableSelect = null;
   function clearTimer() {
     if (timer) { clearTimeout(timer); timer = null; }
   }
@@ -1229,12 +1232,13 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     }
     if (stopped) return;
     const active = findActiveMigration(migs);
+    updateTableSelect = null;
     if (active) {
       onLockChange(true, active.status);
       mountActiveCard(active.id, active.status);
     } else {
       onLockChange(false, '');
-      mountStartForm(migs, sourceType, targetType, getTables());
+      mountStartForm(migs, sourceType, targetType);
     }
   }
 
@@ -1353,9 +1357,8 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     }
   }
 
-  function mountStartForm(migs, sourceType, targetType, tables) {
+  function mountStartForm(migs, sourceType, targetType) {
     const segmentDisabled = sourceType === 'mongodb';
-    const tableNames = (tables || []).map(t => t.name);
     container.innerHTML = `
       <h2>Migration</h2>
       <details class="advanced" open>
@@ -1378,26 +1381,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
           <div class="checkbox-row"><input type="checkbox" id="m-accurate"><label for="m-accurate">Accurate row counts</label><span class="hint" style="margin-left:8px;">Use exact counts instead of estimates (slower)</span></div>
           <div class="checkbox-row" id="m-offset-row" style="display:none;"><input type="checkbox" id="m-offset"><label for="m-offset">Force OFFSET segments</label><span class="hint" style="margin-left:8px;">Use OFFSET-based splitting instead of PK range</span></div>
         </details>
-        ${tableNames.length > 0 ? `
-        <div style="margin-top:12px;">
-          <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-            Tables to migrate
-            <span style="font-weight:normal;color:var(--muted);">(<span id="tableCount">${tableNames.length}</span> of ${tableNames.length} selected)</span>
-          </label>
-          <div class="checkbox-row" style="margin-bottom:6px;">
-            <input type="checkbox" id="selectAllTables" checked>
-            <label for="selectAllTables">Select all</label>
-          </div>
-          <div id="tableCheckboxes" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;">
-            ${tableNames.map(name => `
-              <div class="checkbox-row" style="margin:4px 0;">
-                <input type="checkbox" class="table-cb" id="tbl-${esc(name)}" value="${esc(name)}" checked>
-                <label for="tbl-${esc(name)}" class="mono" style="font-size:12px;">${esc(name)}</label>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-        ` : ''}
+        <div id="tableSelectBlock"></div>
       </details>
       <div id="startErr"></div>
       <button class="btn primary" id="startMigBtn">Run Migration</button>
@@ -1435,8 +1419,37 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
       updateBulkAvailability();
     }
 
-    // Table selection handlers
-    if (tableNames.length > 0) {
+    // The table list arrives after this form is mounted (analyze is async), so
+    // it renders into its own block that can be refilled on its own. Re-running
+    // the whole form instead would discard anything already entered here.
+    updateTableSelect = () => {
+      const block = document.getElementById('tableSelectBlock');
+      if (!block) return;
+      const names = (getTables() || []).map(t => t.name);
+      if (names.length === 0) {
+        block.innerHTML = '';
+        return;
+      }
+      block.innerHTML = `
+        <div style="margin-top:12px;">
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            Tables to migrate
+            <span style="font-weight:normal;color:var(--muted);">(<span id="tableCount">${names.length}</span> of ${names.length} selected)</span>
+          </label>
+          <div class="checkbox-row" style="margin-bottom:6px;">
+            <input type="checkbox" id="selectAllTables" checked>
+            <label for="selectAllTables">Select all</label>
+          </div>
+          <div id="tableCheckboxes" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;">
+            ${names.map(name => `
+              <div class="checkbox-row" style="margin:4px 0;">
+                <input type="checkbox" class="table-cb" id="tbl-${esc(name)}" value="${esc(name)}" checked>
+                <label for="tbl-${esc(name)}" class="mono" style="font-size:12px;">${esc(name)}</label>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
       const updateCount = () => {
         const checked = container.querySelectorAll('.table-cb:checked').length;
         document.getElementById('tableCount').textContent = checked;
@@ -1447,12 +1460,13 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
       });
       container.querySelectorAll('.table-cb').forEach(cb => {
         cb.addEventListener('change', () => {
-          const allChecked = container.querySelectorAll('.table-cb:checked').length === tableNames.length;
+          const allChecked = container.querySelectorAll('.table-cb:checked').length === names.length;
           document.getElementById('selectAllTables').checked = allChecked;
           updateCount();
         });
       });
-    }
+    };
+    updateTableSelect();
     document.getElementById('startMigBtn').addEventListener('click', async () => {
       const mode = document.querySelector('input[name=schemaMode]:checked').value;
       const body = {
@@ -1467,13 +1481,14 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         offset_fallback: document.getElementById('m-offset')?.checked || false,
       };
       // Add selected tables if not all are selected
-      if (tableNames.length > 0) {
+      const tableBoxes = container.querySelectorAll('.table-cb');
+      if (tableBoxes.length > 0) {
         const selectedTables = Array.from(container.querySelectorAll('.table-cb:checked')).map(cb => cb.value);
         if (selectedTables.length === 0) {
           document.getElementById('startErr').innerHTML = errorBanner('Please select at least one table to migrate.');
           return;
         }
-        if (selectedTables.length < tableNames.length) {
+        if (selectedTables.length < tableBoxes.length) {
           body.tables = selectedTables;
         }
       }
@@ -1513,6 +1528,9 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
   return {
     stop: () => { stopped = true; clearTimer(); },
     refresh: render,
+    // Refills the table-selection block in place. No-op if the start form
+    // isn't mounted yet -- it reads getTables() when it mounts anyway.
+    updateTables: () => { if (updateTableSelect) updateTableSelect(); },
   };
 }
 
