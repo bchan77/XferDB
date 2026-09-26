@@ -1376,7 +1376,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         </div>
         <details class="advanced" style="margin-top:12px;">
           <summary>Performance options</summary>
-          <div class="checkbox-row"><input type="checkbox" id="m-async"><label for="m-async">Async pipeline</label><span class="hint" style="margin-left:8px;">Overlap reading and writing for faster throughput</span></div>
+          <div class="checkbox-row"><input type="checkbox" id="m-async" checked><label for="m-async">Async pipeline</label><span class="hint" style="margin-left:8px;">Overlap reading and writing for faster throughput</span></div>
           <div class="checkbox-row"><input type="checkbox" id="m-bulk"><label for="m-bulk">Bulk copy</label><span class="hint" style="margin-left:8px;">Faster writes (postgres: COPY; mysql: LOAD DATA; sqlite: batched inserts); only available with truncate or drop &amp; recreate above</span></div>
           <div class="checkbox-row"><input type="checkbox" id="m-accurate"><label for="m-accurate">Accurate row counts</label><span class="hint" style="margin-left:8px;">Use exact counts instead of estimates (slower)</span></div>
           <div class="checkbox-row" id="m-offset-row" style="display:none;"><input type="checkbox" id="m-offset"><label for="m-offset">Force OFFSET segments</label><span class="hint" style="margin-left:8px;">Use OFFSET-based splitting instead of PK range</span></div>
