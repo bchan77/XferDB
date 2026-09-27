@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -182,14 +183,17 @@ func (h *ProjectsHandler) OverrideSchemaPlan(w http.ResponseWriter, r *http.Requ
 	projectID := r.PathValue("id")
 	ctx := r.Context()
 
+	// Pointers distinguish "not sent" from ""/false: the CLI's `project schema
+	// --set` sends only pg_type/strategy, and an omitted field must keep its
+	// current value rather than be reset (#113).
 	var overrides []struct {
-		Collection string `json:"collection"`
-		FieldName  string `json:"field_name"`
-		PgColumn   string `json:"pg_column"`
-		PgType     string `json:"pg_type"`
-		Strategy   string `json:"strategy"`
-		IsPK       bool   `json:"is_pk"`
-		Nullable   bool   `json:"nullable"`
+		Collection string  `json:"collection"`
+		FieldName  string  `json:"field_name"`
+		PgColumn   *string `json:"pg_column"`
+		PgType     *string `json:"pg_type"`
+		Strategy   *string `json:"strategy"`
+		IsPK       *bool   `json:"is_pk"`
+		Nullable   *bool   `json:"nullable"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&overrides); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -203,17 +207,28 @@ func (h *ProjectsHandler) OverrideSchemaPlan(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusBadRequest, "collection and field_name are required")
 			return
 		}
-		if o.Strategy != "" && !validStrategies[o.Strategy] {
-			writeError(w, http.StatusBadRequest, "invalid strategy: "+o.Strategy)
+		if o.Strategy != nil && *o.Strategy != "" && !validStrategies[*o.Strategy] {
+			writeError(w, http.StatusBadRequest, "invalid strategy: "+*o.Strategy)
 			return
 		}
-		if err := h.DB.OverridePlan(ctx, projectID, o.Collection, o.FieldName, state.SchemaPlanRow{
+		if o.Strategy != nil && *o.Strategy == "" {
+			o.Strategy = nil // "" is not a valid strategy to store; treat it as not sent
+		}
+		if o.PgColumn != nil && strings.TrimSpace(*o.PgColumn) == "" {
+			writeError(w, http.StatusBadRequest, "pg_column must not be empty (omit it to keep the current column name)")
+			return
+		}
+		if err := h.DB.OverridePlan(ctx, projectID, o.Collection, o.FieldName, state.SchemaPlanOverride{
 			PgColumn: o.PgColumn,
 			PgType:   o.PgType,
 			Strategy: o.Strategy,
 			IsPK:     o.IsPK,
 			Nullable: o.Nullable,
 		}); err != nil {
+			if errors.Is(err, state.ErrIncompleteOverride) {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

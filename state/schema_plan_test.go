@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -141,8 +142,8 @@ func TestSavePlan_ReanalyzeDoesNotClobberOverridden(t *testing.T) {
 	}
 
 	// User overrides: changes type to numeric; marks overridden.
-	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanRow{
-		PgColumn: "total", PgType: "numeric", Strategy: "direct",
+	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanOverride{
+		PgColumn: ptr("total"), PgType: ptr("numeric"), Strategy: ptr("direct"),
 	}); err != nil {
 		t.Fatalf("OverridePlan: %v", err)
 	}
@@ -182,8 +183,8 @@ func TestOverridePlan_SetsOverriddenFlag(t *testing.T) {
 		t.Fatalf("SavePlan: %v", err)
 	}
 
-	if err := db.OverridePlan(ctx, projID, "c", "f", SchemaPlanRow{
-		PgColumn: "f", PgType: "jsonb", Strategy: "as_jsonb",
+	if err := db.OverridePlan(ctx, projID, "c", "f", SchemaPlanOverride{
+		PgColumn: ptr("f"), PgType: ptr("jsonb"), Strategy: ptr("as_jsonb"),
 	}); err != nil {
 		t.Fatalf("OverridePlan: %v", err)
 	}
@@ -209,8 +210,9 @@ func TestOverridePlan_CreatesRowWithoutPriorSavePlan(t *testing.T) {
 	ctx := context.Background()
 	projID := seedProject(t, db)
 
-	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanRow{
-		PgColumn: "total", PgType: "numeric", Strategy: "direct", Nullable: true,
+	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanOverride{
+		PgColumn: ptr("total"), PgType: ptr("numeric"), Strategy: ptr("direct"),
+		IsPK: ptr(false), Nullable: ptr(true),
 	}); err != nil {
 		t.Fatalf("OverridePlan: %v", err)
 	}
@@ -226,6 +228,111 @@ func TestOverridePlan_CreatesRowWithoutPriorSavePlan(t *testing.T) {
 		t.Error("Overridden = false, want true")
 	}
 }
+
+// TestOverridePlan_PartialKeepsUnsentFields is #113: `project schema --set
+// ids_uuid._id=uuid` sends only pg_type and strategy, and used to blank
+// pg_column (CREATE TABLE then failed on a "" column) and clear is_pk.
+func TestOverridePlan_PartialKeepsUnsentFields(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	projID := seedProject(t, db)
+
+	if err := db.SavePlan(ctx, []SchemaPlanRow{
+		{ProjectID: projID, Collection: "ids_uuid", FieldName: "_id",
+			PgColumn: "_id", PgType: "text", Strategy: "direct", IsPK: true, Nullable: false},
+		{ProjectID: projID, Collection: "ids_uuid", FieldName: "user",
+			PgColumn: "user", PgType: "text", Strategy: "direct", Nullable: true},
+	}); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+
+	for field, pgType := range map[string]string{"_id": "uuid", "user": "varchar(80)"} {
+		if err := db.OverridePlan(ctx, projID, "ids_uuid", field, SchemaPlanOverride{
+			PgType: ptr(pgType), Strategy: ptr("direct"),
+		}); err != nil {
+			t.Fatalf("OverridePlan %s: %v", field, err)
+		}
+	}
+
+	got, err := db.GetPlan(ctx, projID, "ids_uuid")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("GetPlan: err=%v rows=%d", err, len(got))
+	}
+	id, user := got[0], got[1] // ordered by field_name
+	if id.PgColumn != "_id" || id.PgType != "uuid" || !id.IsPK || id.Nullable || !id.Overridden {
+		t.Errorf("_id = %+v, want pg_column _id, pg_type uuid, is_pk, NOT NULL, overridden", id)
+	}
+	if user.PgColumn != "user" || user.PgType != "varchar(80)" || user.IsPK || !user.Nullable {
+		t.Errorf("user = %+v, want pg_column user, pg_type varchar(80), nullable, not PK", user)
+	}
+}
+
+// TestOverridePlan_FullRowCanClearFlags covers the web UI, which always sends
+// every field: an explicit false must still clear is_pk/nullable.
+func TestOverridePlan_FullRowCanClearFlags(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	projID := seedProject(t, db)
+
+	if err := db.SavePlan(ctx, []SchemaPlanRow{
+		{ProjectID: projID, Collection: "c", FieldName: "f",
+			PgColumn: "f", PgType: "text", Strategy: "direct", IsPK: true, Nullable: true},
+	}); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	if err := db.OverridePlan(ctx, projID, "c", "f", SchemaPlanOverride{
+		PgColumn: ptr("f_renamed"), PgType: ptr("integer"), Strategy: ptr("direct"),
+		IsPK: ptr(false), Nullable: ptr(false),
+	}); err != nil {
+		t.Fatalf("OverridePlan: %v", err)
+	}
+
+	got, err := db.GetPlan(ctx, projID, "c")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("GetPlan: err=%v rows=%d", err, len(got))
+	}
+	if r := got[0]; r.PgColumn != "f_renamed" || r.PgType != "integer" || r.IsPK || r.Nullable {
+		t.Errorf("row = %+v, want every sent field applied", r)
+	}
+}
+
+// TestOverridePlan_NewRowNeedsPKAndNullable: with no analyzed row to fall back
+// on, guessing is_pk/nullable would silently drop a PK or add NOT NULL on a
+// relational table (the engine applies both at CREATE TABLE).
+func TestOverridePlan_NewRowNeedsPKAndNullable(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	projID := seedProject(t, db)
+
+	err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanOverride{
+		PgType: ptr("numeric"), Strategy: ptr("direct"),
+	})
+	if !errors.Is(err, ErrIncompleteOverride) {
+		t.Fatalf("err = %v, want ErrIncompleteOverride", err)
+	}
+	if got, _ := db.GetPlan(ctx, projID, "orders"); len(got) != 0 {
+		t.Errorf("rejected override still wrote %d row(s)", len(got))
+	}
+
+	// With the flags given, pg_column defaults to the field name.
+	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanOverride{
+		PgType: ptr("numeric"), IsPK: ptr(false), Nullable: ptr(true),
+	}); err != nil {
+		t.Fatalf("OverridePlan: %v", err)
+	}
+	got, err := db.GetPlan(ctx, projID, "orders")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("GetPlan: err=%v rows=%d", err, len(got))
+	}
+	if r := got[0]; r.PgColumn != "total" || r.Strategy != "direct" || !r.Nullable {
+		t.Errorf("row = %+v, want pg_column total, strategy direct, nullable", r)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
 
 // ── ListPlanCollections ──────────────────────────────────────────────────────
 
@@ -360,8 +467,8 @@ func TestSnapshotPlan_FreezesCopyOnMigration(t *testing.T) {
 	}
 
 	// Override the live plan after the snapshot — the frozen copy must be unaffected.
-	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanRow{
-		PgColumn: "total", PgType: "double precision", Strategy: "direct",
+	if err := db.OverridePlan(ctx, projID, "orders", "total", SchemaPlanOverride{
+		PgColumn: ptr("total"), PgType: ptr("double precision"), Strategy: ptr("direct"),
 	}); err != nil {
 		t.Fatalf("OverridePlan after snapshot: %v", err)
 	}

@@ -174,10 +174,92 @@ func TestOverrideSchemaPlan_UpdatesRow(t *testing.T) {
 			if r.PgType != "numeric" {
 				t.Errorf("pg_type = %q, want \"numeric\"", r.PgType)
 			}
+			// Not sent by this (CLI-shaped) payload, so must be unchanged (#113).
+			if r.PgColumn != "amount" || !r.Nullable {
+				t.Errorf("pg_column = %q, nullable = %v; want \"amount\", true", r.PgColumn, r.Nullable)
+			}
 			return
 		}
 	}
 	t.Error("did not find 'amount' field in plan after override")
+}
+
+// putOverrides sends a PUT /schema-plan and returns the recorder.
+func putOverrides(t *testing.T, h *ProjectsHandler, projID string, overrides []map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(overrides)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/projects/"+projID+"/schema-plan", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", projID)
+	w := httptest.NewRecorder()
+	h.OverrideSchemaPlan(w, req)
+	return w
+}
+
+// TestOverrideSchemaPlan_CLISetKeepsPrimaryKey reproduces #113 with the exact
+// payload `xferdb project schema --set orders._id=uuid` sends.
+func TestOverrideSchemaPlan_CLISetKeepsPrimaryKey(t *testing.T) {
+	h, db, cleanup := newTestHandler(t)
+	defer cleanup()
+
+	const projID = "proj-113"
+	seedPlan(t, db, projID, "orders")
+
+	w := putOverrides(t, h, projID, []map[string]any{
+		{"collection": "orders", "field_name": "_id", "pg_type": "uuid", "strategy": "direct"},
+	})
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body: %s", w.Code, w.Body.String())
+	}
+
+	rows, err := db.GetPlan(context.Background(), projID, "orders")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	id := rows[0] // ordered by field_name: _id first
+	if id.FieldName != "_id" || id.PgColumn != "_id" || id.PgType != "uuid" || !id.IsPK || id.Nullable {
+		t.Errorf("_id row = %+v, want pg_column _id, pg_type uuid, is_pk, NOT NULL", id)
+	}
+}
+
+func TestOverrideSchemaPlan_EmptyPgColumnRejected(t *testing.T) {
+	h, db, cleanup := newTestHandler(t)
+	defer cleanup()
+
+	const projID = "proj-empty-col"
+	seedPlan(t, db, projID, "orders")
+
+	w := putOverrides(t, h, projID, []map[string]any{
+		{"collection": "orders", "field_name": "amount", "pg_column": "  ", "pg_type": "numeric"},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+// A first override for a field with no plan row (a relational column) must
+// state is_pk/nullable rather than have them defaulted.
+func TestOverrideSchemaPlan_NewRowWithoutFlagsRejected(t *testing.T) {
+	h, db, cleanup := newTestHandler(t)
+	defer cleanup()
+
+	const projID = "proj-new-row"
+	seedPlan(t, db, projID, "orders")
+
+	w := putOverrides(t, h, projID, []map[string]any{
+		{"collection": "customers", "field_name": "id", "pg_type": "bigint", "strategy": "direct"},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+
+	w = putOverrides(t, h, projID, []map[string]any{
+		{"collection": "customers", "field_name": "id", "pg_column": "id", "pg_type": "bigint",
+			"strategy": "direct", "is_pk": true, "nullable": false},
+	})
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("full-row status = %d, want 204; body: %s", w.Code, w.Body.String())
+	}
 }
 
 func TestOverrideSchemaPlan_InvalidStrategy(t *testing.T) {

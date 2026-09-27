@@ -508,9 +508,11 @@ func runSchemaSet(projID string, setFlags []string) error {
 	}
 
 	for _, o := range overrides {
-		val := o["strategy"]
+		// A type override is sent as pg_type + strategy "direct"; report the
+		// type, not the strategy, so the output says what actually changed.
+		val := o["pg_type"]
 		if val == nil {
-			val = o["pg_type"]
+			val = o["strategy"]
 		}
 		fmt.Printf("Override applied: %s.%s = %v\n", o["collection"], o["field_name"], val)
 	}

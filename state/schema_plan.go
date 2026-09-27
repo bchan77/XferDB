@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -64,31 +65,77 @@ func (m *MetaDB) SavePlan(ctx context.Context, rows []SchemaPlanRow) error {
 	return tx.Commit()
 }
 
-// OverridePlan sets a single field decision and marks it overridden=true so
-// future re-analyzes do not clobber it. It upserts: relational tables have no
-// prior SavePlan-seeded row (only the Mongo analyze path seeds rows), so this
-// must create the row on first use rather than requiring one to already exist.
-func (m *MetaDB) OverridePlan(ctx context.Context, projectID, collection, fieldName string, updates SchemaPlanRow) error {
-	_, err := m.db.ExecContext(ctx, `
-		INSERT INTO schema_plans
-		    (project_id, collection, field_name, pg_column, pg_type, strategy, is_pk, nullable, overridden, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-		ON CONFLICT (project_id, collection, field_name) DO UPDATE SET
-		    pg_column  = excluded.pg_column,
-		    pg_type    = excluded.pg_type,
-		    strategy   = excluded.strategy,
-		    is_pk      = excluded.is_pk,
-		    nullable   = excluded.nullable,
-		    overridden = 1`,
-		projectID, collection, fieldName,
-		updates.PgColumn, updates.PgType, updates.Strategy,
-		boolToInt(updates.IsPK), boolToInt(updates.Nullable),
-		time.Now(),
-	)
+// SchemaPlanOverride is a partial update to one schema-plan row. A nil field
+// keeps the row's current value: `xferdb project schema --set` sends only
+// pg_type and strategy, while the web UI sends every field.
+type SchemaPlanOverride struct {
+	PgColumn *string
+	PgType   *string
+	Strategy *string
+	IsPK     *bool
+	Nullable *bool
+}
+
+// ErrIncompleteOverride is returned by OverridePlan when no plan row exists
+// yet for the field and the override leaves is_pk or nullable unset. The
+// engine applies both flags verbatim at CREATE TABLE, so guessing a default
+// could silently drop a primary key or add NOT NULL.
+var ErrIncompleteOverride = errors.New("no schema plan row for this field yet; is_pk and nullable are required")
+
+// OverridePlan applies a field decision and marks it overridden=true so future
+// re-analyzes do not clobber it. Fields left nil in o keep the existing row's
+// values. It upserts: relational tables have no prior SavePlan-seeded row
+// (only the Mongo analyze path seeds rows), so the first override creates the
+// row -- pg_column then defaults to the field name and strategy to "direct",
+// but is_pk and nullable must be given (see ErrIncompleteOverride).
+func (m *MetaDB) OverridePlan(ctx context.Context, projectID, collection, fieldName string, o SchemaPlanOverride) error {
+	tx, err := m.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("override plan begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var existing int
+	if err := tx.GetContext(ctx, &existing, `
+		SELECT COUNT(*) FROM schema_plans
+		WHERE project_id = ? AND collection = ? AND field_name = ?`,
+		projectID, collection, fieldName); err != nil {
+		return fmt.Errorf("override plan %s.%s: %w", collection, fieldName, err)
+	}
+
+	if existing == 0 {
+		if o.IsPK == nil || o.Nullable == nil {
+			return fmt.Errorf("override plan %s.%s: %w", collection, fieldName, ErrIncompleteOverride)
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO schema_plans
+			    (project_id, collection, field_name, pg_column, pg_type, strategy, is_pk, nullable, overridden, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+			projectID, collection, fieldName,
+			stringOr(o.PgColumn, fieldName), stringOr(o.PgType, ""), stringOr(o.Strategy, "direct"),
+			boolToInt(*o.IsPK), boolToInt(*o.Nullable),
+			time.Now(),
+		)
+	} else {
+		// COALESCE(NULL, col) keeps the current value for every field not sent.
+		_, err = tx.ExecContext(ctx, `
+			UPDATE schema_plans SET
+			    pg_column  = COALESCE(?, pg_column),
+			    pg_type    = COALESCE(?, pg_type),
+			    strategy   = COALESCE(?, strategy),
+			    is_pk      = COALESCE(?, is_pk),
+			    nullable   = COALESCE(?, nullable),
+			    overridden = 1
+			WHERE project_id = ? AND collection = ? AND field_name = ?`,
+			nullableString(o.PgColumn), nullableString(o.PgType), nullableString(o.Strategy),
+			nullableBoolInt(o.IsPK), nullableBoolInt(o.Nullable),
+			projectID, collection, fieldName,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("override plan %s.%s: %w", collection, fieldName, err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // schemaPlanDBRow is the raw SQLite scan target. Booleans are stored as INTEGER
@@ -248,4 +295,26 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func stringOr(s *string, def string) string {
+	if s == nil {
+		return def
+	}
+	return *s
+}
+
+// nullableString and nullableBoolInt bind a nil pointer as SQL NULL.
+func nullableString(s *string) any {
+	if s == nil {
+		return nil
+	}
+	return *s
+}
+
+func nullableBoolInt(b *bool) any {
+	if b == nil {
+		return nil
+	}
+	return boolToInt(*b)
 }
