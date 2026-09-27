@@ -168,7 +168,7 @@ func TestWidenTypes_WarningIncluded(t *testing.T) {
 // ── inferIDType ──────────────────────────────────────────────────────────────
 
 func TestInferIDType_ObjectId(t *testing.T) {
-	pg, _, warns := inferIDType([]TypeCount{{TypeName: "ObjectId", Count: 2000}})
+	pg, _, _, warns := inferIDType([]TypeCount{{TypeName: "ObjectId", Count: 2000}})
 	if pg != "text" {
 		t.Errorf("ObjectId _id → %q, want text", pg)
 	}
@@ -178,9 +178,68 @@ func TestInferIDType_ObjectId(t *testing.T) {
 }
 
 func TestInferIDType_DocumentWarning(t *testing.T) {
-	_, _, warns := inferIDType([]TypeCount{{TypeName: "Document", Count: 100}})
+	_, _, _, warns := inferIDType([]TypeCount{{TypeName: "Document", Count: 100}})
 	if len(warns) == 0 {
 		t.Error("compound _id must produce a warning")
+	}
+}
+
+// #97.1: a compound _id must use as_jsonb, not direct — direct hands the
+// serialised JSON to the driver as bytes.
+func TestInferIDType_DocumentIsJsonbAsJsonb(t *testing.T) {
+	pg, strategy, _, _ := inferIDType([]TypeCount{{TypeName: "Document", Count: 100}})
+	if pg != "jsonb" || strategy != "as_jsonb" {
+		t.Errorf("compound _id → (%q, %q), want (jsonb, as_jsonb)", pg, strategy)
+	}
+}
+
+// #97.2: a minority type must widen the column, not be ignored.
+func TestInferIDType_Polymorphic(t *testing.T) {
+	cases := []struct {
+		name         string
+		types        []TypeCount
+		wantPg       string
+		wantStrategy string
+		wantWarn     bool
+	}{
+		{"Int64 with String minority", []TypeCount{{TypeName: "Int64", Count: 50}, {TypeName: "String", Count: 3}}, "text", "direct", true},
+		{"ObjectId with Int32 minority", []TypeCount{{TypeName: "ObjectId", Count: 90}, {TypeName: "Int32", Count: 1}}, "text", "direct", true},
+		{"Int32 and Int64", []TypeCount{{TypeName: "Int32", Count: 50}, {TypeName: "Int64", Count: 50}}, "bigint", "direct", false},
+		{"String with Document minority", []TypeCount{{TypeName: "String", Count: 50}, {TypeName: "Document", Count: 2}}, "jsonb", "as_jsonb", true},
+		{"Null does not count as a type", []TypeCount{{TypeName: "Int64", Count: 50}, {TypeName: "Null", Count: 1}}, "bigint", "direct", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pg, strategy, opts, warns := inferIDType(tc.types)
+			if pg != tc.wantPg || strategy != tc.wantStrategy {
+				t.Errorf("got (%q, %q), want (%q, %q)", pg, strategy, tc.wantPg, tc.wantStrategy)
+			}
+			if (len(warns) > 0) != tc.wantWarn {
+				t.Errorf("warnings = %v, want any: %v", warns, tc.wantWarn)
+			}
+			if len(opts) == 0 || opts[0].PgType != pg || opts[0].Strategy != strategy {
+				t.Errorf("first option %v must match the recommendation", opts)
+			}
+		})
+	}
+}
+
+func TestInferSchema_IDStrategyComesFromInference(t *testing.T) {
+	sample := &CollectionSample{
+		Collection: "orders",
+		SampleSize: 20,
+		Fields: []FieldFrequency{
+			{FieldName: "_id", Occurrences: 20, TotalDocs: 20,
+				Types: []TypeCount{{TypeName: "Document", Count: 20}}},
+		},
+	}
+	schema, err := InferSchema(sample, "p1")
+	if err != nil {
+		t.Fatalf("InferSchema: %v", err)
+	}
+	id := schema.Fields[0].PlanRow
+	if id.FieldName != "_id" || id.Strategy != "as_jsonb" || !id.IsPK || id.Nullable {
+		t.Errorf("_id plan row = %+v, want as_jsonb, PK, not nullable", id)
 	}
 }
 

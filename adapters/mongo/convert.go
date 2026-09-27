@@ -2,8 +2,10 @@
 package mongo
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -135,7 +137,7 @@ func convertScalar(v interface{}, pgType string) (interface{}, error) {
 		// lib/pq accepts a string for a numeric column.
 		return val.String(), nil
 	case bson.Binary:
-		return val.Data, nil
+		return convertBinary(val, pgType)
 	case bson.Regex:
 		// Store pattern only; flags dropped per design doc.
 		return val.Pattern, nil
@@ -149,6 +151,38 @@ func convertScalar(v interface{}, pgType string) (interface{}, error) {
 		// Extended JSON serialisation.
 		return jsonMarshalBSON(val)
 	}
+}
+
+// convertBinary converts a BSON Binary for the given Postgres column type.
+// Only a bytea column takes the raw bytes: anywhere else they would be sent as
+// text and rejected as invalid UTF-8. A uuid column needs a UUID subtype, and a
+// UUID subtype is written as canonical UUID text; other bytes become hex.
+func convertBinary(b bson.Binary, pgType string) (interface{}, error) {
+	switch strings.ToLower(pgType) {
+	case "bytea":
+		return b.Data, nil
+	case "uuid":
+		if !isUUIDBinary(b) {
+			return nil, fmt.Errorf("binary subtype %d with %d bytes is not a UUID", b.Subtype, len(b.Data))
+		}
+		return formatUUID(b.Data), nil
+	}
+	if isUUIDBinary(b) {
+		return formatUUID(b.Data), nil
+	}
+	return hex.EncodeToString(b.Data), nil
+}
+
+// isUUIDBinary reports whether b is a 16-byte UUID: subtype 4, or the legacy
+// subtype 3 (whose byte order is driver-specific; the bytes are kept as stored).
+func isUUIDBinary(b bson.Binary) bool {
+	return (b.Subtype == bson.TypeBinaryUUID || b.Subtype == bson.TypeBinaryUUIDOld) && len(b.Data) == 16
+}
+
+// formatUUID renders 16 bytes as xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.
+func formatUUID(b []byte) string {
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 // jsonMarshalBSON converts a BSON value to a JSON []byte.
