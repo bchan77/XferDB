@@ -4,6 +4,19 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **MongoDB `_id` shapes that failed or were silently truncated (#97)** — a polymorphic `_id`
+  (e.g. mostly Int64 with a few strings) now widens to `text` (or `bigint` for Int32/Int64)
+  instead of taking the majority type; a compound (embedded-document) `_id` uses the `as_jsonb`
+  strategy; a Binary `_id` overridden to `uuid` is written as canonical UUID text, and Binary
+  values in any non-`bytea` column are written as UUID text or hex instead of invalid UTF-8.
+  Keyset paging now stores the last `_id` as Extended JSON so it keeps its BSON type, and moves
+  on to the next BSON type once one runs out. Previously every batch after the first used a
+  string key for compound, Binary, and floating-point `_id`s. Because `$gt` only matches values
+  of its own type, the migration stopped after the first 1000 rows with no error. Polymorphic
+  `_id`s could drop every type after the first. Resume keys checkpointed by older versions
+  still decode.
+
 ## [1.0.0] - 2026-09-23
 
 First stable release. Every adapter (PostgreSQL, MySQL, SQLite, MongoDB), the migration engine

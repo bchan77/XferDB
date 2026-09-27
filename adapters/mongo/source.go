@@ -206,7 +206,8 @@ func (s *Source) GetPKRange(_ context.Context, _, _ string) (int64, int64, error
 }
 
 // ReadBatch reads up to opts.Limit documents using keyset pagination on _id.
-// opts.LastPK is the hex-encoded last _id seen (empty on first call).
+// opts.LastPK is the resume key of the last _id seen (empty on first call);
+// see encodeID.
 func (s *Source) ReadBatch(ctx context.Context, collection string, opts adapters.BatchOptions) (*adapters.Batch, error) {
 	if err := s.requirePlan(); err != nil {
 		return nil, err
@@ -216,42 +217,36 @@ func (s *Source) ReadBatch(ctx context.Context, collection string, opts adapters
 
 	coll := s.client.Database(s.database).Collection(collection)
 
+	var lastID interface{}
+	hasLast := false
 	filter := bson.D{}
 	if lastKey, ok := opts.LastPK.(string); ok && lastKey != "" {
-		lastID, err := decodeLastKey(lastKey, plan)
+		id, err := decodeLastKey(lastKey, plan)
 		if err != nil {
 			return nil, fmt.Errorf("decode resume key: %w", err)
 		}
+		lastID, hasLast = id, true
 		filter = bson.D{{Key: "_id", Value: bson.D{{Key: "$gt", Value: lastID}}}}
 	}
 
 	limit := int64(opts.Limit)
-	cursor, err := coll.Find(ctx, filter,
-		options.Find().
-			SetSort(bson.D{{Key: "_id", Value: 1}}).
-			SetLimit(limit))
+	records, lastDoc, err := s.findBatch(ctx, coll, filter, limit, plan, extraCol)
 	if err != nil {
-		return nil, fmt.Errorf("find %s: %w", collection, err)
+		return nil, err
 	}
-	defer cursor.Close(ctx)
 
-	var records []map[string]interface{}
-	var lastDoc bson.D
-
-	for cursor.Next(ctx) {
-		var doc bson.D
-		if err := cursor.Decode(&doc); err != nil {
-			return nil, fmt.Errorf("decode document: %w", err)
+	// $gt only matches _ids of the same BSON type as lastID ("type
+	// bracketing"), so for a polymorphic _id an empty page means this type's
+	// run is over, not the collection. The sort puts every remaining document
+	// in a later type, so continue from the first of those.
+	if len(records) == 0 && hasLast {
+		if later := laterIDTypes(lastID); len(later) > 0 {
+			filter = bson.D{{Key: "_id", Value: bson.D{{Key: "$type", Value: later}}}}
+			records, lastDoc, err = s.findBatch(ctx, coll, filter, limit, plan, extraCol)
+			if err != nil {
+				return nil, err
+			}
 		}
-		rec, err := ConvertDocument(doc, plan, extraCol)
-		if err != nil {
-			return nil, fmt.Errorf("convert document: %w", err)
-		}
-		records = append(records, rec)
-		lastDoc = doc
-	}
-	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("cursor: %w", err)
 	}
 
 	if len(records) == 0 {
@@ -268,6 +263,39 @@ func (s *Source) ReadBatch(ctx context.Context, collection string, opts adapters
 		Size:    len(records),
 		LastKey: lastKey,
 	}, nil
+}
+
+// findBatch reads up to limit documents matching filter in _id order and
+// converts them with the collection's plan. lastDoc is the final raw document.
+func (s *Source) findBatch(ctx context.Context, coll *mongo.Collection, filter bson.D, limit int64, plan []state.SchemaPlanRow, extraCol string) ([]map[string]interface{}, bson.D, error) {
+	cursor, err := coll.Find(ctx, filter,
+		options.Find().
+			SetSort(bson.D{{Key: "_id", Value: 1}}).
+			SetLimit(limit))
+	if err != nil {
+		return nil, nil, fmt.Errorf("find %s: %w", coll.Name(), err)
+	}
+	defer cursor.Close(ctx)
+
+	var records []map[string]interface{}
+	var lastDoc bson.D
+
+	for cursor.Next(ctx) {
+		var doc bson.D
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, nil, fmt.Errorf("decode document: %w", err)
+		}
+		rec, err := ConvertDocument(doc, plan, extraCol)
+		if err != nil {
+			return nil, nil, fmt.Errorf("convert document: %w", err)
+		}
+		records = append(records, rec)
+		lastDoc = doc
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, nil, fmt.Errorf("cursor: %w", err)
+	}
+	return records, lastDoc, nil
 }
 
 func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {
@@ -410,24 +438,42 @@ func encodeLastKey(doc bson.D) (string, error) {
 	return "", fmt.Errorf("document has no _id field")
 }
 
+// extJSONKeyPrefix marks a resume key holding the _id as canonical Extended
+// JSON. Keys without it were written by older versions, which stored only the
+// ObjectId hex or the value's text and lost its BSON type (#97).
+const extJSONKeyPrefix = "ejson:"
+
+// encodeID serialises an _id as canonical Extended JSON so that decodeLastKey
+// gets back the same BSON type. The type matters: $gt only matches _ids of the
+// same type, so a compound or Binary _id resumed as a string matches nothing
+// and the rest of the collection is silently skipped.
 func encodeID(v interface{}) (string, error) {
-	switch id := v.(type) {
-	case bson.ObjectID:
-		return id.Hex(), nil
-	case string:
-		return id, nil
-	case int32:
-		return fmt.Sprintf("%d", id), nil
-	case int64:
-		return fmt.Sprintf("%d", id), nil
-	default:
-		return fmt.Sprintf("%v", id), nil
+	b, err := bson.MarshalExtJSON(bson.D{{Key: "_id", Value: v}}, true, false)
+	if err != nil {
+		return "", fmt.Errorf("encode _id: %w", err)
 	}
+	return extJSONKeyPrefix + string(b), nil
 }
 
 // decodeLastKey converts a checkpoint string back to a native _id value
-// for use in a $gt filter. Looks at the plan to determine _id's pg_type.
+// for use in a $gt filter.
 func decodeLastKey(key string, plan []state.SchemaPlanRow) (interface{}, error) {
+	if ext, ok := strings.CutPrefix(key, extJSONKeyPrefix); ok {
+		var doc bson.D
+		if err := bson.UnmarshalExtJSON([]byte(ext), true, &doc); err != nil {
+			return nil, fmt.Errorf("parse _id from %q: %w", key, err)
+		}
+		if len(doc) != 1 || doc[0].Key != "_id" {
+			return nil, fmt.Errorf("resume key %q has no _id", key)
+		}
+		return doc[0].Value, nil
+	}
+	return decodeLegacyKey(key, plan)
+}
+
+// decodeLegacyKey reads a resume key checkpointed before extJSONKeyPrefix
+// existed, guessing the _id's type from its pg_type in the plan.
+func decodeLegacyKey(key string, plan []state.SchemaPlanRow) (interface{}, error) {
 	idType := "text"
 	for _, row := range plan {
 		if row.FieldName == "_id" {
@@ -453,6 +499,70 @@ func decodeLastKey(key string, plan []state.SchemaPlanRow) (interface{}, error) 
 		}
 		return key, nil
 	}
+}
+
+// idTypeOrder lists the $type aliases an _id can have, grouped in the order
+// MongoDB sorts BSON types. Types in one group compare with each other (all
+// numbers, string and symbol); $gt never crosses a group. Arrays are not
+// allowed as _id.
+var idTypeOrder = [][]string{
+	{"minKey"},
+	{"null", "undefined"},
+	{"int", "long", "double", "decimal"},
+	{"string", "symbol"},
+	{"object"},
+	{"binData"},
+	{"objectId"},
+	{"bool"},
+	{"date"},
+	{"timestamp"},
+	{"regex"},
+	{"maxKey"},
+}
+
+// idTypeGroup returns the index in idTypeOrder of v's BSON type, or -1.
+func idTypeGroup(v interface{}) int {
+	switch v.(type) {
+	case bson.MinKey:
+		return 0
+	case nil, bson.Null, bson.Undefined:
+		return 1
+	case int32, int64, float64, bson.Decimal128:
+		return 2
+	case string, bson.Symbol:
+		return 3
+	case bson.D, bson.M:
+		return 4
+	case bson.Binary:
+		return 5
+	case bson.ObjectID:
+		return 6
+	case bool:
+		return 7
+	case bson.DateTime:
+		return 8
+	case bson.Timestamp:
+		return 9
+	case bson.Regex:
+		return 10
+	case bson.MaxKey:
+		return 11
+	}
+	return -1
+}
+
+// laterIDTypes returns the $type aliases of every type group that sorts after
+// v's, or nil if v's type is unknown or already last.
+func laterIDTypes(v interface{}) []string {
+	g := idTypeGroup(v)
+	if g < 0 {
+		return nil
+	}
+	var later []string
+	for _, group := range idTypeOrder[g+1:] {
+		later = append(later, group...)
+	}
+	return later
 }
 
 // parseMongoHost extracts the host(s) from a mongodb:// or mongodb+srv:// URI.

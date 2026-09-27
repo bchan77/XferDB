@@ -2,6 +2,7 @@ package mongo
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -246,5 +247,86 @@ func TestJsonMarshalBSON_DocumentIsObject(t *testing.T) {
 	}
 	if m["city"] != "NYC" {
 		t.Errorf("city = %v, want \"NYC\"", m["city"])
+	}
+}
+
+// ── convertBinary (#97.3) ─────────────────────────────────────────────────────
+
+func TestConvertBinary(t *testing.T) {
+	uuidBytes := []byte{0x5f, 0x8d, 0x0b, 0x3c, 0x9a, 0x1e, 0x4f, 0x2b, 0x8c, 0x6d, 0x7e, 0x9f, 0x0a, 0x1b, 0x2c, 0x3d}
+	uuid4 := bson.Binary{Subtype: bson.TypeBinaryUUID, Data: uuidBytes}
+	generic := bson.Binary{Subtype: bson.TypeBinaryGeneric, Data: []byte{0x8d, 0x00, 0xff}}
+	const uuidText = "5f8d0b3c-9a1e-4f2b-8c6d-7e9f0a1b2c3d"
+
+	cases := []struct {
+		name   string
+		v      bson.Binary
+		pgType string
+		want   interface{}
+	}{
+		{"uuid column", uuid4, "uuid", uuidText},
+		{"uuid column, legacy subtype 3", bson.Binary{Subtype: bson.TypeBinaryUUIDOld, Data: uuidBytes}, "uuid", uuidText},
+		{"text column, uuid subtype", uuid4, "text", uuidText},
+		{"text column, generic subtype", generic, "text", "8d00ff"},
+		{"bytea column keeps raw bytes", generic, "bytea", []byte{0x8d, 0x00, 0xff}},
+		{"bytea column, uuid subtype keeps raw bytes", uuid4, "BYTEA", uuidBytes},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertScalar(tc.v, tc.pgType)
+			if err != nil {
+				t.Fatalf("convertScalar: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestConvertBinary_UUIDColumnRejectsNonUUID(t *testing.T) {
+	for _, v := range []bson.Binary{
+		{Subtype: bson.TypeBinaryGeneric, Data: make([]byte, 16)},
+		{Subtype: bson.TypeBinaryUUID, Data: make([]byte, 15)},
+	} {
+		if _, err := convertScalar(v, "uuid"); err == nil {
+			t.Errorf("subtype %d, %d bytes: expected error for uuid column", v.Subtype, len(v.Data))
+		}
+	}
+}
+
+// The ids_uuid case from XferDB-jenkins: Binary _id overridden to uuid.
+func TestConvertDocument_BinaryUUIDPrimaryKey(t *testing.T) {
+	uuidBytes := []byte("0123456789abcdef")
+	doc := bson.D{
+		{Key: "_id", Value: bson.Binary{Subtype: bson.TypeBinaryUUID, Data: uuidBytes}},
+		{Key: "user", Value: "alice"},
+	}
+	plan := makePlan(row("_id", "_id", "uuid", "direct"), row("user", "user", "text", "direct"))
+	out, err := ConvertDocument(doc, plan, "_extra")
+	if err != nil {
+		t.Fatalf("ConvertDocument: %v", err)
+	}
+	if want := "30313233-3435-3637-3839-616263646566"; out["_id"] != want {
+		t.Errorf("_id = %#v, want %q", out["_id"], want)
+	}
+}
+
+// The ids_compound case: an embedded-document _id as a jsonb primary key.
+func TestConvertDocument_CompoundIDAsJsonb(t *testing.T) {
+	doc := bson.D{
+		{Key: "_id", Value: bson.D{{Key: "year", Value: int32(2026)}, {Key: "seq", Value: int32(4821)}}},
+	}
+	out, err := ConvertDocument(doc, makePlan(row("_id", "_id", "jsonb", "as_jsonb")), "_extra")
+	if err != nil {
+		t.Fatalf("ConvertDocument: %v", err)
+	}
+	s, ok := out["_id"].(string)
+	if !ok {
+		t.Fatalf("_id = %T, want JSON string", out["_id"])
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(s), &m); err != nil || m["year"] != float64(2026) || m["seq"] != float64(4821) {
+		t.Errorf("_id = %s, want {year:2026, seq:4821} (err %v)", s, err)
 	}
 }

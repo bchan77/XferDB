@@ -100,7 +100,7 @@ func inferField(ff FieldFrequency, projectID, collection string, seen map[string
 
 	// _id is always primary key, never nullable.
 	if ff.FieldName == "_id" {
-		pgType, opts, warns := inferIDType(ff.Types)
+		pgType, strategy, opts, warns := inferIDType(ff.Types)
 		seen["_id"] = true
 		return InferredField{
 			Frequency: ff,
@@ -110,7 +110,7 @@ func inferField(ff FieldFrequency, projectID, collection string, seen map[string
 				FieldName:  "_id",
 				PgColumn:   "_id",
 				PgType:     pgType,
-				Strategy:   "direct",
+				Strategy:   strategy,
 				IsPK:       true,
 				Nullable:   false,
 			},
@@ -140,41 +140,74 @@ func inferField(ff FieldFrequency, projectID, collection string, seen map[string
 	}
 }
 
-// inferIDType determines the Postgres type for the _id field.
-func inferIDType(types []TypeCount) (pgType string, opts []FieldOption, warnings []string) {
-	if len(types) == 0 {
-		return "text", []FieldOption{{PgType: "text", Strategy: "direct"}}, nil
+// inferIDType determines the Postgres type and strategy for the _id field.
+//
+// Every sampled type counts, not just the most common one: a collection whose
+// _id is mostly Int64 with a few strings needs a column that holds both, or the
+// minority rows fail at insert time (#97).
+func inferIDType(types []TypeCount) (pgType, strategy string, opts []FieldOption, warnings []string) {
+	typeSet := make(map[string]bool, len(types))
+	for _, tc := range types {
+		if tc.TypeName != "Null" {
+			typeSet[tc.TypeName] = true
+		}
+	}
+	if len(typeSet) == 0 {
+		return "text", "direct", []FieldOption{{PgType: "text", Strategy: "direct"}}, nil
+	}
+	if len(typeSet) > 1 {
+		return inferPolymorphicIDType(types, typeSet)
 	}
 	dominant := types[0].TypeName // typeList() is sorted by count desc
 
 	switch dominant {
 	case "ObjectId":
-		return "text", []FieldOption{{PgType: "text", Strategy: "direct"}}, nil
+		return "text", "direct", []FieldOption{{PgType: "text", Strategy: "direct"}}, nil
 	case "Int32":
-		return "integer", []FieldOption{
+		return "integer", "direct", []FieldOption{
 			{PgType: "integer", Strategy: "direct"},
 			{PgType: "bigint", Strategy: "direct"},
 		}, nil
 	case "Int64":
-		return "bigint", []FieldOption{
+		return "bigint", "direct", []FieldOption{
 			{PgType: "bigint", Strategy: "direct"},
 			{PgType: "integer", Strategy: "direct"},
 		}, nil
 	case "String":
-		return "text", []FieldOption{{PgType: "text", Strategy: "direct"}}, nil
+		return "text", "direct", []FieldOption{{PgType: "text", Strategy: "direct"}}, nil
 	case "Binary":
 		// Binary subtype 4 is UUID — can't distinguish from type name alone.
-		return "text", []FieldOption{
+		// convertScalar writes UUID subtypes as canonical UUID text and any
+		// other subtype as hex, so text is safe for every subtype.
+		return "text", "direct", []FieldOption{
 			{PgType: "text", Strategy: "direct"},
 			{PgType: "uuid", Strategy: "direct"},
 		}, nil
 	case "Document":
-		return "jsonb", []FieldOption{{PgType: "jsonb", Strategy: "as_jsonb"}},
-			[]string{"compound _id (Document type) not supported in v1 — migration will fail for this collection"}
+		// jsonb compares objects by content, not key order, so two _ids that
+		// differ only in key order collide on the primary key.
+		return "jsonb", "as_jsonb", []FieldOption{{PgType: "jsonb", Strategy: "as_jsonb"}},
+			[]string{"compound _id (Document type): stored as a jsonb primary key; _ids that differ only in key order will collide"}
 	default:
-		return "text", []FieldOption{{PgType: "text", Strategy: "direct"}},
+		return "text", "direct", []FieldOption{{PgType: "text", Strategy: "direct"}},
 			[]string{fmt.Sprintf("unusual _id type %q — defaulting to text", dominant)}
 	}
+}
+
+// inferPolymorphicIDType handles an _id whose sampled values have more than one
+// BSON type. Integers widen to bigint; any other mix is stored as text.
+func inferPolymorphicIDType(types []TypeCount, typeSet map[string]bool) (pgType, strategy string, opts []FieldOption, warnings []string) {
+	if only(typeSet, "Int32", "Int64") {
+		return "bigint", "direct", []FieldOption{{PgType: "bigint", Strategy: "direct"}}, nil
+	}
+	if typeSet["Document"] || typeSet["Array"] {
+		return "jsonb", "as_jsonb", []FieldOption{{PgType: "jsonb", Strategy: "as_jsonb"}},
+			[]string{fmt.Sprintf("polymorphic _id (%s): stored as a jsonb primary key", typeSetStr(types))}
+	}
+	return "text", "direct", []FieldOption{{PgType: "text", Strategy: "direct"}},
+		[]string{fmt.Sprintf(
+			"polymorphic _id (%s): stored as text; _ids of different types with the same text form (e.g. 42 and \"42\") will collide",
+			typeSetStr(types))}
 }
 
 // inferType returns the recommended pg_type, strategy, options, and warnings for a non-_id field.
