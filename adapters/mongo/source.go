@@ -2,6 +2,8 @@ package mongo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
@@ -29,6 +31,10 @@ type Source struct {
 	planByCollection map[string][]state.SchemaPlanRow
 	// extraCol is the sanitised name of the _extra jsonb column (default "_extra").
 	extraColByCollection map[string]string
+	// collectionByTable reverses TableName: the engine uses one name for both
+	// the read and the write side, so this adapter presents the target table
+	// name outward and maps it back to the real collection to read from.
+	collectionByTable map[string]string
 
 	// accurateCounts uses CountDocuments instead of EstimatedDocumentCount.
 	// Slower but accurate — useful when estimates are unreliable.
@@ -45,9 +51,11 @@ func (s *Source) SetPlan(plan []state.SchemaPlanRow) error {
 	s.plan = plan
 	s.planByCollection = make(map[string][]state.SchemaPlanRow)
 	s.extraColByCollection = make(map[string]string)
+	s.collectionByTable = make(map[string]string)
 
 	for _, row := range plan {
 		s.planByCollection[row.Collection] = append(s.planByCollection[row.Collection], row)
+		s.collectionByTable[TableName(row.Collection)] = row.Collection
 	}
 
 	// Detect the _extra column name per collection (sanitiser may have renamed it).
@@ -143,10 +151,11 @@ func (s *Source) ListTables(ctx context.Context) ([]adapters.TableSchema, error)
 	return tables, nil
 }
 
-func (s *Source) GetSchema(ctx context.Context, collection string) (*adapters.TableSchema, error) {
+func (s *Source) GetSchema(ctx context.Context, table string) (*adapters.TableSchema, error) {
 	if err := s.requirePlan(); err != nil {
 		return nil, err
 	}
+	collection := s.collectionFor(table)
 	rows, ok := s.planByCollection[collection]
 	if !ok {
 		return nil, fmt.Errorf("no schema plan for collection %q — run 'project analyze' first", collection)
@@ -171,7 +180,7 @@ func (s *Source) GetSchema(ctx context.Context, collection string) (*adapters.Ta
 		Nullable: true,
 	})
 
-	return &adapters.TableSchema{Name: collection, Columns: cols}, nil
+	return &adapters.TableSchema{Name: TableName(collection), Columns: cols}, nil
 }
 
 // SetAccurateCounts enables accurate document counting using CountDocuments
@@ -180,8 +189,8 @@ func (s *Source) SetAccurateCounts(enabled bool) {
 	s.accurateCounts = enabled
 }
 
-func (s *Source) GetRowCount(ctx context.Context, collection string) (int64, error) {
-	coll := s.client.Database(s.database).Collection(collection)
+func (s *Source) GetRowCount(ctx context.Context, table string) (int64, error) {
+	coll := s.client.Database(s.database).Collection(s.collectionFor(table))
 	if s.accurateCounts {
 		// CountDocuments does a full collection scan — accurate but slow.
 		// Use a longer timeout (5 min) since large collections can take a while.
@@ -208,10 +217,11 @@ func (s *Source) GetPKRange(_ context.Context, _, _ string) (int64, int64, error
 // ReadBatch reads up to opts.Limit documents using keyset pagination on _id.
 // opts.LastPK is the resume key of the last _id seen (empty on first call);
 // see encodeID.
-func (s *Source) ReadBatch(ctx context.Context, collection string, opts adapters.BatchOptions) (*adapters.Batch, error) {
+func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.BatchOptions) (*adapters.Batch, error) {
 	if err := s.requirePlan(); err != nil {
 		return nil, err
 	}
+	collection := s.collectionFor(table)
 	plan := s.planByCollection[collection]
 	extraCol := s.extraColByCollection[collection]
 
@@ -406,6 +416,39 @@ func humanSize(bytes int64) string {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// maxPgIdentLen is Postgres's NAMEDATALEN limit for an identifier.
+const maxPgIdentLen = 63
+
+// TableName maps a MongoDB collection name to the table name used on the
+// target. A collection name is otherwise used verbatim, but Postgres truncates
+// identifiers at NAMEDATALEN, so two collections agreeing over their first 63
+// bytes would silently land in one table -- CreateTable uses CREATE TABLE IF
+// NOT EXISTS, so the second one's rows join the first one's.
+//
+// Over-long names are truncated and given a suffix derived from the full name.
+// Deriving it from the name rather than from a counter keeps the mapping
+// deterministic and independent of which other collections exist, which
+// matters because checkpoints are keyed by this name and must still resolve
+// when a migration resumes.
+func TableName(collection string) string {
+	if len(collection) <= maxPgIdentLen {
+		return collection
+	}
+	sum := sha256.Sum256([]byte(collection))
+	suffix := "_" + hex.EncodeToString(sum[:4])
+	return collection[:maxPgIdentLen-len(suffix)] + suffix
+}
+
+// collectionFor maps a name the engine handed back to the real collection.
+// Names that need no truncation map to themselves, so an unknown name is
+// returned unchanged rather than treated as an error.
+func (s *Source) collectionFor(table string) string {
+	if collection, ok := s.collectionByTable[table]; ok {
+		return collection
+	}
+	return table
+}
 
 func (s *Source) requirePlan() error {
 	if s.planByCollection == nil {
