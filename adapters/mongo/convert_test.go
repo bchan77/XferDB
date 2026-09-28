@@ -140,6 +140,80 @@ func TestConvertDocument_FlattenStrategy(t *testing.T) {
 	}
 }
 
+// XferDB#98.1: flattening used to expand exactly one level, so a grandchild
+// column was created from the plan and then never written.
+func TestConvertDocument_FlattenRecursesBeyondOneLevel(t *testing.T) {
+	doc := bson.D{
+		{Key: "_id", Value: "x"},
+		{Key: "address", Value: bson.D{
+			{Key: "home", Value: bson.D{
+				{Key: "city", Value: "Boston"},
+				{Key: "zip", Value: "02101"},
+			}},
+			{Key: "work", Value: bson.D{
+				{Key: "city", Value: "Cambridge"},
+			}},
+		}},
+	}
+	plan := makePlan(
+		row("_id", "_id", "text", "direct"),
+		row("address", "", "", "flatten"),
+		row("address.home", "", "", "flatten"),
+		row("address.home.city", "address_home_city", "text", "direct"),
+		row("address.home.zip", "address_home_zip", "text", "direct"),
+		// Left as jsonb at the second level: the child's own strategy applies.
+		row("address.work", "address_work", "jsonb", "as_jsonb"),
+	)
+
+	result, err := ConvertDocument(doc, plan, "_extra")
+	if err != nil {
+		t.Fatalf("ConvertDocument: %v", err)
+	}
+	if result["address_home_city"] != "Boston" {
+		t.Errorf("address_home_city = %v, want \"Boston\"", result["address_home_city"])
+	}
+	if result["address_home_zip"] != "02101" {
+		t.Errorf("address_home_zip = %v, want \"02101\"", result["address_home_zip"])
+	}
+	if got, ok := result["address_work"].(string); !ok || got != `{"city":"Cambridge"}` {
+		t.Errorf("address_work = %v, want the jsonb object", result["address_work"])
+	}
+	for _, col := range []string{"address", "address_home"} {
+		if _, ok := result[col]; ok {
+			t.Errorf("flatten parent %q must not appear as a column", col)
+		}
+	}
+}
+
+// A child marked skip inside a flattened parent must be dropped, not written.
+func TestConvertDocument_FlattenHonoursChildSkip(t *testing.T) {
+	doc := bson.D{
+		{Key: "address", Value: bson.D{
+			{Key: "city", Value: "NYC"},
+			{Key: "secret", Value: "hunter2"},
+		}},
+	}
+	plan := makePlan(
+		row("address", "", "", "flatten"),
+		row("address.city", "address_city", "text", "direct"),
+		row("address.secret", "address_secret", "text", "skip"),
+	)
+
+	result, err := ConvertDocument(doc, plan, "_extra")
+	if err != nil {
+		t.Fatalf("ConvertDocument: %v", err)
+	}
+	if result["address_city"] != "NYC" {
+		t.Errorf("address_city = %v, want \"NYC\"", result["address_city"])
+	}
+	if _, ok := result["address_secret"]; ok {
+		t.Error("a skipped child must not be written")
+	}
+	if _, ok := result["_extra"]; ok {
+		t.Error("a skipped child must not fall through to _extra")
+	}
+}
+
 func TestConvertDocument_UnknownFieldGoesToExtra(t *testing.T) {
 	doc := bson.D{
 		{Key: "_id", Value: "x"},

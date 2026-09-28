@@ -84,19 +84,11 @@ func convertDoc(doc bson.D, prefix string, plan map[string]state.SchemaPlanRow, 
 				extra[fieldPath] = bsonToAny(elem.Value)
 				continue
 			}
-			// Expand one level: each child becomes a separate column.
-			for _, child := range nested {
-				childPath := fieldPath + "." + child.Key
-				childRow, childInPlan := plan[childPath]
-				if !childInPlan {
-					extra[childPath] = bsonToAny(child.Value)
-					continue
-				}
-				v, err := convertScalar(child.Value, childRow.PgType)
-				if err != nil {
-					return fmt.Errorf("flatten child %s: %w", childPath, err)
-				}
-				out[childRow.PgColumn] = v
+			// Recurse so each child is resolved against its own plan row: a
+			// child may itself be flattened, skipped or stored as jsonb, and
+			// nesting can go deeper than one level.
+			if err := convertDoc(nested, fieldPath, plan, out, extra); err != nil {
+				return err
 			}
 
 		default: // "direct"
