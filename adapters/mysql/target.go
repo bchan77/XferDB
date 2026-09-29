@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"github.com/go-sql-driver/mysql"
 )
 
 // Target implements adapters.TargetAdapter for MySQL.
@@ -83,7 +83,11 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 	defs := make([]string, 0, len(schema.Columns))
 	var pks []string
 	for _, c := range schema.Columns {
-		def := fmt.Sprintf(`%s %s`, quote(c.Name), c.Type)
+		colType := mapTypeToMySQL(c.Type)
+		if c.PrimaryKey {
+			colType = mysqlKeyableType(colType)
+		}
+		def := fmt.Sprintf(`%s %s`, quote(c.Name), colType)
 		if !c.Nullable {
 			def += " NOT NULL"
 		}
@@ -213,7 +217,7 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 		var query string
 		switch change.Type {
 		case adapters.ChangeAddColumn:
-			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), change.Column.Type)
+			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), mapTypeToMySQL(change.Column.Type))
 			if !change.Column.Nullable {
 				def += " NOT NULL"
 			}
@@ -225,7 +229,7 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 			query = fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`,
 				quote(table), quote(change.Column.Name))
 		case adapters.ChangeAlterColumn:
-			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), change.Column.Type)
+			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), mapTypeToMySQL(change.Column.Type))
 			if !change.Column.Nullable {
 				def += " NOT NULL"
 			}

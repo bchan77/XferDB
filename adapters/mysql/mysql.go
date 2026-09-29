@@ -12,6 +12,88 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+// mapTypeToMySQL converts a source database type (e.g. PostgreSQL) to its
+// MySQL equivalent. If the type is already valid MySQL or unknown, it is
+// returned unchanged so the server rejects it loudly rather than this guessing
+// at something that silently stores the wrong thing.
+//
+// Without this, a Postgres source's own type names went straight into MySQL
+// DDL -- `timestamp without time zone` and `character varying(200)` are not
+// MySQL syntax, and CREATE TABLE failed before a single row was written.
+func mapTypeToMySQL(srcType string) string {
+	lower := strings.ToLower(strings.TrimSpace(srcType))
+
+	switch lower {
+	case "integer", "int4":
+		return "int"
+	case "int8":
+		return "bigint"
+	case "int2":
+		return "smallint"
+	case "boolean", "bool":
+		return "tinyint(1)"
+	case "real", "float4":
+		return "float"
+	case "double precision", "float8":
+		return "double"
+	case "bytea":
+		return "longblob"
+	case "jsonb":
+		return "json"
+	case "uuid":
+		return "char(36)"
+	case "money":
+		return "decimal(19,4)"
+	case "xml":
+		return "text"
+	case "inet", "cidr":
+		return "varchar(43)"
+	case "numeric", "decimal":
+		// An unqualified DECIMAL is DECIMAL(10,0) in MySQL, which would drop
+		// every fractional digit without complaining. Postgres numeric with no
+		// modifier is arbitrary precision, so take MySQL's maximum instead.
+		return "decimal(65,30)"
+	case "character varying", "varchar":
+		// Unbounded varchar has no MySQL counterpart; TEXT is the closest.
+		return "text"
+	}
+
+	// timestamp[(p)] [with|without] time zone, and timestamptz. DATETIME rather
+	// than TIMESTAMP: MySQL's TIMESTAMP only spans 1970-2038, so anything
+	// outside that range would fail or clamp.
+	if strings.HasPrefix(lower, "timestamp") {
+		return "datetime(6)"
+	}
+	// time[(p)] [with|without] time zone. Must follow the timestamp check.
+	if strings.HasPrefix(lower, "time") {
+		return "time(6)"
+	}
+	if rest, ok := strings.CutPrefix(lower, "character varying("); ok {
+		return "varchar(" + rest
+	}
+	if rest, ok := strings.CutPrefix(lower, "character("); ok {
+		return "char(" + rest
+	}
+	if rest, ok := strings.CutPrefix(lower, "numeric("); ok {
+		return "decimal(" + rest
+	}
+
+	// Already MySQL-compatible, or unknown -- pass through.
+	return srcType
+}
+
+// mysqlKeyableType adapts a type that MySQL refuses to index. TEXT, BLOB and
+// JSON columns cannot take a key without a prefix length, so a primary key of
+// that type (a MongoDB _id maps to text) would fail at CREATE TABLE.
+func mysqlKeyableType(mysqlType string) string {
+	switch strings.ToLower(strings.TrimSpace(mysqlType)) {
+	case "text", "tinytext", "mediumtext", "longtext",
+		"blob", "tinyblob", "mediumblob", "longblob", "json":
+		return "varchar(255)"
+	}
+	return mysqlType
+}
+
 // buildDSN constructs a MySQL DSN from config fields.
 //
 // The go-sql-driver/mysql expects its native DSN format:
