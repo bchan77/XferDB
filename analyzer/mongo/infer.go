@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	mongoadapter "gitea.homelab.local/nextdevops/XferDB/adapters/mongo"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 )
 
@@ -82,7 +83,9 @@ func InferSchema(sample *CollectionSample, projectID string) (*InferredSchema, e
 		SampleSize:     sample.SampleSize,
 		Fields:         fields,
 		TableSchema: adapters.TableSchema{
-			Name:    sample.Collection,
+			// The target table name, which is the collection name unless it is
+			// too long for a Postgres identifier -- see mongoadapter.TableName.
+			Name:    mongoadapter.TableName(sample.Collection),
 			Columns: columns,
 		},
 	}, nil

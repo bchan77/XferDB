@@ -2,6 +2,7 @@ package mongo
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,6 +213,62 @@ func TestRequirePlan_PassesAfterSetPlan(t *testing.T) {
 }
 
 // ── shouldSkipCollection ──────────────────────────────────────────────────────
+
+// XferDB#98.2: Postgres truncates identifiers at 63 bytes, so two collections
+// agreeing over their first 63 bytes used to land in one table.
+func TestTableName(t *testing.T) {
+	short := "compat_users"
+	if got := TableName(short); got != short {
+		t.Errorf("TableName(%q) = %q, want it unchanged", short, got)
+	}
+
+	fits := strings.Repeat("a", maxPgIdentLen)
+	if got := TableName(fits); got != fits {
+		t.Errorf("a name of exactly %d bytes must be left alone, got %q", maxPgIdentLen, got)
+	}
+
+	prefix := strings.Repeat("b", maxPgIdentLen)
+	one, two := TableName(prefix+"_one"), TableName(prefix+"_two")
+	if len(one) != maxPgIdentLen || len(two) != maxPgIdentLen {
+		t.Errorf("over-long names must be cut to %d bytes, got %d and %d",
+			maxPgIdentLen, len(one), len(two))
+	}
+	if one == two {
+		t.Errorf("names differing after byte %d must not collide, both gave %q",
+			maxPgIdentLen, one)
+	}
+	// Checkpoints are keyed by this name, so it must not move between runs.
+	if TableName(prefix+"_one") != one {
+		t.Error("TableName must be deterministic")
+	}
+}
+
+func TestCollectionFor_MapsTruncatedNameBack(t *testing.T) {
+	collection := strings.Repeat("c", maxPgIdentLen) + "_long"
+	s := &Source{}
+	if err := s.SetPlan([]state.SchemaPlanRow{
+		{Collection: collection, FieldName: "_id", PgColumn: "_id", PgType: "text", Strategy: "direct"},
+		{Collection: "short_one", FieldName: "_id", PgColumn: "_id", PgType: "text", Strategy: "direct"},
+	}); err != nil {
+		t.Fatalf("SetPlan: %v", err)
+	}
+
+	table := TableName(collection)
+	if table == collection {
+		t.Fatal("test needs a name long enough to be truncated")
+	}
+	if got := s.collectionFor(table); got != collection {
+		t.Errorf("collectionFor(%q) = %q, want the full collection name", table, got)
+	}
+	// A name that needed no truncation maps to itself.
+	if got := s.collectionFor("short_one"); got != "short_one" {
+		t.Errorf("collectionFor(\"short_one\") = %q, want it unchanged", got)
+	}
+	// An unknown name is returned as-is rather than erroring.
+	if got := s.collectionFor("never_seen"); got != "never_seen" {
+		t.Errorf("collectionFor(\"never_seen\") = %q, want it unchanged", got)
+	}
+}
 
 func TestShouldSkipCollectionInSource(t *testing.T) {
 	if !shouldSkipCollection("system.users", "collection") {
