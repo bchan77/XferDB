@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -13,6 +14,106 @@ import (
 // quote returns a safely double-quoted SQL identifier.
 func quote(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// maxExactREALDigits is the most significant decimal digits a REAL (IEEE
+// double) round-trips exactly. SQLite's NUMERIC affinity converts decimal text
+// to REAL, so a numeric wider than this is silently rounded.
+const maxExactREALDigits = 15
+
+// mapTypeToSQLite converts a source database type (PostgreSQL, MySQL, or one
+// the MongoDB analyzer inferred) to a SQLite declared type. Unknown types are
+// returned unchanged.
+//
+// SQLite never rejects a type name -- it derives a column affinity from
+// substrings of it -- so passing source types through fails silently rather
+// than loudly: `numeric` rounds to 15 digits, `point` and `interval` get
+// INTEGER affinity because they contain "int", and `timestamp without time
+// zone` reads back as a string because mattn/go-sqlite3 only parses the exact
+// decltypes `timestamp`, `datetime` and `date` into time.Time (and `boolean`
+// into bool). The names returned here are chosen for both the affinity and
+// that readback.
+func mapTypeToSQLite(srcType string) string {
+	lower := strings.Join(strings.Fields(strings.ToLower(srcType)), " ")
+	if lower == "" {
+		return srcType
+	}
+	if strings.HasSuffix(lower, "[]") {
+		// Postgres arrays arrive as their text literal, e.g. {1,2}.
+		return "TEXT"
+	}
+	if lower == "tinyint(1)" {
+		// MySQL's boolean.
+		return "BOOLEAN"
+	}
+
+	// Base name without modifiers: "decimal(10,2) unsigned" -> "decimal",
+	// "character varying(20)" -> "character varying".
+	base := lower
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		base = strings.TrimSpace(base[:i])
+	}
+	base = strings.TrimSuffix(base, " zerofill")
+	base = strings.TrimSuffix(base, " unsigned")
+
+	switch base {
+	case "integer", "int", "int2", "int4", "int8", "smallint", "bigint",
+		"tinyint", "mediumint", "serial", "smallserial", "bigserial", "year":
+		return "INTEGER"
+	case "boolean", "bool":
+		return "BOOLEAN"
+	case "real", "float", "float4", "float8", "double", "double precision":
+		return "REAL"
+	case "bytea", "blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary":
+		return "BLOB"
+	case "date":
+		return "DATE"
+	case "datetime":
+		return "DATETIME"
+	case "numeric", "decimal":
+		if p, ok := numericPrecision(lower); ok && p <= maxExactREALDigits {
+			return "NUMERIC"
+		}
+		// Unbounded, or wider than a REAL holds: keep the exact digits as
+		// text rather than round them. Costs numeric ordering; never data.
+		return "TEXT"
+	case "text", "tinytext", "mediumtext", "longtext", "varchar", "char",
+		"character varying", "character", "uuid", "json", "jsonb", "xml",
+		"inet", "cidr", "macaddr", "money", "interval", "point", "enum", "set":
+		return "TEXT"
+	}
+	// timestamp[(p)] [with|without time zone], timestamptz.
+	if strings.HasPrefix(base, "timestamp") {
+		return "TIMESTAMP"
+	}
+	// time[(p)] [with|without time zone], timetz. Must follow the timestamp check.
+	if strings.HasPrefix(base, "time") {
+		return "TEXT"
+	}
+
+	return srcType
+}
+
+// numericPrecision returns p from a lowercased "numeric(p[,s])".
+func numericPrecision(lower string) (int, bool) {
+	open := strings.IndexByte(lower, '(')
+	if open < 0 {
+		return 0, false
+	}
+	args := lower[open+1:]
+	end := strings.IndexAny(args, ",)")
+	if end < 0 {
+		return 0, false
+	}
+	p, err := strconv.Atoi(strings.TrimSpace(args[:end]))
+	return p, err == nil
+}
+
+// hasBlobAffinity reports whether SQLite gives a declared type BLOB affinity:
+// it contains "BLOB", or no type was declared at all.
+func hasBlobAffinity(declType string) bool {
+	t := strings.TrimSpace(declType)
+	return t == "" || strings.Contains(strings.ToUpper(t), "BLOB")
 }
 
 // openDB opens (or creates) a SQLite file using the DSN or Database field.
@@ -198,7 +299,7 @@ func getForeignKeys(ctx context.Context, db *sql.DB, table string) ([]adapters.F
 	defer rows.Close()
 
 	type fkRow struct {
-		id, seq                           int
+		id, seq                                int
 		refTable, from, to, onUpdate, onDelete string
 	}
 	var fkRows []fkRow
