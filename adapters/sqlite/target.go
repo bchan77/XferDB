@@ -91,10 +91,19 @@ func (t *Target) cachedSchema(ctx context.Context, table string) (*adapters.Tabl
 }
 
 func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) error {
-	defs := make([]string, 0, len(schema.Columns)+len(schema.ForeignKeys)+len(schema.Checks))
+	var pkCols []string
 	for _, c := range schema.Columns {
-		def := fmt.Sprintf(`%s %s`, quote(c.Name), c.Type)
 		if c.PrimaryKey {
+			pkCols = append(pkCols, quote(c.Name))
+		}
+	}
+	defs := make([]string, 0, len(schema.Columns)+1+len(schema.ForeignKeys)+len(schema.Checks))
+	for _, c := range schema.Columns {
+		def := fmt.Sprintf(`%s %s`, quote(c.Name), mapTypeToSQLite(c.Type))
+		// A column-level PRIMARY KEY on more than one column is rejected
+		// ("has more than one primary key"); composite keys are declared once
+		// at table level below.
+		if c.PrimaryKey && len(pkCols) == 1 {
 			def += " PRIMARY KEY"
 		}
 		if !c.Nullable && !c.PrimaryKey {
@@ -104,6 +113,9 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 			def += fmt.Sprintf(" DEFAULT %s", *c.DefaultValue)
 		}
 		defs = append(defs, def)
+	}
+	if len(pkCols) > 1 {
+		defs = append(defs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
 	}
 	// SQLite FK constraints must be declared in CREATE TABLE (no ALTER TABLE ADD FK).
 	for _, fk := range schema.ForeignKeys {
@@ -174,7 +186,7 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 	for _, change := range changes {
 		switch change.Type {
 		case adapters.ChangeAddColumn:
-			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), change.Column.Type)
+			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), mapTypeToSQLite(change.Column.Type))
 			if change.Column.DefaultValue != nil {
 				def += fmt.Sprintf(" DEFAULT %s", *change.Column.DefaultValue)
 			}
@@ -198,16 +210,9 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		return t.writeBatchFast(ctx, table, batch)
 	}
 
-	// Derive columns from the schema, not from Records[0].
-	// This ensures all columns are included even if the first record
-	// is missing some fields (which would become NULL).
-	schema, err := t.cachedSchema(ctx, table)
+	cols, keepBytes, err := t.writeColumns(ctx, table)
 	if err != nil {
 		return err
-	}
-	cols := make([]string, 0, len(schema.Columns))
-	for _, c := range schema.Columns {
-		cols = append(cols, c.Name)
 	}
 
 	quotedCols := make([]string, len(cols))
@@ -239,7 +244,7 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	for _, rec := range batch.Records {
 		vals := make([]interface{}, len(cols))
 		for i, col := range cols {
-			vals[i] = rec[col]
+			vals[i] = bindValue(rec[col], keepBytes[i])
 		}
 		if _, err := stmt.ExecContext(ctx, vals...); err != nil {
 			return fmt.Errorf("insert record into %s: %w", table, err)
@@ -249,6 +254,39 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	return tx.Commit()
 }
 
+// writeColumns returns the columns WriteBatch binds, derived from the schema
+// rather than from Records[0] so that a first record missing some fields still
+// writes every column (the missing ones as NULL). keepBytes[i] reports whether
+// cols[i] has BLOB affinity; see bindValue.
+func (t *Target) writeColumns(ctx context.Context, table string) (cols []string, keepBytes []bool, err error) {
+	schema, err := t.cachedSchema(ctx, table)
+	if err != nil {
+		return nil, nil, err
+	}
+	cols = make([]string, len(schema.Columns))
+	keepBytes = make([]bool, len(schema.Columns))
+	for i, c := range schema.Columns {
+		cols[i] = c.Name
+		// Mapped first so a table left by an older run, declared with a
+		// source type like bytea, is still recognised as binary.
+		keepBytes[i] = hasBlobAffinity(mapTypeToSQLite(c.Type))
+	}
+	return cols, keepBytes, nil
+}
+
+// bindValue converts a []byte to string unless the column is binary. SQLite
+// stores a bound []byte as BLOB whatever the column's affinity, and sources
+// hand over plenty of text as []byte: lib/pq returns numeric, uuid and json
+// that way, and the MySQL source every column. Stored as BLOB, those values
+// never compare equal to text (WHERE id = '<uuid>' matches nothing), and
+// numeric text escapes the column's affinity conversion.
+func bindValue(v interface{}, keepBytes bool) interface{} {
+	if b, ok := v.([]byte); ok && !keepBytes {
+		return string(b)
+	}
+	return v
+}
+
 // writeBatchFast is the bulk-copy write path (see EnableCopy). It disables
 // per-commit fsync for this transaction and batches many rows into each
 // INSERT OR REPLACE statement instead of one row per Exec call, chunked to
@@ -256,16 +294,9 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 // 900 total params is a safe ceiling across the SQLite versions this project
 // targets, including older builds capped at 999).
 func (t *Target) writeBatchFast(ctx context.Context, table string, batch *adapters.Batch) error {
-	// Derive columns from the schema, not from Records[0].
-	// This ensures all columns are included even if the first record
-	// is missing some fields (which would become NULL).
-	schema, err := t.cachedSchema(ctx, table)
+	cols, keepBytes, err := t.writeColumns(ctx, table)
 	if err != nil {
 		return err
-	}
-	cols := make([]string, 0, len(schema.Columns))
-	for _, c := range schema.Columns {
-		cols = append(cols, c.Name)
 	}
 
 	quotedCols := make([]string, len(cols))
@@ -309,10 +340,10 @@ func (t *Target) writeBatchFast(ctx context.Context, table string, batch *adapte
 		rowPlaceholders := make([]string, len(chunk))
 		allVals := make([]interface{}, 0, len(chunk)*len(cols))
 		ph := "(" + strings.TrimRight(strings.Repeat("?, ", len(cols)), ", ") + ")"
-		for i, rec := range chunk {
-			rowPlaceholders[i] = ph
-			for _, col := range cols {
-				allVals = append(allVals, rec[col])
+		for r, rec := range chunk {
+			rowPlaceholders[r] = ph
+			for i, col := range cols {
+				allVals = append(allVals, bindValue(rec[col], keepBytes[i]))
 			}
 		}
 
