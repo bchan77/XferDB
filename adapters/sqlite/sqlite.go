@@ -21,6 +21,12 @@ func openDB(config adapters.ConnectionConfig) (*sql.DB, error) {
 	if dsn == "" {
 		dsn = config.Database
 	}
+	// A project defined in a config file keeps its DSN verbatim: config only
+	// infers the adapter type from the scheme (registry.InferTypeFromDSN) and
+	// never parses it the way registry.ParseConnectionString does for the CLI.
+	// So sqlite:///path/to/file.db can arrive here as-is, and the driver would
+	// treat the whole URL as a relative file name and fail to open it.
+	dsn = strings.TrimPrefix(dsn, "sqlite://")
 	if dsn == "" {
 		return nil, fmt.Errorf("sqlite: no database path provided (set DSN or Database)")
 	}
