@@ -129,14 +129,19 @@ func (h *ProjectsHandler) AnalyzeMongo(w http.ResponseWriter, r *http.Request, p
 		}
 
 		allPlanRows = append(allPlanRows, schema.PlanRows()...)
-		results = append(results, collectionResult{Collection: coll, Schema: schema})
+		results = append(results, collectionResult{Collection: coll, Schema: schema, Warnings: schema.Warnings})
 
-		// Stream collection result.
-		writeEvent(map[string]any{
+		// Stream collection result. warnings is what the CLI prints and the web
+		// UI badges, so collection-level inference problems ride along here.
+		event := map[string]any{
 			"type":       "collection",
 			"collection": coll,
 			"schema":     schema,
-		})
+		}
+		if len(schema.Warnings) > 0 {
+			event["warnings"] = schema.Warnings
+		}
+		writeEvent(event)
 	}
 
 	h.Log.Info("project.mongo.analyzed",

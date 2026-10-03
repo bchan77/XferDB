@@ -230,6 +230,19 @@ String + Null               → text, nullable
 If no widest type covers all observed values cleanly, fall back to `jsonb`. The analysis
 output flags every polymorphic field as a warning so the user can review the decision.
 
+### Field Names Containing a Dot
+
+Field paths are dot-joined, and since MongoDB 3.6 a key may itself contain a dot, so a
+literal `"a.b"` key and a nested `a: {b: ...}` produce the same path. Their samples merge
+into one plan row with one type (widened if they disagree), and flattening `a` would write
+both into the same `a_b` column. The sampler records every key sequence behind a path
+(`FieldFrequency.path_shapes`), and inference raises a **collection-level** warning for any
+path with more than one, which `project analyze` prints and the web UI badges (#117).
+
+This is detected, not re-encoded: an unambiguous encoding would change every plan key and
+the `_extra` format for a shape that is rare. `_extra` uses the same dotted keys, so the
+ambiguity remains there for fields the plan does not cover.
+
 ### The `_id` Field
 
 `_id` is always the primary key in the target table. Type options:

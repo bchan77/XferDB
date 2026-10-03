@@ -33,6 +33,10 @@ type InferredSchema struct {
 	SampleSize     int                  `json:"sample_size"`     // docs actually sampled
 	Fields         []InferredField      `json:"fields"`
 	TableSchema    adapters.TableSchema `json:"table_schema"`
+	// Warnings are collection-level problems a user must see before migrating.
+	// The API streams them with the collection, which is what the CLI prints
+	// and the web UI badges; field-level Warnings are not surfaced there.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // PlanRows extracts just the SchemaPlanRows, ready for state.SavePlan.
@@ -52,9 +56,14 @@ func InferSchema(sample *CollectionSample, projectID string) (*InferredSchema, e
 
 	var fields []InferredField
 	var columns []adapters.ColumnDef
+	var warnings []string
 
 	for _, ff := range sample.Fields {
 		inf := inferField(ff, projectID, sample.Collection, seen)
+		if w := ambiguousPathWarning(ff); w != "" {
+			inf.Warnings = append(inf.Warnings, w)
+			warnings = append(warnings, w)
+		}
 		fields = append(fields, inf)
 
 		// Flatten parent rows and skip rows do not produce target columns.
@@ -82,6 +91,7 @@ func InferSchema(sample *CollectionSample, projectID string) (*InferredSchema, e
 		EstimatedCount: sample.EstimatedCount,
 		SampleSize:     sample.SampleSize,
 		Fields:         fields,
+		Warnings:       warnings,
 		TableSchema: adapters.TableSchema{
 			// The target table name, which is the collection name unless it is
 			// too long for a Postgres identifier -- see mongoadapter.TableName.
@@ -141,6 +151,28 @@ func inferField(ff FieldFrequency, projectID, collection string, seen map[string
 		Options:  opts,
 		Warnings: warns,
 	}
+}
+
+// ambiguousPathWarning explains a field whose path was produced by more than
+// one key sequence (#117), or returns "" when there was only one.
+//
+// Detected rather than re-encoded: an unambiguous path encoding would change
+// every plan key and the _extra format for a shape that is rare (dotted keys
+// were illegal before MongoDB 3.6). The merge itself is silent otherwise --
+// the shapes share one plan row and one inferred type, which is widened if
+// they disagree, and flattening the parent sends both into the same column.
+func ambiguousPathWarning(ff FieldFrequency) string {
+	if len(ff.PathShapes) == 0 {
+		return ""
+	}
+	shapes := make([]string, len(ff.PathShapes))
+	for i, keys := range ff.PathShapes {
+		shapes[i] = fmt.Sprintf("%q", keys)
+	}
+	return fmt.Sprintf("ambiguous field path %q: produced by different keys %s, so their samples "+
+		"were merged into one field (a key containing \".\" looks like a nested path); "+
+		"its type covers both, and flattening the parent would write both into one column",
+		ff.FieldName, strings.Join(shapes, " and "))
 }
 
 // inferIDType determines the Postgres type and strategy for the _id field.

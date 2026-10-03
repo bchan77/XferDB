@@ -265,10 +265,9 @@ func handleStreamingAnalyze(resp *http.Response) error {
 				}
 				collections = append(collections, map[string]any{"collection": coll, "schema": schema})
 				printCollectionFields(schema)
-			} else if len(warnings) > 0 {
-				for _, w := range warnings {
-					fmt.Printf("  WARNING: %v\n", w)
-				}
+			}
+			for _, w := range warnings {
+				fmt.Printf("  WARNING: %v\n", w)
 			}
 			fmt.Println()
 
