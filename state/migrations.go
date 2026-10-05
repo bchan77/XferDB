@@ -218,6 +218,14 @@ func (m *MetaDB) DeleteMigration(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM migration_tables WHERE migration_id = ?`, id); err != nil {
 		return fmt.Errorf("delete migration_tables: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM validation_tables WHERE validation_id IN
+		    (SELECT id FROM validations WHERE migration_id = ?)`, id); err != nil {
+		return fmt.Errorf("delete validation_tables: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM validations WHERE migration_id = ?`, id); err != nil {
+		return fmt.Errorf("delete validations: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM migrations WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("delete migration: %w", err)
 	}

@@ -123,6 +123,36 @@ func (m *MetaDB) migrate() error {
 
 		CREATE INDEX IF NOT EXISTS idx_migration_stats_migration_id
 			ON migration_stats(migration_id);
+
+		CREATE TABLE IF NOT EXISTS validations (
+			id           TEXT PRIMARY KEY,
+			migration_id TEXT NOT NULL REFERENCES migrations(id) ON DELETE CASCADE,
+			level        TEXT NOT NULL,
+			status       TEXT NOT NULL DEFAULT 'pending',
+			options      TEXT NOT NULL DEFAULT '{}',
+			created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			started_at   DATETIME,
+			completed_at DATETIME,
+			error        TEXT NOT NULL DEFAULT ''
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_validations_migration_id
+			ON validations(migration_id);
+
+		CREATE TABLE IF NOT EXISTS validation_tables (
+			validation_id TEXT NOT NULL REFERENCES validations(id) ON DELETE CASCADE,
+			table_name    TEXT NOT NULL,
+			result        TEXT NOT NULL DEFAULT 'pending',
+			source_rows   INTEGER,
+			target_rows   INTEGER,
+			source_hash   TEXT NOT NULL DEFAULT '',
+			target_hash   TEXT NOT NULL DEFAULT '',
+			rows_checked  INTEGER NOT NULL DEFAULT 0,
+			level_run     TEXT NOT NULL DEFAULT '',
+			level_note    TEXT NOT NULL DEFAULT '',
+			detail        TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (validation_id, table_name)
+		);
 	`)
 	if err != nil {
 		return err

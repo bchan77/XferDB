@@ -97,7 +97,18 @@ created automatically — no separate `create`/`use` step needed.
 | `name` | string | Required, must be unique within the file. |
 | `description` | string | Optional. |
 | `source` / `target` | connection config | See below. |
-| `transfer` | transfer config | Same fields as `defaults`, scoped to this project. |
+| `transfer` | transfer config | Same fields as `defaults`, scoped to this project, plus the validation fields below. |
+
+A project's `transfer` block also decides how a finished migration is
+validated (compared against its source). `xferdb migrate --validation`,
+`--validation-level` and `--skip-validation` override these for one run.
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `validation` | string | `after` | `after`: validate once the migration completes. `off`: don't. |
+| `validation_level` | string | `L2` | `L1`: row counts only. `L2`: row counts plus a fingerprint of every row. |
+
+An older `validate: true|false` key is ignored: nothing ever read it.
 
 **Connection config** (`source:` / `target:`):
 

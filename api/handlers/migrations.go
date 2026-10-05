@@ -15,6 +15,7 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/engine"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/stats"
+	"gitea.homelab.local/nextdevops/XferDB/validate"
 )
 
 // MigrationsHandler holds shared engine/collector maps for migration endpoints.
@@ -25,6 +26,9 @@ type MigrationsHandler struct {
 	Collectors map[string]*stats.Collector
 	Cancels    map[string]context.CancelFunc
 	Log        *slog.Logger
+	// Validations validates a migration once it completes, unless the
+	// effective validation mode is off.
+	Validations *ValidationsHandler
 }
 
 // statsSaverAdapter wraps MetaDB to implement stats.StatsSaver.
@@ -90,6 +94,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		AccurateCounts *bool    `json:"accurate_counts"`
 		AsyncPipeline  *bool    `json:"async_pipeline"`
 		Tables         []string `json:"tables"`
+		// Per-run validation overrides; the project's settings apply otherwise.
+		Validation      *string `json:"validation"`
+		ValidationLevel *string `json:"validation_level"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
 	if overrides.RecreateSchema != nil {
@@ -127,6 +134,28 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	if len(overrides.Tables) > 0 {
 		p.TransferConfig.Tables = overrides.Tables
+	}
+	if overrides.Validation != nil {
+		p.TransferConfig.Validation = *overrides.Validation
+	}
+	if overrides.ValidationLevel != nil {
+		p.TransferConfig.ValidationLevel = *overrides.ValidationLevel
+	}
+	if err := validate.CheckMode(p.TransferConfig.Validation); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validate.CheckLevel(p.TransferConfig.ValidationLevel); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	validationMode := p.TransferConfig.Validation
+	if validationMode == "" {
+		validationMode = validate.DefaultMode
+	}
+	validationLevel := p.TransferConfig.ValidationLevel
+	if validationLevel == "" {
+		validationLevel = validate.DefaultLevel
 	}
 
 	migrationID := uuid.New().String()
@@ -185,6 +214,8 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		"truncate", cfg.Truncate,
 		"bulk_copy", cfg.BulkCopy,
 		"data_only", cfg.DataOnly,
+		"validation", validationMode,
+		"validation_level", validationLevel,
 	)
 
 	col.SetSaver(&statsSaverAdapter{db: h.DB})
@@ -198,9 +229,18 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 			h.Mu.Unlock()
 		}()
 		eng.Run(ctx) //nolint:errcheck
+		if h.Validations != nil {
+			h.Validations.startAfterMigration(migrationID, p, validationMode, validationLevel, migLog)
+		}
 	}()
 
-	writeJSON(w, http.StatusCreated, mig)
+	// The effective validation settings tell the client whether to wait for
+	// a validation once the migration completes.
+	writeJSON(w, http.StatusCreated, struct {
+		*adapters.Migration
+		Validation      string `json:"validation"`
+		ValidationLevel string `json:"validation_level"`
+	}{mig, validationMode, validationLevel})
 }
 
 // ListMigrations handles GET /api/v1/projects/{id}/migrations.

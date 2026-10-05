@@ -13,12 +13,13 @@ func (s *Server) routes() http.Handler {
 
 	ph := &handlers.ProjectsHandler{DB: s.db, Log: s.log}
 	mh := &handlers.MigrationsHandler{
-		DB:         s.db,
-		Mu:         &s.mu,
-		Engines:    s.engines,
-		Collectors: s.collectors,
-		Cancels:    s.cancels,
-		Log:        s.log,
+		DB:          s.db,
+		Mu:          &s.mu,
+		Engines:     s.engines,
+		Collectors:  s.collectors,
+		Cancels:     s.cancels,
+		Log:         s.log,
+		Validations: s.validations,
 	}
 
 	// Health
@@ -48,6 +49,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/migrations/{id}", mh.DeleteMigration)
 	mux.HandleFunc("GET /api/v1/migrations/{id}/stats", mh.GetStats)
 	mux.HandleFunc("GET /api/v1/migrations/{id}/stats/history", mh.GetStatsHistory)
+
+	// Validations: compare a migration's source and target after the fact.
+	vh := s.validations
+	mux.HandleFunc("POST /api/v1/migrations/{id}/validations", vh.StartValidation)
+	mux.HandleFunc("GET /api/v1/migrations/{id}/validations", vh.ListValidations)
+	mux.HandleFunc("GET /api/v1/validations/{id}", vh.GetValidation)
+	mux.HandleFunc("PATCH /api/v1/validations/{id}", vh.PatchValidation)
 
 	// TODO: WebSocket live progress at GET /api/v1/migrations/{id}/ws
 

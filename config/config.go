@@ -20,6 +20,7 @@ import (
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
+	"gitea.homelab.local/nextdevops/XferDB/validate"
 )
 
 // File is the top-level structure of an XferDB config file.
@@ -321,6 +322,12 @@ func validateTransferConfig(prefix string, t adapters.TransferConfig) error {
 	case "", adapters.ErrorPolicyAbort, adapters.ErrorPolicySkip:
 	default:
 		return fmt.Errorf("%s.on_error %q must be one of: abort, skip", prefix, t.OnError)
+	}
+	if err := validate.CheckMode(t.Validation); err != nil {
+		return fmt.Errorf("%s.validation: %w", prefix, err)
+	}
+	if err := validate.CheckLevel(t.ValidationLevel); err != nil {
+		return fmt.Errorf("%s.validation_level: %w", prefix, err)
 	}
 	return nil
 }
