@@ -1,6 +1,7 @@
 package mongo
 
 import (
+	"reflect"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -293,6 +294,56 @@ func TestPolymorphicDetection(t *testing.T) {
 	}
 	if nonNullTypes <= 1 {
 		t.Errorf("expected polymorphic field (>1 non-null types), got %d: %v", nonNullTypes, list)
+	}
+}
+
+// ── ambiguous paths (#117) ───────────────────────────────────────────────────
+
+func TestWalkDocument_LiteralDottedKeyCollidesWithNestedPath(t *testing.T) {
+	freq := make(map[string]*fieldAcc)
+	walkDocument(bson.D{{Key: "a.b", Value: "literal"}}, "", freq)
+	walkDocument(bson.D{{Key: "a", Value: bson.D{{Key: "b", Value: "nested"}}}}, "", freq)
+
+	// Both shapes land on one path, so their samples merge: two Strings.
+	acc := freq["a.b"]
+	if acc == nil || acc.typeCounts["String"] != 2 {
+		t.Fatalf("a.b should merge both shapes, got %+v", acc)
+	}
+	got := acc.ambiguousShapes()
+	want := [][]string{{"a", "b"}, {"a.b"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("shapes = %q, want %q", got, want)
+	}
+}
+
+func TestWalkDocument_SameLengthShapesStillCollide(t *testing.T) {
+	// Both are two keys deep, so depth alone cannot tell them apart.
+	freq := make(map[string]*fieldAcc)
+	walkDocument(bson.D{{Key: "a.b", Value: bson.D{{Key: "c", Value: int32(1)}}}}, "", freq)
+	walkDocument(bson.D{{Key: "a", Value: bson.D{{Key: "b.c", Value: int32(2)}}}}, "", freq)
+
+	want := [][]string{{"a", "b.c"}, {"a.b", "c"}}
+	if got := freq["a.b.c"].ambiguousShapes(); !reflect.DeepEqual(got, want) {
+		t.Errorf("shapes = %q, want %q", got, want)
+	}
+}
+
+func TestWalkDocument_UnambiguousPathsAreNotFlagged(t *testing.T) {
+	freq := make(map[string]*fieldAcc)
+	nested := bson.D{{Key: "a", Value: bson.D{{Key: "b", Value: bson.D{{Key: "c", Value: "x"}}}}}}
+	walkDocument(nested, "", freq)
+	walkDocument(nested, "", freq)
+	// A dotted key with no nested counterpart is unusual but not ambiguous.
+	walkDocument(bson.D{{Key: "x.y", Value: "literal"}}, "", freq)
+	walkDocument(bson.D{{Key: "plain", Value: "v"}}, "", freq)
+
+	for path, acc := range freq {
+		if shapes := acc.ambiguousShapes(); shapes != nil {
+			t.Errorf("%s flagged as ambiguous: %q", path, shapes)
+		}
+	}
+	if freq["plain"].shapes != nil {
+		t.Error("dotless paths should not record shapes at all")
 	}
 }
 

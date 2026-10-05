@@ -6,6 +6,7 @@ package mongo
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -51,6 +52,13 @@ type FieldFrequency struct {
 	TotalDocs   int         `json:"total_docs"`
 	Types       []TypeCount `json:"types"`
 	Polymorphic bool        `json:"polymorphic"` // more than one distinct non-null BSON type
+
+	// PathShapes is set only when FieldName was produced by more than one key
+	// sequence -- e.g. a literal "a.b" key (["a.b"]) and a nested a: {b: ...}
+	// (["a", "b"]). Paths are joined with "." and a key may itself contain a
+	// dot (legal since MongoDB 3.6), so both land on the same FieldName and
+	// their samples are merged into one entry (#117). Sorted for stable output.
+	PathShapes [][]string `json:"path_shapes,omitempty"`
 }
 
 // CoveragePct returns the percentage of sampled documents that contained
@@ -309,6 +317,7 @@ func (s *Sampler) SampleCollectionWithProgress(ctx context.Context, collection s
 			}
 		}
 		ff.Polymorphic = nonNullTypes > 1
+		ff.PathShapes = acc.ambiguousShapes()
 		fields = append(fields, ff)
 	}
 
@@ -330,6 +339,28 @@ type fieldAcc struct {
 	occurrences int
 	nullCount   int
 	typeCounts  map[string]int
+	// shapes holds each distinct key sequence that produced this path, keyed
+	// by the keys joined with NUL (which a BSON key cannot contain). Only
+	// recorded for paths containing a dot: a dotless path has one shape.
+	shapes map[string][]string
+}
+
+// ambiguousShapes returns the key sequences behind this path, sorted, or nil
+// when there was only one.
+func (a *fieldAcc) ambiguousShapes() [][]string {
+	if len(a.shapes) < 2 {
+		return nil
+	}
+	ids := make([]string, 0, len(a.shapes))
+	for id := range a.shapes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([][]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, a.shapes[id])
+	}
+	return out
 }
 
 func (a *fieldAcc) typeList() []TypeCount {
@@ -360,12 +391,32 @@ func ensureAcc(freq map[string]*fieldAcc, path string) *fieldAcc {
 // walkDocument recursively visits every key in a bson.D, recording field
 // paths (dot-notation) and their BSON types into freq.
 func walkDocument(doc bson.D, prefix string, freq map[string]*fieldAcc) {
+	var keys []string
+	if prefix != "" {
+		keys = []string{prefix}
+	}
+	walkKeys(doc, prefix, keys, freq)
+}
+
+// walkKeys is walkDocument carrying the key sequence that led to prefix, so a
+// path reached by two different sequences can be flagged (see PathShapes).
+func walkKeys(doc bson.D, prefix string, keys []string, freq map[string]*fieldAcc) {
 	for _, elem := range doc {
 		path := elem.Key
 		if prefix != "" {
 			path = prefix + "." + elem.Key
 		}
 		acc := ensureAcc(freq, path)
+		elemKeys := append(keys[:len(keys):len(keys)], elem.Key)
+		if strings.Contains(path, ".") {
+			id := strings.Join(elemKeys, "\x00")
+			if _, ok := acc.shapes[id]; !ok {
+				if acc.shapes == nil {
+					acc.shapes = make(map[string][]string)
+				}
+				acc.shapes[id] = elemKeys
+			}
+		}
 
 		switch v := elem.Value.(type) {
 		case nil:
@@ -374,7 +425,7 @@ func walkDocument(doc bson.D, prefix string, freq map[string]*fieldAcc) {
 			// Nested document — record as Document type and recurse.
 			acc.occurrences++
 			acc.typeCounts["Document"]++
-			walkDocument(v, path, freq)
+			walkKeys(v, path, elemKeys, freq)
 		case bson.A:
 			// Array — record as Array type; do not recurse into elements.
 			acc.occurrences++

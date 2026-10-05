@@ -364,3 +364,54 @@ func TestInferSchema_PlanRowsCount(t *testing.T) {
 		t.Errorf("PlanRows() = %d, want 2", len(rows))
 	}
 }
+
+// ── ambiguous paths (#117) ───────────────────────────────────────────────────
+
+func TestInferSchema_AmbiguousPathWarnsOnFieldAndCollection(t *testing.T) {
+	sample := &CollectionSample{
+		Collection: "c",
+		SampleSize: 2,
+		Fields: []FieldFrequency{
+			{FieldName: "_id", Occurrences: 2, TotalDocs: 2, Types: []TypeCount{{TypeName: "Int32", Count: 2}}},
+			{FieldName: "a", Occurrences: 1, AbsentCount: 1, TotalDocs: 2, Types: []TypeCount{{TypeName: "Document", Count: 1}}},
+			{FieldName: "a.b", Occurrences: 2, TotalDocs: 2, Types: []TypeCount{{TypeName: "String", Count: 2}},
+				PathShapes: [][]string{{"a", "b"}, {"a.b"}}},
+		},
+	}
+	schema, err := InferSchema(sample, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(schema.Warnings) != 1 || !strings.Contains(schema.Warnings[0], `"a.b"`) {
+		t.Fatalf("collection warnings = %q, want one naming a.b", schema.Warnings)
+	}
+	for _, f := range schema.Fields {
+		hasWarning := len(f.Warnings) > 0
+		if hasWarning != (f.Frequency.FieldName == "a.b") {
+			t.Errorf("%s: warnings = %q", f.Frequency.FieldName, f.Warnings)
+		}
+	}
+	if w := schema.Warnings[0]; !strings.Contains(w, `["a" "b"]`) || !strings.Contains(w, `["a.b"]`) {
+		t.Errorf("warning should show both key sequences: %s", w)
+	}
+}
+
+func TestInferSchema_NoAmbiguityNoCollectionWarnings(t *testing.T) {
+	sample := &CollectionSample{
+		Collection: "c",
+		SampleSize: 1,
+		Fields: []FieldFrequency{
+			{FieldName: "_id", Occurrences: 1, TotalDocs: 1, Types: []TypeCount{{TypeName: "Int32", Count: 1}}},
+			// Polymorphic warns per field, but that is not a collection-level problem.
+			{FieldName: "v", Occurrences: 1, TotalDocs: 1, Polymorphic: true,
+				Types: []TypeCount{{TypeName: "String", Count: 1}, {TypeName: "Int32", Count: 1}}},
+		},
+	}
+	schema, err := InferSchema(sample, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema.Warnings != nil {
+		t.Errorf("collection warnings = %q, want none", schema.Warnings)
+	}
+}
