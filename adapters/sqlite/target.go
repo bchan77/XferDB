@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
@@ -14,6 +15,8 @@ type Target struct {
 	db      *sql.DB
 	config  adapters.ConnectionConfig
 	useCopy bool // use writeBatchFast instead of the per-row path; only safe when target table is clean
+	// mu guards schemas: table workers call WriteBatch in parallel.
+	mu      sync.RWMutex
 	schemas map[string]*adapters.TableSchema
 }
 
@@ -40,6 +43,12 @@ func (t *Target) Connect(ctx context.Context, config adapters.ConnectionConfig) 
 	if err != nil {
 		return err
 	}
+	// One connection, for the same reason as the state DB (#124): table
+	// workers write to this one file in parallel, SQLite admits one writer at
+	// a time, and a writer that waits past the busy timeout fails with
+	// "database is locked". Queued on a single connection they take turns
+	// instead -- SQLite can't write faster in parallel anyway.
+	db.SetMaxOpenConns(1)
 	t.db = db
 	t.config = config
 	t.schemas = make(map[string]*adapters.TableSchema)
@@ -79,14 +88,21 @@ func (t *Target) GetSchema(ctx context.Context, table string) (*adapters.TableSc
 
 // cachedSchema returns the schema for a table, fetching and caching it if needed.
 func (t *Target) cachedSchema(ctx context.Context, table string) (*adapters.TableSchema, error) {
-	if schema, ok := t.schemas[table]; ok {
+	t.mu.RLock()
+	schema, ok := t.schemas[table]
+	t.mu.RUnlock()
+	if ok {
 		return schema, nil
 	}
+
 	schema, err := getSchema(ctx, t.db, table)
 	if err != nil {
 		return nil, err
 	}
+
+	t.mu.Lock()
 	t.schemas[table] = schema
+	t.mu.Unlock()
 	return schema, nil
 }
 
@@ -360,14 +376,18 @@ func (t *Target) writeBatchFast(ctx context.Context, table string, batch *adapte
 func (t *Target) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {
 	check := &adapters.PermissionCheck{}
 
-	if _, err := t.db.QueryContext(ctx, `SELECT name FROM sqlite_master LIMIT 1`); err != nil {
+	// Close the rows: left open they hold their connection, and the
+	// target's only connection with it.
+	rows, err := t.db.QueryContext(ctx, `SELECT name FROM sqlite_master LIMIT 1`)
+	if err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("read check failed: %v", err))
 		return check, nil
 	}
+	rows.Close()
 	check.CanRead = true
 
 	// Probe write access by creating and immediately dropping a sentinel table.
-	_, err := t.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _xferdb_probe (id INTEGER PRIMARY KEY)`)
+	_, err = t.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _xferdb_probe (id INTEGER PRIMARY KEY)`)
 	if err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("create table check failed: %v", err))
 		return check, nil
