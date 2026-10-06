@@ -121,6 +121,9 @@ func (h *ProjectsHandler) UpdateProject(w http.ResponseWriter, r *http.Request) 
 		Description  string                    `json:"description"`
 		SourceConfig adapters.ConnectionConfig `json:"source_config"`
 		TargetConfig adapters.ConnectionConfig `json:"target_config"`
+		// TransferConfig, when present, replaces the project's transfer
+		// settings wholesale; omit it to leave them unchanged.
+		TransferConfig *adapters.TransferConfig `json:"transfer_config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -151,6 +154,17 @@ func (h *ProjectsHandler) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	existing.Description = body.Description
 	existing.SourceConfig = body.SourceConfig
 	existing.TargetConfig = body.TargetConfig
+	if body.TransferConfig != nil {
+		if err := validate.CheckMode(body.TransferConfig.Validation); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validate.CheckLevel(body.TransferConfig.ValidationLevel); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		existing.TransferConfig = *body.TransferConfig
+	}
 
 	if err := h.DB.UpdateProject(r.Context(), existing); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

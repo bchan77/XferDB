@@ -200,3 +200,60 @@ func (m *MetaDB) GetValidationTables(ctx context.Context, validationID string) (
 	}
 	return rows, nil
 }
+
+// TableValidation is the latest validation outcome for one table of a
+// project, across all of its migrations.
+type TableValidation struct {
+	TableName    string    `db:"table_name" json:"table_name"`
+	Result       string    `db:"result" json:"result"`
+	Detail       string    `db:"detail" json:"detail,omitempty"`
+	LevelRun     string    `db:"level_run" json:"level_run,omitempty"`
+	ValidationID string    `db:"validation_id" json:"validation_id"`
+	MigrationID  string    `db:"migration_id" json:"migration_id"`
+	CheckedAt    time.Time `db:"created_at" json:"checked_at"`
+}
+
+// LatestTableValidations returns, per table, the most recent pass or fail
+// recorded by any validation of the project's migrations. Skipped entries are
+// ignored: a table a run did not check keeps its earlier result.
+func (m *MetaDB) LatestTableValidations(ctx context.Context, projectID string) ([]TableValidation, error) {
+	var rows []TableValidation
+	if err := m.db.SelectContext(ctx, &rows, `
+		SELECT vt.table_name, vt.result, vt.detail, vt.level_run,
+		       v.id AS validation_id, v.migration_id, v.created_at
+		FROM validation_tables vt
+		JOIN validations v ON v.id = vt.validation_id
+		JOIN migrations  m ON m.id = v.migration_id
+		WHERE m.project_id = ? AND vt.result IN (?, ?)
+		ORDER BY v.created_at DESC`,
+		projectID, ValidationPass, ValidationFail); err != nil {
+		return nil, fmt.Errorf("latest table validations: %w", err)
+	}
+	seen := make(map[string]bool, len(rows))
+	out := make([]TableValidation, 0, len(rows))
+	for _, r := range rows {
+		if !seen[r.TableName] {
+			seen[r.TableName] = true
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// ActiveValidation returns the project's pending or running validation, or
+// nil when there is none.
+func (m *MetaDB) ActiveValidation(ctx context.Context, projectID string) (*Validation, error) {
+	var rows []validationRow
+	if err := m.db.SelectContext(ctx, &rows, `
+		SELECT v.* FROM validations v
+		JOIN migrations m ON m.id = v.migration_id
+		WHERE m.project_id = ? AND v.status IN (?, ?)
+		ORDER BY v.created_at DESC LIMIT 1`,
+		projectID, string(adapters.StatusPending), string(adapters.StatusInProgress)); err != nil {
+		return nil, fmt.Errorf("active validation: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return rows[0].toValidation(), nil
+}

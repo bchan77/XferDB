@@ -305,3 +305,46 @@ func (h *ValidationsHandler) PatchValidation(w http.ResponseWriter, r *http.Requ
 	cancel()
 	w.WriteHeader(http.StatusAccepted)
 }
+
+// ValidationStatus handles GET /api/v1/projects/{id}/validation-status: the
+// latest pass/fail per table across the project's migrations, each marked
+// stale once a later migration re-migrated that table, plus the project's
+// running validation if there is one. A table absent from "tables" has never
+// been validated.
+func (h *ValidationsHandler) ValidationStatus(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	if _, err := h.DB.GetProject(r.Context(), projectID); err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	latest, err := h.DB.LatestTableValidations(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	active, err := h.DB.ActiveValidation(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	lastMigration := map[string]string{}
+	if pts, err := h.DB.GetProjectTables(r.Context(), projectID); err == nil {
+		for _, pt := range pts {
+			lastMigration[pt.TableName] = pt.LastMigrationID
+		}
+	}
+
+	type tableStatus struct {
+		state.TableValidation
+		Stale bool `json:"stale"`
+	}
+	tables := make([]tableStatus, 0, len(latest))
+	for _, t := range latest {
+		last := lastMigration[t.TableName]
+		tables = append(tables, tableStatus{TableValidation: t, Stale: last != "" && last != t.MigrationID})
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Active *state.Validation `json:"active"`
+		Tables []tableStatus     `json:"tables"`
+	}{active, tables})
+}

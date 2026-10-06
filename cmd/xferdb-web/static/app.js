@@ -520,6 +520,13 @@ async function renderProjectSettings(id) {
       <div id="preflightArea"></div>
     </div>
     <div class="section">
+      <h2>Validation</h2>
+      <p>After a migration completes, XferDB compares the source and target. These are the project's defaults; each migration run can override them.</p>
+      ${validationOptionsHTML('s', project.transfer_config)}
+      <div id="validationSaveArea"></div>
+      <button class="btn" id="saveValidationBtn">Save validation settings</button>
+    </div>
+    <div class="section">
       <h2>Schema Plan</h2>
       <p>The schema plan stores auto-detected column types and any manual overrides you've made.</p>
       <div id="resetAllArea"></div>
@@ -546,6 +553,29 @@ async function renderProjectSettings(id) {
     } catch (err) {
       document.getElementById('connBanner').innerHTML = errorBanner('Delete failed: ' + err.message);
     }
+  });
+
+  wireValidationOptions('s');
+  document.getElementById('saveValidationBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('saveValidationBtn');
+    const area = document.getElementById('validationSaveArea');
+    btn.disabled = true;
+    try {
+      // Re-read the project so a connection edited on this page since it
+      // loaded isn't overwritten with the copy fetched at page load.
+      const fresh = await api.getProject(id);
+      await api.updateProject(id, {
+        name: fresh.name,
+        description: fresh.description,
+        source_config: fresh.source_config,
+        target_config: fresh.target_config,
+        transfer_config: { ...(fresh.transfer_config || {}), ...readValidationOptions('s') },
+      });
+      area.innerHTML = `<div class="banner ok"><span>Validation settings saved.</span></div>`;
+    } catch (err) {
+      area.innerHTML = errorBanner('Save failed: ' + err.message);
+    }
+    btn.disabled = false;
   });
 
   document.getElementById('resetAllBtn').addEventListener('click', async () => {
@@ -601,6 +631,200 @@ async function renderProjectSettings(id) {
 }
 
 // ---------------------------------------------------------------------------
+// Validation (#103): compare a migration's source and target after the fact
+// ---------------------------------------------------------------------------
+
+// validationBadge describes a table's latest validation outcome for the table
+// list. status is one entry of /validation-status "tables", or undefined when
+// no validation has checked the table yet.
+function validationBadge(status) {
+  if (!status) return { cls: 'cancelled', text: 'not validated', title: 'No validation has checked this table yet.' };
+  if (status.stale) return { cls: 'warn', text: 'validation stale', title: 'Migrated again since it was last validated.' };
+  if (status.result === 'pass') {
+    return { cls: 'ok', text: `validated · ${status.level_run || 'L2'}`, title: 'Source and target match.' };
+  }
+  return { cls: 'fail', text: 'validation failed', title: status.detail || 'Source and target differ.' };
+}
+
+// validationOptionsHTML renders the Validation / Level selects used both on
+// the migration start form (per-run override) and in project settings
+// (project default). cfg is a transfer_config; empty fields mean the defaults
+// (after, L2).
+function validationOptionsHTML(prefix, cfg) {
+  const mode = (cfg && cfg.validation) || 'after';
+  const level = (cfg && cfg.validation_level) || 'L2';
+  const sel = (cond) => (cond ? 'selected' : '');
+  return `
+    <div class="field-row">
+      <div>
+        <label for="${prefix}-validation">Validation</label>
+        <select id="${prefix}-validation">
+          <option value="after" ${sel(mode === 'after')}>After migration</option>
+          <option value="off" ${sel(mode === 'off')}>Skip</option>
+        </select>
+        <div class="hint">Compare source and target once the migration completes</div>
+      </div>
+      <div>
+        <label for="${prefix}-validation-level">Validation level</label>
+        <select id="${prefix}-validation-level">
+          <option value="L2" ${sel(level === 'L2')}>L2 · compare every row</option>
+          <option value="L1" ${sel(level === 'L1')}>L1 · row counts only</option>
+        </select>
+        <div class="hint">L2 reads every row of both databases again</div>
+      </div>
+    </div>`;
+}
+
+// wireValidationOptions disables the level select while validation is set
+// to Skip, since it would have no effect.
+function wireValidationOptions(prefix) {
+  const mode = document.getElementById(`${prefix}-validation`);
+  const level = document.getElementById(`${prefix}-validation-level`);
+  if (!mode || !level) return;
+  const sync = () => { level.disabled = mode.value === 'off'; };
+  mode.addEventListener('change', sync);
+  sync();
+}
+
+function readValidationOptions(prefix) {
+  return {
+    validation: document.getElementById(`${prefix}-validation`).value,
+    validation_level: document.getElementById(`${prefix}-validation-level`).value,
+  };
+}
+
+function validationResultsHTML(v) {
+  const tables = v.tables || [];
+  const failed = tables.filter((t) => t.result === 'fail').length;
+  const checked = tables.filter((t) => t.result === 'pass' || t.result === 'fail').length;
+  let banner = '';
+  if (v.status === 'failed') {
+    banner = `<div class="banner error"><span>Validation could not finish: ${esc(v.error || 'unknown error')}</span></div>`;
+  } else if (v.status === 'cancelled') {
+    banner = `<div class="banner info"><span>Validation cancelled.</span></div>`;
+  } else if (failed > 0) {
+    banner = `<div class="banner error"><span>${failed} of ${checked} table(s) differ between source and target.</span></div>`;
+  } else {
+    banner = `<div class="banner ok"><span>All ${checked} validated table(s) match.</span></div>`;
+  }
+  const badgeFor = (t) => {
+    const map = { pass: ['ok', 'pass'], fail: ['fail', 'FAIL'], skipped: ['cancelled', 'skipped'] };
+    const [cls, text] = map[t.result] || ['pending', t.result];
+    return `<span class="badge ${cls}">${esc(text)}${t.stale ? ' (stale)' : ''}</span>`;
+  };
+  const count = (n) => (n === undefined || n === null ? '—' : fmtInt(n));
+  return `
+    ${banner}
+    <div style="overflow-x:auto;margin-top:10px;">
+      <table class="stats-history-table">
+        <thead><tr><th>Table</th><th>Result</th><th>Source rows</th><th>Target rows</th><th>Detail</th></tr></thead>
+        <tbody>
+          ${tables.map((t) => `
+            <tr>
+              <td class="mono">${esc(t.table_name)}</td>
+              <td>${badgeFor(t)}</td>
+              <td>${count(t.source_rows)}</td>
+              <td>${count(t.target_rows)}</td>
+              <td>${esc(t.detail || '')}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// mountValidationCard shows a migration's latest validation and lets the user
+// start one. waitForAuto keeps polling briefly for the validation the server
+// starts on its own right after a migration completes, instead of reporting
+// "not validated" in the gap before it appears. Returns a stop function.
+function mountValidationCard(container, migId, { waitForAuto = false } = {}) {
+  let stopped = false;
+  let timer = null;
+  const autoDeadline = waitForAuto ? Date.now() + 15000 : 0;
+
+  function card(body) {
+    container.innerHTML = `<div class="card" id="validationCard"><strong>Validation</strong><div style="margin-top:8px;">${body}</div></div>`;
+  }
+
+  function startControlsHTML(label) {
+    return `
+      <div class="actions-row" style="margin-top:10px;">
+        <select id="v-level" style="width:auto;">
+          <option value="">Project default level</option>
+          <option value="L2">L2 · compare every row</option>
+          <option value="L1">L1 · row counts only</option>
+        </select>
+        <button class="btn" id="validateBtn">${esc(label)}</button>
+      </div>
+      <div id="validateErr"></div>`;
+  }
+
+  function wireStart() {
+    const btn = document.getElementById('validateBtn');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const level = document.getElementById('v-level').value;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Starting…';
+      try {
+        await api.startValidation(migId, level ? { level } : {});
+        poll();
+      } catch (err) {
+        document.getElementById('validateErr').innerHTML = errorBanner('Could not start validation: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'Validate now';
+      }
+    });
+  }
+
+  async function poll() {
+    if (stopped) return;
+    clearTimeout(timer);
+    let latest;
+    try {
+      const vs = await api.listValidations(migId);
+      latest = vs && vs.length ? await api.getValidation(vs[0].id) : null;
+    } catch (err) {
+      card(errorBanner('Could not load validation: ' + err.message, { retry: poll }));
+      return;
+    }
+    if (stopped) return;
+
+    if (!latest) {
+      if (Date.now() < autoDeadline) {
+        card('<div class="loading-block"><span class="spinner"></span> Waiting for validation to start…</div>');
+        timer = setTimeout(poll, 1500);
+        return;
+      }
+      card(`<div class="hint">This migration has not been validated (validation was skipped, or the migration did not complete).</div>${startControlsHTML('Validate now')}`);
+      wireStart();
+      return;
+    }
+
+    if (latest.status === 'pending' || latest.status === 'in_progress') {
+      const done = (latest.tables || []).filter((t) => t.result !== 'skipped').length;
+      card(`
+        <div class="loading-block"><span class="spinner"></span> Validating (${esc(latest.level)})… ${done} table(s) checked</div>
+        <div class="actions-row"><button class="btn small" id="cancelValidationBtn">Cancel validation</button></div>`);
+      document.getElementById('cancelValidationBtn').addEventListener('click', async () => {
+        try { await api.cancelValidation(latest.id); } catch (err) { /* finished meanwhile; next poll shows it */ }
+        poll();
+      });
+      timer = setTimeout(poll, 2000);
+      return;
+    }
+
+    card(`
+      <div class="hint">Level ${esc(latest.level)} · ${esc(latest.status)} ${latest.completed_at ? '· ' + esc(fmtDate(latest.completed_at)) : ''}</div>
+      ${validationResultsHTML(latest)}
+      ${startControlsHTML('Validate again')}`);
+    wireStart();
+  }
+
+  poll();
+  return () => { stopped = true; clearTimeout(timer); };
+}
+
+// ---------------------------------------------------------------------------
 // Tables / collections list
 // ---------------------------------------------------------------------------
 
@@ -612,7 +836,10 @@ function renderTableCards(area, projectId, items, locked) {
   area.innerHTML = items.map((t) => `
     <div class="list-row${locked ? ' disabled' : ''}" data-name="${esc(t.name)}">
       <div class="name mono">${esc(t.name)}</div>
-      <span class="badge ${t.badge}">${esc(t.badgeText)}</span>
+      <div class="right">
+        <span class="badge ${t.badge}">${esc(t.badgeText)}</span>
+        ${t.validation ? `<span class="badge ${t.validation.cls}" title="${esc(t.validation.title)}">${esc(t.validation.text)}</span>` : ''}
+      </div>
     </div>
   `).join('');
   if (locked) return;
@@ -713,7 +940,13 @@ async function renderTablesList(id) {
     </div>
     <div class="section" id="migCardSection"></div>
     <div class="section">
-      <div class="page-header"><h2>${label}</h2><button class="btn" id="reanalyzeBtn">Re-analyze</button></div>
+      <div class="page-header">
+        <h2>${label}</h2>
+        <div class="actions-row">
+          <button class="btn" id="validateNowBtn" title="Compare the latest migration's source and target">Validate now</button>
+          <button class="btn" id="reanalyzeBtn">Re-analyze</button>
+        </div>
+      </div>
       ${isMongo ? `
       <details class="advanced" id="analyzeOptions">
         <summary>Sampling options</summary>
@@ -733,6 +966,7 @@ async function renderTablesList(id) {
         </div>
       </details>` : ''}
       <div id="lockBanner"></div>
+      <div id="validationBanner"></div>
       <div id="tablesArea"></div>
     </div>
   `;
@@ -741,8 +975,41 @@ async function renderTablesList(id) {
   let cachedItems = tablesCache.get(id) || [];
   let locked = false;
 
+  // Latest validation result per table (from /validation-status), and the
+  // project's running validation, if any.
+  let validationByTable = new Map();
+  let activeValidation = null;
+  let validationTimer = null;
+
   function renderRows() {
-    renderTableCards(area, id, cachedItems, locked);
+    const items = cachedItems.map((t) => ({ ...t, validation: validationBadge(validationByTable.get(t.name)) }));
+    renderTableCards(area, id, items, locked);
+  }
+
+  function syncValidateButton() {
+    const btn = document.getElementById('validateNowBtn');
+    if (btn) btn.disabled = locked || !!activeValidation;
+  }
+
+  async function loadValidationStatus() {
+    clearTimeout(validationTimer);
+    let status;
+    try {
+      status = await api.getValidationStatus(id);
+    } catch (err) {
+      return; // badges are secondary; keep the last known ones
+    }
+    validationByTable = new Map((status.tables || []).map((t) => [t.table_name, t]));
+    activeValidation = status.active || null;
+    const banner = document.getElementById('validationBanner');
+    if (banner) {
+      banner.innerHTML = activeValidation
+        ? `<div class="banner info"><span><span class="spinner"></span> Validating (${esc(activeValidation.level)})… results appear here as each table finishes. <a href="#/migrations/${encodeURIComponent(activeValidation.migration_id)}">View</a></span></div>`
+        : '';
+    }
+    syncValidateButton();
+    renderRows();
+    if (activeValidation) validationTimer = setTimeout(loadValidationStatus, 3000);
   }
 
   function readAnalyzeOpts() {
@@ -762,14 +1029,18 @@ async function renderTablesList(id) {
   }
 
   const migSection = mountMigSection(document.getElementById('migCardSection'), id, project.source_config.type, project.target_config.type, () => cachedItems, (isLocked, status) => {
+    const wasLocked = locked;
     locked = isLocked;
+    syncValidateButton();
+    // A migration just finished: the server may have started validating it.
+    if (wasLocked && !isLocked) loadValidationStatus();
     document.getElementById('lockBanner').innerHTML = locked
       ? `<div class="banner info">Table changes are disabled while a migration is ${esc(status)}.</div>`
       : '';
     const btn = document.getElementById('reanalyzeBtn');
     if (btn) btn.disabled = locked;
     renderRows();
-  });
+  }, project.transfer_config);
 
   async function refreshTables() {
     if (locked) return;
@@ -788,7 +1059,27 @@ async function renderTablesList(id) {
 
   document.getElementById('reanalyzeBtn').addEventListener('click', refreshTables);
 
-  setCleanup(() => migSection.stop());
+  document.getElementById('validateNowBtn').addEventListener('click', async () => {
+    const banner = document.getElementById('validationBanner');
+    const btn = document.getElementById('validateNowBtn');
+    btn.disabled = true;
+    try {
+      const migs = await api.listMigrations(id);
+      if (!migs || migs.length === 0) {
+        banner.innerHTML = `<div class="banner info"><span>Run a migration first; validation compares what it copied.</span></div>`;
+        syncValidateButton();
+        return;
+      }
+      await api.startValidation(migs[0].id, {});
+      await loadValidationStatus();
+    } catch (err) {
+      banner.innerHTML = errorBanner('Could not start validation: ' + err.message);
+      syncValidateButton();
+    }
+  });
+
+  setCleanup(() => { migSection.stop(); clearTimeout(validationTimer); });
+  loadValidationStatus();
 
   // Show the last known result immediately if we have one (revisiting via
   // hash nav / browser back-forward shouldn't force a live re-analyze);
@@ -1210,7 +1501,9 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
 // history otherwise. Returns a cleanup function that stops polling.
 // getTables() returns the current list of tables for selection.
 // onLockChange(locked, status) fires whenever table rows should lock/unlock.
-function mountMigSection(container, projectId, sourceType, targetType, getTables, onLockChange) {
+// transferCfg is the project's transfer_config; it supplies the defaults for
+// the start form's validation selects.
+function mountMigSection(container, projectId, sourceType, targetType, getTables, onLockChange, transferCfg) {
   let stopped = false;
   let timer = null;
   // Set while the start form is mounted; refills just its table-selection block.
@@ -1374,6 +1667,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
           <div><label>Segment workers</label><input type="number" id="m-segment" value="0" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
           <div></div>
         </div>
+        ${validationOptionsHTML('m', transferCfg)}
         <details class="advanced" style="margin-top:12px;">
           <summary>Performance options</summary>
           <div class="checkbox-row"><input type="checkbox" id="m-async" checked><label for="m-async">Async pipeline</label><span class="hint" style="margin-left:8px;">Overlap reading and writing for faster throughput</span></div>
@@ -1389,6 +1683,8 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         <details class="advanced"><summary>History</summary><div id="migHistory"></div></details>
       </div>
     `;
+
+    wireValidationOptions('m');
 
     // Show offset option when segment workers > 0
     const segmentInput = document.getElementById('m-segment');
@@ -1479,6 +1775,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         bulk_copy: document.getElementById('m-bulk')?.checked || false,
         accurate_counts: document.getElementById('m-accurate')?.checked || false,
         offset_fallback: document.getElementById('m-offset')?.checked || false,
+        ...readValidationOptions('m'),
       };
       // Add selected tables if not all are selected
       const tableBoxes = container.querySelectorAll('.table-cb');
@@ -1569,10 +1866,19 @@ async function renderMigrationProgress(migId) {
       <div class="actions-row" id="migActions"></div>
     </div>
     <div id="progressArea"></div>
+    <div id="validationArea"></div>
   `;
 
   let stopped = false;
   let timer = null;
+  // Set once the validation card is mounted; it lives outside progressArea
+  // so the progress re-render on every tick doesn't wipe it.
+  let stopValidationCard = null;
+  function showValidation(waitForAuto) {
+    if (stopValidationCard || stopped) return;
+    const el = document.getElementById('validationArea');
+    if (el) stopValidationCard = mountValidationCard(el, migId, { waitForAuto });
+  }
   let historyLoaded = false;
   let historyOpen = false;
   let cachedHistoryHTML = '<div class="loading-block"><span class="spinner"></span> Loading history…</div>';
@@ -1690,6 +1996,9 @@ async function renderMigrationProgress(migId) {
       renderProgress(snap);
       if (snap.Phase === 'complete' || snap.Phase === 'failed' || snap.Phase === 'cancelled') {
         clearTimer();
+        // The server starts the automatic validation right after a
+        // migration completes; wait for it rather than report "not validated".
+        showValidation(snap.Phase === 'complete');
         return;
       }
     } catch (err) {
@@ -1702,11 +2011,13 @@ async function renderMigrationProgress(migId) {
   setCleanup(() => {
     stopped = true;
     clearTimer();
+    if (stopValidationCard) stopValidationCard();
   });
 
   // For completed/failed/cancelled migrations, load from history instead of live stats
   const finishedStatuses = ['completed', 'failed', 'cancelled'];
   if (finishedStatuses.includes(mig.status)) {
+    showValidation(false);
     // Load last stats from history
     try {
       const records = await api.getStatsHistory(migId);
