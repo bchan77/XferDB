@@ -68,10 +68,10 @@ func (m *MetaDB) CreateProject(ctx context.Context, p *adapters.Project) error {
 	return nil
 }
 
-// UpdateProject persists changes to name, description, source_config, and
-// target_config for an existing project. CreatedAt and TransferConfig are
-// left untouched — TransferConfig is adjusted per-migration via start
-// overrides, not through this endpoint.
+// UpdateProject persists name, description, source_config, target_config and
+// transfer_config for an existing project; CreatedAt is left untouched. The
+// caller passes a project loaded from the store, so fields it did not change
+// are written back as they were.
 func (m *MetaDB) UpdateProject(ctx context.Context, p *adapters.Project) error {
 	src, err := json.Marshal(p.SourceConfig)
 	if err != nil {
@@ -81,11 +81,15 @@ func (m *MetaDB) UpdateProject(ctx context.Context, p *adapters.Project) error {
 	if err != nil {
 		return fmt.Errorf("encode target_config: %w", err)
 	}
+	xfer, err := json.Marshal(p.TransferConfig)
+	if err != nil {
+		return fmt.Errorf("encode transfer_config: %w", err)
+	}
 
 	res, err := m.db.ExecContext(ctx, `
-		UPDATE projects SET name = ?, description = ?, source_config = ?, target_config = ?
+		UPDATE projects SET name = ?, description = ?, source_config = ?, target_config = ?, transfer_config = ?
 		WHERE id = ?`,
-		p.Name, p.Description, string(src), string(tgt), p.ID,
+		p.Name, p.Description, string(src), string(tgt), string(xfer), p.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)

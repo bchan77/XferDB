@@ -131,6 +131,7 @@ All clients interact exclusively through the REST API. The CLI and Web UI are th
 | `GET` | `/api/v1/migrations/:id/validations` | List validation runs for a migration |
 | `GET` | `/api/v1/validations/:id` | Validation status and per-table results |
 | `PATCH` | `/api/v1/validations/:id` | Cancel (`{"action":"cancel"}`) |
+| `GET` | `/api/v1/projects/:id/validation-status` | Latest pass/fail per table (with `stale`), plus the running validation |
 | `GET` | `/api/v1/health` | Health check |
 
 ---

@@ -219,3 +219,120 @@ func TestValidationSkipsTablesNotCompleted(t *testing.T) {
 		t.Fatalf("results = %v, want items pass and nope skipped", results)
 	}
 }
+
+func put(t *testing.T, url string, body any, wantStatus int) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		var e map[string]any
+		json.NewDecoder(resp.Body).Decode(&e)
+		t.Fatalf("PUT %s: status %d (%v), want %d", url, resp.StatusCode, e["error"], wantStatus)
+	}
+}
+
+type validationStatus struct {
+	Active *struct {
+		ID string `json:"id"`
+	} `json:"active"`
+	Tables []struct {
+		TableName   string `json:"table_name"`
+		Result      string `json:"result"`
+		LevelRun    string `json:"level_run"`
+		MigrationID string `json:"migration_id"`
+		Stale       bool   `json:"stale"`
+	} `json:"tables"`
+}
+
+func TestValidationStatusReportsLatestPerTable(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	statusURL := srv.URL + "/api/v1/projects/" + projectID + "/validation-status"
+
+	var st validationStatus
+	get(t, statusURL, &st)
+	if st.Active != nil || len(st.Tables) != 0 {
+		t.Fatalf("fresh project status = %+v, want no tables and nothing active", st)
+	}
+
+	firstID, _ := startMigration(t, srv, projectID, map[string]any{"validation_level": "L1"})
+	waitFor(t, "auto validation to finish", func() bool {
+		get(t, statusURL, &st)
+		return st.Active == nil && len(st.Tables) == 1
+	})
+	if tb := st.Tables[0]; tb.TableName != "items" || tb.Result != "pass" || tb.LevelRun != "L1" || tb.MigrationID != firstID || tb.Stale {
+		t.Fatalf("after first migration: %+v", tb)
+	}
+
+	// A later migration that skips validation leaves the earlier result in
+	// place, now stale.
+	startMigration(t, srv, projectID, map[string]any{"validation": "off", "truncate": true})
+	get(t, statusURL, &st)
+	if len(st.Tables) != 1 || !st.Tables[0].Stale || st.Tables[0].MigrationID != firstID {
+		t.Fatalf("after unvalidated re-migration: %+v, want the first result marked stale", st.Tables)
+	}
+
+	var missing map[string]any
+	resp, err := http.Get(srv.URL + "/api/v1/projects/nope/validation-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	json.NewDecoder(resp.Body).Decode(&missing)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown project: status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestUpdateProjectSetsValidationDefaults(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	projURL := srv.URL + "/api/v1/projects/" + projectID
+
+	var p map[string]any
+	get(t, projURL, &p)
+	tc, _ := p["transfer_config"].(map[string]any)
+	if tc == nil {
+		tc = map[string]any{}
+	}
+	tc["validation"] = "off"
+	tc["validation_level"] = "L1"
+	body := map[string]any{
+		"name": p["name"], "description": p["description"],
+		"source_config": p["source_config"], "target_config": p["target_config"],
+		"transfer_config": tc,
+	}
+	put(t, projURL, body, http.StatusOK)
+
+	var after struct {
+		TransferConfig struct {
+			Validation      string `json:"validation"`
+			ValidationLevel string `json:"validation_level"`
+		} `json:"transfer_config"`
+	}
+	get(t, projURL, &after)
+	if after.TransferConfig.Validation != "off" || after.TransferConfig.ValidationLevel != "L1" {
+		t.Fatalf("transfer_config after update = %+v", after.TransferConfig)
+	}
+
+	// The project default now applies to a run that doesn't override it.
+	if _, mode := startMigration(t, srv, projectID, map[string]any{}); mode != "off" {
+		t.Fatalf("effective mode %q, want the project's off", mode)
+	}
+
+	// An update without transfer_config leaves it alone.
+	delete(body, "transfer_config")
+	put(t, projURL, body, http.StatusOK)
+	get(t, projURL, &after)
+	if after.TransferConfig.Validation != "off" {
+		t.Fatalf("update without transfer_config changed it: %+v", after.TransferConfig)
+	}
+
+	// Values the server can't run are rejected.
+	body["transfer_config"] = map[string]any{"validation": "per_table"}
+	put(t, projURL, body, http.StatusBadRequest)
+}

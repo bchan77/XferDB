@@ -67,6 +67,14 @@ export const api = {
   deleteMigration: (id) => req('DELETE', `/api/v1/migrations/${encodeURIComponent(id)}`),
   getStats: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}/stats`),
   getStatsHistory: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}/stats/history`),
+
+  startValidation: (migId, body) =>
+    req('POST', `/api/v1/migrations/${encodeURIComponent(migId)}/validations`, body || {}),
+  listValidations: (migId) => req('GET', `/api/v1/migrations/${encodeURIComponent(migId)}/validations`),
+  getValidation: (id) => req('GET', `/api/v1/validations/${encodeURIComponent(id)}`),
+  cancelValidation: (id) => req('PATCH', `/api/v1/validations/${encodeURIComponent(id)}`, { action: 'cancel' }),
+  getValidationStatus: (projectId) =>
+    req('GET', `/api/v1/projects/${encodeURIComponent(projectId)}/validation-status`),
 };
 
 // analyzeMongoStream POSTs to /analyze and reads the NDJSON stream the server
