@@ -163,13 +163,16 @@ func pkInt64(v interface{}) int64 {
 func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {
 	check := &adapters.PermissionCheck{}
 
-	if _, err := s.db.QueryContext(ctx, `SELECT name FROM sqlite_master LIMIT 1`); err != nil {
+	// Close the rows: left open they hold a pooled connection for good.
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM sqlite_master LIMIT 1`)
+	if err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("read check failed: %v", err))
 		return check, nil
 	}
+	rows.Close()
 	check.CanRead = true
 
-	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _xferdb_probe (id INTEGER PRIMARY KEY)`)
+	_, err = s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS _xferdb_probe (id INTEGER PRIMARY KEY)`)
 	if err != nil {
 		check.Errors = append(check.Errors, fmt.Sprintf("create table check failed: %v", err))
 		return check, nil

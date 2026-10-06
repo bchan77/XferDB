@@ -19,6 +19,15 @@ func Open(path string) (*MetaDB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("state: open %s: %w", path, err)
 	}
+	// One connection: SQLite allows a single writer per file, and every
+	// writer here lives in this process (table workers saving checkpoints and
+	// progress, the stats saver, API handlers). With a pool, concurrent
+	// writers compete for SQLite's file lock and one that waits longer than
+	// the busy timeout fails with "database is locked" -- which failed whole
+	// tables mid-migration (#124). Through a single connection they queue in
+	// Go instead and never meet the lock. Any code using this handle must
+	// close rows before issuing another query, or it waits on itself.
+	db.SetMaxOpenConns(1)
 	m := &MetaDB{db: db}
 	if err := m.migrate(); err != nil {
 		db.Close()
