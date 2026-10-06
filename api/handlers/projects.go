@@ -13,6 +13,7 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/analyzer"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"gitea.homelab.local/nextdevops/XferDB/state"
+	"gitea.homelab.local/nextdevops/XferDB/validate"
 )
 
 // ProjectsHandler holds shared dependencies for project-related endpoints.
@@ -46,6 +47,14 @@ func (h *ProjectsHandler) CreateProject(w http.ResponseWriter, r *http.Request) 
 	}
 	if body.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := validate.CheckMode(body.TransferConfig.Validation); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validate.CheckLevel(body.TransferConfig.ValidationLevel); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

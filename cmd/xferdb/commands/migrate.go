@@ -12,6 +12,7 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/config"
 	"gitea.homelab.local/nextdevops/XferDB/stats"
+	"gitea.homelab.local/nextdevops/XferDB/validate"
 )
 
 var migrateCmd = &cobra.Command{
@@ -21,7 +22,12 @@ var migrateCmd = &cobra.Command{
 
 Examples:
   xferdb migrate
-  xferdb migrate --project prod-to-staging`,
+  xferdb migrate --project prod-to-staging
+  xferdb migrate --skip-validation
+  xferdb migrate --validation-level L1
+
+A completed migration is validated by default (an L2 comparison of every row);
+the command waits for that validation and exits non-zero if any table fails.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectFlag, _ := cmd.Flags().GetString("project")
 		preflightOnly, _ := cmd.Flags().GetBool("preflight")
@@ -33,9 +39,34 @@ Examples:
 		tablesFlag, _ := cmd.Flags().GetString("tables")
 		accurateCounts, _ := cmd.Flags().GetBool("accurate-counts")
 		historyOnly, _ := cmd.Flags().GetBool("history")
+		validationMode, _ := cmd.Flags().GetString("validation")
+		validationLevel, _ := cmd.Flags().GetString("validation-level")
+		skipValidation, _ := cmd.Flags().GetBool("skip-validation")
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
+		}
+		if skipValidation {
+			if cmd.Flags().Changed("validation") && validationMode != validate.ModeOff {
+				return fmt.Errorf("--skip-validation conflicts with --validation %s", validationMode)
+			}
+			validationMode = validate.ModeOff
+		}
+
+		// Only send validation settings the user passed, so the project's own
+		// settings apply otherwise.
+		extra := map[string]any{}
+		if skipValidation || cmd.Flags().Changed("validation") {
+			if err := validate.CheckMode(validationMode); err != nil {
+				return err
+			}
+			extra["validation"] = validationMode
+		}
+		if cmd.Flags().Changed("validation-level") {
+			if err := validate.CheckLevel(validationLevel); err != nil {
+				return err
+			}
+			extra["validation_level"] = validationLevel
 		}
 
 		// table-workers/segment-workers/batch-size/bulk-copy/async-pipeline/tables
@@ -122,14 +153,21 @@ Examples:
 			return showStatsHistory(migrationID)
 		}
 
-		migrationID, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, accurateCounts, asyncPipeline, tables)
+		migrationID, effectiveValidation, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, accurateCounts, asyncPipeline, tables, extra)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("Migration started: %s\n", migrationID)
 		fmt.Println("Tracking progress (Ctrl+C to detach)...")
 
-		return pollStats(migrationID)
+		if err := pollStats(migrationID); err != nil {
+			return err
+		}
+		if effectiveValidation == validate.ModeOff {
+			fmt.Println("Validation skipped (validation: off).")
+			return nil
+		}
+		return awaitAutoValidation(migrationID)
 	},
 }
 
@@ -149,6 +187,9 @@ func init() {
 	migrateCmd.Flags().Bool("accurate-counts", false, "Use accurate row counts instead of estimates (slower for MongoDB but shows correct progress)")
 	migrateCmd.Flags().Bool("async-pipeline", false, "Overlap reading and writing for faster throughput (reads batch N+1 while writing batch N)")
 	migrateCmd.Flags().Bool("history", false, "Show recorded stats history for the latest migration")
+	migrateCmd.Flags().String("validation", validate.DefaultMode, "When to validate the migration: after (once it completes) or off (overrides the project setting)")
+	migrateCmd.Flags().String("validation-level", validate.DefaultLevel, "Validation check to run: L1 (row counts) or L2 (compare every row) (overrides the project setting)")
+	migrateCmd.Flags().Bool("skip-validation", false, "Do not validate this migration (same as --validation off)")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -349,8 +390,10 @@ func latestMigrationID(projectID string) (string, error) {
 	return migrations[0].ID, nil
 }
 
-// startMigration POSTs to create a new migration and returns its ID.
-func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments, bulkCopy, accurateCounts, asyncPipeline bool, tables []string) (string, error) {
+// startMigration POSTs to create a new migration and returns its ID and the
+// validation mode the server will apply once it completes. extra carries any
+// further request fields (the validation overrides).
+func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments, bulkCopy, accurateCounts, asyncPipeline bool, tables []string, extra map[string]any) (string, string, error) {
 	req := map[string]any{
 		"recreate_schema": recreateSchema,
 		"truncate":        truncate,
@@ -367,6 +410,9 @@ func startMigration(projectID string, recreateSchema, truncate bool, tableWorker
 	if len(tables) > 0 {
 		req["tables"] = tables
 	}
+	for k, v := range extra {
+		req[k] = v
+	}
 	body, _ := json.Marshal(req)
 	resp, err := http.Post(
 		ServerAddr+"/api/v1/projects/"+projectID+"/migrations",
@@ -374,20 +420,21 @@ func startMigration(projectID string, recreateSchema, truncate bool, tableWorker
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return "", fmt.Errorf("start migration: %w", err)
+		return "", "", fmt.Errorf("start migration: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var result struct {
-		ID    string `json:"id"`
-		Error string `json:"error"`
+		ID         string `json:"id"`
+		Validation string `json:"validation"`
+		Error      string `json:"error"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
 	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("server error %d: %s", resp.StatusCode, result.Error)
+		return "", "", fmt.Errorf("server error %d: %s", resp.StatusCode, result.Error)
 	}
-	return result.ID, nil
+	return result.ID, result.Validation, nil
 }
 
 // pollStats polls the stats endpoint every second and prints a full table-by-table

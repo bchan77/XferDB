@@ -127,6 +127,10 @@ All clients interact exclusively through the REST API. The CLI and Web UI are th
 | `DELETE` | `/api/v1/migrations/:id` | Cancel |
 | `GET` | `/api/v1/migrations/:id/stats` | Live statistics |
 | `GET` | `/api/v1/migrations/:id/ws` | WebSocket: live progress stream |
+| `POST` | `/api/v1/migrations/:id/validations` | Validate a migration (`{"level":"L1"\|"L2","tables":[…]}`) |
+| `GET` | `/api/v1/migrations/:id/validations` | List validation runs for a migration |
+| `GET` | `/api/v1/validations/:id` | Validation status and per-table results |
+| `PATCH` | `/api/v1/validations/:id` | Cancel (`{"action":"cancel"}`) |
 | `GET` | `/api/v1/health` | Health check |
 
 ---

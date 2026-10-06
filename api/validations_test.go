@@ -1,0 +1,221 @@
+package api
+
+import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+
+	"gitea.homelab.local/nextdevops/XferDB/state"
+)
+
+// newSQLiteProject starts an API server and creates a SQLite -> SQLite
+// project whose source holds one small table.
+func newSQLiteProject(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "src.db")
+	src, err := sql.Open("sqlite3", srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN)`,
+		`INSERT INTO items VALUES (1, 'a', 1), (2, 'b', 0), (3, NULL, NULL)`,
+	} {
+		if _, err := src.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src.Close()
+
+	db, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	srv := httptest.NewServer(NewServer(db, slog.New(slog.DiscardHandler)).Handler())
+	t.Cleanup(srv.Close)
+
+	var p struct {
+		ID string `json:"id"`
+	}
+	post(t, srv.URL+"/api/v1/projects", map[string]any{
+		"name":          "s2s",
+		"source_config": map[string]any{"type": "sqlite", "dsn": srcPath},
+		"target_config": map[string]any{"type": "sqlite", "dsn": filepath.Join(dir, "tgt.db")},
+	}, http.StatusCreated, &p)
+	return srv, p.ID
+}
+
+func post(t *testing.T, url string, body any, wantStatus int, out any) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		var e map[string]any
+		json.NewDecoder(resp.Body).Decode(&e)
+		t.Fatalf("POST %s: status %d (%v), want %d", url, resp.StatusCode, e["error"], wantStatus)
+	}
+	if out != nil {
+		json.NewDecoder(resp.Body).Decode(out)
+	}
+}
+
+func get(t *testing.T, url string, out any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	json.NewDecoder(resp.Body).Decode(out)
+}
+
+type validationResult struct {
+	ID     string `json:"id"`
+	Level  string `json:"level"`
+	Status string `json:"status"`
+	Tables []struct {
+		TableName string `json:"table_name"`
+		Result    string `json:"result"`
+		Stale     bool   `json:"stale"`
+	} `json:"tables"`
+}
+
+// waitFor polls until cond returns true or fails the test after 10s.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func listValidations(t *testing.T, srv *httptest.Server, migrationID string) []validationResult {
+	var vs []validationResult
+	get(t, srv.URL+"/api/v1/migrations/"+migrationID+"/validations", &vs)
+	return vs
+}
+
+func awaitValidation(t *testing.T, srv *httptest.Server, id string) validationResult {
+	t.Helper()
+	var v validationResult
+	waitFor(t, "validation to finish", func() bool {
+		get(t, srv.URL+"/api/v1/validations/"+id, &v)
+		return v.Status == "completed" || v.Status == "failed" || v.Status == "cancelled"
+	})
+	return v
+}
+
+func startMigration(t *testing.T, srv *httptest.Server, projectID string, body map[string]any) (string, string) {
+	t.Helper()
+	var m struct {
+		ID         string `json:"id"`
+		Validation string `json:"validation"`
+	}
+	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", body, http.StatusCreated, &m)
+	waitFor(t, "migration to complete", func() bool {
+		var mig struct {
+			Status string `json:"status"`
+		}
+		get(t, srv.URL+"/api/v1/migrations/"+m.ID, &mig)
+		return mig.Status == "completed"
+	})
+	return m.ID, m.Validation
+}
+
+func TestMigrationIsValidatedByDefault(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	migID, mode := startMigration(t, srv, projectID, map[string]any{})
+	if mode != "after" {
+		t.Fatalf("effective validation mode %q, want after", mode)
+	}
+
+	var vs []validationResult
+	waitFor(t, "auto validation to appear", func() bool {
+		vs = listValidations(t, srv, migID)
+		return len(vs) > 0
+	})
+	v := awaitValidation(t, srv, vs[0].ID)
+	if v.Status != "completed" || v.Level != "L2" {
+		t.Fatalf("validation %s at %s, want completed at L2", v.Status, v.Level)
+	}
+	if len(v.Tables) != 1 || v.Tables[0].Result != "pass" {
+		t.Fatalf("tables = %+v, want items: pass", v.Tables)
+	}
+}
+
+func TestSkipValidationPerRun(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	migID, mode := startMigration(t, srv, projectID, map[string]any{"validation": "off"})
+	if mode != "off" {
+		t.Fatalf("effective validation mode %q, want off", mode)
+	}
+	// Give a would-be auto validation time to show up.
+	time.Sleep(300 * time.Millisecond)
+	if vs := listValidations(t, srv, migID); len(vs) != 0 {
+		t.Fatalf("validation ran despite validation=off: %+v", vs)
+	}
+
+	// A manual run still works when the mode is off.
+	var v validationResult
+	post(t, srv.URL+"/api/v1/migrations/"+migID+"/validations", map[string]any{"level": "L1"}, http.StatusCreated, &v)
+	if got := awaitValidation(t, srv, v.ID); got.Status != "completed" || got.Tables[0].Result != "pass" {
+		t.Fatalf("manual validation = %+v", got)
+	}
+}
+
+func TestValidationRejectsUnavailableOptions(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation": "per_table"}, http.StatusBadRequest, nil)
+	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation_level": "L3"}, http.StatusBadRequest, nil)
+
+	migID, _ := startMigration(t, srv, projectID, map[string]any{"validation": "off"})
+	post(t, srv.URL+"/api/v1/migrations/"+migID+"/validations", map[string]any{"level": "L3"}, http.StatusBadRequest, nil)
+}
+
+func TestValidationMarksStaleAfterRemigration(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	firstID, _ := startMigration(t, srv, projectID, map[string]any{"validation": "off"})
+	var v validationResult
+	post(t, srv.URL+"/api/v1/migrations/"+firstID+"/validations", map[string]any{}, http.StatusCreated, &v)
+	if got := awaitValidation(t, srv, v.ID); got.Tables[0].Stale {
+		t.Fatal("fresh result reported stale")
+	}
+
+	startMigration(t, srv, projectID, map[string]any{"validation": "off", "truncate": true})
+	if got := awaitValidation(t, srv, v.ID); !got.Tables[0].Stale {
+		t.Fatal("result not marked stale after the table was migrated again")
+	}
+}
+
+func TestValidationSkipsTablesNotCompleted(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	migID, _ := startMigration(t, srv, projectID, map[string]any{"validation": "off"})
+	var v validationResult
+	post(t, srv.URL+"/api/v1/migrations/"+migID+"/validations",
+		map[string]any{"tables": []string{"items", "nope"}}, http.StatusCreated, &v)
+	got := awaitValidation(t, srv, v.ID)
+	results := map[string]string{}
+	for _, tb := range got.Tables {
+		results[tb.TableName] = tb.Result
+	}
+	if results["items"] != "pass" || results["nope"] != "skipped" {
+		t.Fatalf("results = %v, want items pass and nope skipped", results)
+	}
+}

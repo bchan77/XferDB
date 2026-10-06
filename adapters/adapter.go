@@ -31,7 +31,6 @@ type TransferConfig struct {
 	TableWorkers   int         `json:"table_workers" yaml:"table_workers"`     // tables to migrate concurrently (inter-table)
 	SegmentWorkers int         `json:"segment_workers" yaml:"segment_workers"` // workers per table, splitting by PK range (intra-table)
 	OffsetFallback bool        `json:"offset_fallback" yaml:"offset_fallback"` // force offset-based segments even when PK range is available
-	Validate       bool        `json:"validate" yaml:"validate"`
 	OnError        ErrorPolicy `json:"on_error" yaml:"on_error"`
 	DataOnly       bool        `json:"data_only" yaml:"data_only"`             // skip schema creation; target schema must already exist
 	SchemaOnly     bool        `json:"schema_only" yaml:"schema_only"`         // create schema on target but do not transfer data
@@ -41,6 +40,13 @@ type TransferConfig struct {
 	BulkCopy       bool        `json:"bulk_copy" yaml:"bulk_copy"`             // use COPY protocol instead of INSERT; requires target table to be empty
 	AccurateCounts bool        `json:"accurate_counts" yaml:"accurate_counts"` // use accurate row counts (slower for MongoDB)
 	AsyncPipeline  bool        `json:"async_pipeline" yaml:"async_pipeline"`   // overlap read/write for faster throughput
+
+	// Validation decides when a finished migration is validated on its own:
+	// "after" (the default when empty) or "off". ValidationLevel is the check
+	// it runs: "L1" (row counts) or "L2" (the default when empty). They replace
+	// an earlier `validate` bool that nothing ever read.
+	Validation      string `json:"validation,omitempty" yaml:"validation"`
+	ValidationLevel string `json:"validation_level,omitempty" yaml:"validation_level"`
 }
 
 // Project is a named migration project with a fixed source/target configuration.

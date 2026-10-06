@@ -156,6 +156,17 @@ func (m *MetaDB) DeleteProject(ctx context.Context, id string) error {
 		    (SELECT id FROM migrations WHERE project_id = ?)`, id); err != nil {
 		return fmt.Errorf("delete migration_tables: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM validation_tables WHERE validation_id IN
+		    (SELECT v.id FROM validations v JOIN migrations m ON m.id = v.migration_id
+		     WHERE m.project_id = ?)`, id); err != nil {
+		return fmt.Errorf("delete validation_tables: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM validations WHERE migration_id IN
+		    (SELECT id FROM migrations WHERE project_id = ?)`, id); err != nil {
+		return fmt.Errorf("delete validations: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM migrations WHERE project_id = ?`, id); err != nil {
 		return fmt.Errorf("delete migrations: %w", err)
 	}

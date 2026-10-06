@@ -164,7 +164,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		if !nativeSchema {
 			for _, schema := range tables {
 				if len(relationalPlan) > 0 {
-					applyPlanOverrides(&schema, relationalPlan)
+					state.ApplyPlanOverrides(&schema, relationalPlan)
 				}
 				if cfg.RecreateSchema {
 					if err := e.target.DropTable(ctx, schema.Name); err != nil {
@@ -379,28 +379,6 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.emit(ProgressEvent{Kind: EventComplete, Timestamp: time.Now()})
 	return nil
-}
-
-// applyPlanOverrides rewrites a relational table's column type/nullable/PK
-// flags per any saved schema-plan overrides for that table. Column renames
-// (SchemaPlanRow.PgColumn) are intentionally not applied here — WriteBatch
-// reads row values keyed by the *source* column name, so renaming at
-// CreateTable time without also touching the read/write path would break
-// data transfer.
-func applyPlanOverrides(schema *adapters.TableSchema, plan []state.SchemaPlanRow) {
-	for i, col := range schema.Columns {
-		for _, row := range plan {
-			if row.Collection != schema.Name || row.FieldName != col.Name {
-				continue
-			}
-			if row.PgType != "" {
-				schema.Columns[i].Type = row.PgType
-			}
-			schema.Columns[i].Nullable = row.Nullable
-			schema.Columns[i].PrimaryKey = row.IsPK
-			break
-		}
-	}
 }
 
 // connect instantiates and connects source and target adapters using the project config.
