@@ -32,3 +32,6 @@ go.work.sum
 
 # IDE
 .idea/
+
+# Release binaries are published as Gitea Release attachments, not committed
+/releases/
