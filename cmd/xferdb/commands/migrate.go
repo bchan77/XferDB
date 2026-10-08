@@ -25,9 +25,11 @@ Examples:
   xferdb migrate --project prod-to-staging
   xferdb migrate --skip-validation
   xferdb migrate --validation-level L1
+  xferdb migrate --validation-level L3 --validation-sample 10
 
 A completed migration is validated by default (an L2 comparison of every row);
-the command waits for that validation and exits non-zero if any table fails.`,
+the command waits for that validation and exits non-zero if any table fails.
+At L3, a table that fails is also diffed row by row to list which rows differ.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectFlag, _ := cmd.Flags().GetString("project")
 		preflightOnly, _ := cmd.Flags().GetBool("preflight")
@@ -41,6 +43,7 @@ the command waits for that validation and exits non-zero if any table fails.`,
 		historyOnly, _ := cmd.Flags().GetBool("history")
 		validationMode, _ := cmd.Flags().GetString("validation")
 		validationLevel, _ := cmd.Flags().GetString("validation-level")
+		validationSample, _ := cmd.Flags().GetInt("validation-sample")
 		skipValidation, _ := cmd.Flags().GetBool("skip-validation")
 
 		if recreateSchema && truncate {
@@ -67,6 +70,12 @@ the command waits for that validation and exits non-zero if any table fails.`,
 				return err
 			}
 			extra["validation_level"] = validationLevel
+		}
+		if cmd.Flags().Changed("validation-sample") {
+			if err := validate.CheckSample(validationSample); err != nil {
+				return err
+			}
+			extra["validation_sample"] = validationSample
 		}
 
 		// table-workers/segment-workers/batch-size/bulk-copy/async-pipeline/tables
@@ -188,7 +197,8 @@ func init() {
 	migrateCmd.Flags().Bool("async-pipeline", false, "Overlap reading and writing for faster throughput (reads batch N+1 while writing batch N)")
 	migrateCmd.Flags().Bool("history", false, "Show recorded stats history for the latest migration")
 	migrateCmd.Flags().String("validation", validate.DefaultMode, "When to validate the migration: after (once it completes) or off (overrides the project setting)")
-	migrateCmd.Flags().String("validation-level", validate.DefaultLevel, "Validation check to run: L1 (row counts) or L2 (compare every row) (overrides the project setting)")
+	migrateCmd.Flags().String("validation-level", validate.DefaultLevel, "Validation check to run: L1 (row counts), L2 (compare every row) or L3 (L2, then list the differing rows of a failing table) (overrides the project setting)")
+	migrateCmd.Flags().Int("validation-sample", 0, "Percentage of a failing table the L3 row diff checks; 0 checks every row (overrides the project setting)")
 	migrateCmd.Flags().Bool("skip-validation", false, "Do not validate this migration (same as --validation off)")
 }
 

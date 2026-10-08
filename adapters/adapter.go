@@ -43,10 +43,13 @@ type TransferConfig struct {
 
 	// Validation decides when a finished migration is validated on its own:
 	// "after" (the default when empty) or "off". ValidationLevel is the check
-	// it runs: "L1" (row counts) or "L2" (the default when empty). They replace
-	// an earlier `validate` bool that nothing ever read.
-	Validation      string `json:"validation,omitempty" yaml:"validation"`
-	ValidationLevel string `json:"validation_level,omitempty" yaml:"validation_level"`
+	// it runs: "L1" (row counts), "L2" (the default when empty), or "L3" (L2,
+	// plus a row diff of any table that fails). They replace an earlier
+	// `validate` bool that nothing ever read. ValidationSample is the
+	// percentage of a failing table the L3 diff checks; 0 means every row.
+	Validation       string `json:"validation,omitempty" yaml:"validation"`
+	ValidationLevel  string `json:"validation_level,omitempty" yaml:"validation_level"`
+	ValidationSample int    `json:"validation_sample,omitempty" yaml:"validation_sample"`
 }
 
 // Project is a named migration project with a fixed source/target configuration.

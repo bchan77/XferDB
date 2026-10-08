@@ -56,6 +56,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/migrations/{id}/validations", vh.ListValidations)
 	mux.HandleFunc("GET /api/v1/validations/{id}", vh.GetValidation)
 	mux.HandleFunc("PATCH /api/v1/validations/{id}", vh.PatchValidation)
+	mux.HandleFunc("GET /api/v1/validations/{id}/tables/{table}/diffs", vh.GetValidationDiffs)
 	mux.HandleFunc("GET /api/v1/projects/{id}/validation-status", vh.ValidationStatus)
 
 	// TODO: WebSocket live progress at GET /api/v1/migrations/{id}/ws

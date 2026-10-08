@@ -49,11 +49,7 @@ func (h *ProjectsHandler) CreateProject(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if err := validate.CheckMode(body.TransferConfig.Validation); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := validate.CheckLevel(body.TransferConfig.ValidationLevel); err != nil {
+	if err := validate.CheckSettings(body.TransferConfig); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -155,11 +151,7 @@ func (h *ProjectsHandler) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	existing.SourceConfig = body.SourceConfig
 	existing.TargetConfig = body.TargetConfig
 	if body.TransferConfig != nil {
-		if err := validate.CheckMode(body.TransferConfig.Validation); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if err := validate.CheckLevel(body.TransferConfig.ValidationLevel); err != nil {
+		if err := validate.CheckSettings(*body.TransferConfig); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

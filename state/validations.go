@@ -21,6 +21,9 @@ const (
 // ValidationOptions are the caller's choices for one validation run.
 type ValidationOptions struct {
 	Tables []string `json:"tables,omitempty"`
+	// Sample is the percentage of each table an L3 row diff checks; 0
+	// means every row.
+	Sample int `json:"sample,omitempty"`
 }
 
 // Validation is one run comparing a migration's source and target. Status
@@ -51,6 +54,43 @@ type ValidationTable struct {
 	LevelRun     string `db:"level_run" json:"level_run,omitempty"`
 	LevelNote    string `db:"level_note" json:"level_note,omitempty"`
 	Detail       string `db:"detail" json:"detail,omitempty"` // why a table failed or was skipped
+
+	// L3 row-diff totals: rows only in the source, rows only in the target,
+	// and rows on both sides whose values differ. Sample is the percentage
+	// of the table the diff checked (0: every row). Diffs holds the first
+	// examples, saved separately through SaveValidationDiffs.
+	DiffMissing  int64            `db:"diff_missing" json:"diff_missing"`
+	DiffExtra    int64            `db:"diff_extra" json:"diff_extra"`
+	DiffMismatch int64            `db:"diff_mismatch" json:"diff_mismatch"`
+	Sample       int              `db:"sample" json:"sample,omitempty"`
+	Diffs        []ValidationDiff `db:"-" json:"-"`
+}
+
+// Kinds of row difference an L3 diff records.
+const (
+	DiffMissingInTarget = "missing_in_target"
+	DiffExtraInTarget   = "extra_in_target"
+	DiffValueMismatch   = "value_mismatch"
+)
+
+// ValidationDiff is one example row an L3 diff found. Key, Source and Target
+// map column names to canonical values (nil for NULL); Source is empty for a
+// row only in the target and Target for a row only in the source. Columns
+// lists the columns whose values differ in a value_mismatch.
+type ValidationDiff struct {
+	Kind    string             `json:"kind"`
+	Key     map[string]*string `json:"key"`
+	Columns []string           `json:"columns,omitempty"`
+	Source  map[string]*string `json:"source,omitempty"`
+	Target  map[string]*string `json:"target,omitempty"`
+}
+
+type validationDiffRow struct {
+	Kind    string `db:"kind"`
+	Key     string `db:"key"`
+	Columns string `db:"columns"`
+	Source  string `db:"source_row"`
+	Target  string `db:"target_row"`
 }
 
 type validationRow struct {
@@ -170,8 +210,9 @@ func (m *MetaDB) UpsertValidationTable(ctx context.Context, t ValidationTable) e
 	_, err := m.db.ExecContext(ctx, `
 		INSERT INTO validation_tables
 			(validation_id, table_name, result, source_rows, target_rows,
-			 source_hash, target_hash, rows_checked, level_run, level_note, detail)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 source_hash, target_hash, rows_checked, level_run, level_note, detail,
+			 diff_missing, diff_extra, diff_mismatch, sample)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (validation_id, table_name) DO UPDATE SET
 			result       = excluded.result,
 			source_rows  = excluded.source_rows,
@@ -181,14 +222,78 @@ func (m *MetaDB) UpsertValidationTable(ctx context.Context, t ValidationTable) e
 			rows_checked = excluded.rows_checked,
 			level_run    = excluded.level_run,
 			level_note   = excluded.level_note,
-			detail       = excluded.detail`,
+			detail       = excluded.detail,
+			diff_missing  = excluded.diff_missing,
+			diff_extra    = excluded.diff_extra,
+			diff_mismatch = excluded.diff_mismatch,
+			sample        = excluded.sample`,
 		t.ValidationID, t.TableName, t.Result, t.SourceRows, t.TargetRows,
 		t.SourceHash, t.TargetHash, t.RowsChecked, t.LevelRun, t.LevelNote, t.Detail,
+		t.DiffMissing, t.DiffExtra, t.DiffMismatch, t.Sample,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert validation table %s: %w", t.TableName, err)
 	}
 	return nil
+}
+
+// SaveValidationDiffs replaces the example diffs recorded for one table of a
+// validation run.
+func (m *MetaDB) SaveValidationDiffs(ctx context.Context, validationID, table string, diffs []ValidationDiff) error {
+	tx, err := m.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("save validation diffs: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM validation_diffs WHERE validation_id = ? AND table_name = ?`, validationID, table); err != nil {
+		return fmt.Errorf("save validation diffs: %w", err)
+	}
+	for i, d := range diffs {
+		key, _ := json.Marshal(d.Key)
+		cols, _ := json.Marshal(d.Columns)
+		var src, tgt []byte
+		if d.Source != nil {
+			src, _ = json.Marshal(d.Source)
+		}
+		if d.Target != nil {
+			tgt, _ = json.Marshal(d.Target)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO validation_diffs
+				(validation_id, table_name, seq, kind, key, columns, source_row, target_row)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			validationID, table, i, d.Kind, string(key), string(cols), string(src), string(tgt)); err != nil {
+			return fmt.Errorf("save validation diffs: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// GetValidationDiffs returns the example diffs recorded for one table of a
+// validation run, in the order they were found.
+func (m *MetaDB) GetValidationDiffs(ctx context.Context, validationID, table string) ([]ValidationDiff, error) {
+	var rows []validationDiffRow
+	if err := m.db.SelectContext(ctx, &rows, `
+		SELECT kind, key, columns, source_row, target_row FROM validation_diffs
+		WHERE validation_id = ? AND table_name = ? ORDER BY seq`, validationID, table); err != nil {
+		return nil, fmt.Errorf("get validation diffs: %w", err)
+	}
+	out := make([]ValidationDiff, 0, len(rows))
+	for _, r := range rows {
+		d := ValidationDiff{Kind: r.Kind}
+		// All four were written by SaveValidationDiffs.
+		json.Unmarshal([]byte(r.Key), &d.Key)         //nolint:errcheck
+		json.Unmarshal([]byte(r.Columns), &d.Columns) //nolint:errcheck
+		if r.Source != "" {
+			json.Unmarshal([]byte(r.Source), &d.Source) //nolint:errcheck
+		}
+		if r.Target != "" {
+			json.Unmarshal([]byte(r.Target), &d.Target) //nolint:errcheck
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 // GetValidationTables returns the per-table outcomes of a validation run.

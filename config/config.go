@@ -329,5 +329,8 @@ func validateTransferConfig(prefix string, t adapters.TransferConfig) error {
 	if err := validate.CheckLevel(t.ValidationLevel); err != nil {
 		return fmt.Errorf("%s.validation_level: %w", prefix, err)
 	}
+	if err := validate.CheckSample(t.ValidationSample); err != nil {
+		return fmt.Errorf("%s.validation_sample: %w", prefix, err)
+	}
 	return nil
 }
