@@ -26,8 +26,17 @@ func buildDSN(config adapters.ConnectionConfig) string {
 	}
 	return fmt.Sprintf(
 		"host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
-		config.Host, port, config.Database, config.Username, config.Password, sslMode,
+		dsnValue(config.Host), port, dsnValue(config.Database), dsnValue(config.Username),
+		dsnValue(config.Password), dsnValue(sslMode),
 	)
+}
+
+// dsnValue quotes a keyword/value connection-string value. Unquoted, an empty
+// value swallows the next keyword (`password= sslmode=disable` sets the
+// password to "sslmode=disable"), and a space or quote splits it; libpq
+// takes any value in single quotes with \ and \' escaped.
+func dsnValue(v string) string {
+	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
 }
 
 // quote returns a safely double-quoted PostgreSQL identifier.
