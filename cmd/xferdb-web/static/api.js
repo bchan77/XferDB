@@ -72,6 +72,8 @@ export const api = {
     req('POST', `/api/v1/migrations/${encodeURIComponent(migId)}/validations`, body || {}),
   listValidations: (migId) => req('GET', `/api/v1/migrations/${encodeURIComponent(migId)}/validations`),
   getValidation: (id) => req('GET', `/api/v1/validations/${encodeURIComponent(id)}`),
+  getValidationDiffs: (id, table) =>
+    req('GET', `/api/v1/validations/${encodeURIComponent(id)}/tables/${encodeURIComponent(table)}/diffs`),
   cancelValidation: (id) => req('PATCH', `/api/v1/validations/${encodeURIComponent(id)}`, { action: 'cancel' }),
   getValidationStatus: (projectId) =>
     req('GET', `/api/v1/projects/${encodeURIComponent(projectId)}/validation-status`),

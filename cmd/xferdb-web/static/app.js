@@ -649,10 +649,11 @@ function validationBadge(status) {
 // validationOptionsHTML renders the Validation / Level selects used both on
 // the migration start form (per-run override) and in project settings
 // (project default). cfg is a transfer_config; empty fields mean the defaults
-// (after, L2).
+// (after, L2, every row).
 function validationOptionsHTML(prefix, cfg) {
   const mode = (cfg && cfg.validation) || 'after';
   const level = (cfg && cfg.validation_level) || 'L2';
+  const sample = (cfg && cfg.validation_sample) || 0;
   const sel = (cond) => (cond ? 'selected' : '');
   return `
     <div class="field-row">
@@ -669,27 +670,46 @@ function validationOptionsHTML(prefix, cfg) {
         <select id="${prefix}-validation-level">
           <option value="L2" ${sel(level === 'L2')}>L2 · compare every row</option>
           <option value="L1" ${sel(level === 'L1')}>L1 · row counts only</option>
+          <option value="L3" ${sel(level === 'L3')}>L3 · L2, then list differing rows</option>
         </select>
-        <div class="hint">L2 reads every row of both databases again</div>
+        <div class="hint">L2 reads every row of both databases again; L3 also diffs a failing table by primary key</div>
+      </div>
+      <div>
+        <label for="${prefix}-validation-sample">L3 sample (%)</label>
+        <input id="${prefix}-validation-sample" type="number" min="0" max="100" step="1" value="${esc(sample)}">
+        <div class="hint">Share of a failing table the L3 diff checks; 0 checks every row</div>
       </div>
     </div>`;
 }
 
 // wireValidationOptions disables the level select while validation is set
-// to Skip, since it would have no effect.
+// to Skip, and the sample unless the level is L3, since neither would have
+// any effect.
 function wireValidationOptions(prefix) {
   const mode = document.getElementById(`${prefix}-validation`);
   const level = document.getElementById(`${prefix}-validation-level`);
+  const sample = document.getElementById(`${prefix}-validation-sample`);
   if (!mode || !level) return;
-  const sync = () => { level.disabled = mode.value === 'off'; };
+  const sync = () => {
+    level.disabled = mode.value === 'off';
+    if (sample) sample.disabled = level.disabled || level.value !== 'L3';
+  };
   mode.addEventListener('change', sync);
+  level.addEventListener('change', sync);
   sync();
+}
+
+// readSample returns the sample input's percentage, clamped to 0-100.
+function readSample(id) {
+  const n = parseInt(document.getElementById(id)?.value, 10);
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0;
 }
 
 function readValidationOptions(prefix) {
   return {
     validation: document.getElementById(`${prefix}-validation`).value,
     validation_level: document.getElementById(`${prefix}-validation-level`).value,
+    validation_sample: readSample(`${prefix}-validation-sample`),
   };
 }
 
@@ -713,23 +733,113 @@ function validationResultsHTML(v) {
     return `<span class="badge ${cls}">${esc(text)}${t.stale ? ' (stale)' : ''}</span>`;
   };
   const count = (n) => (n === undefined || n === null ? '—' : fmtInt(n));
+  const hasDiffs = (t) => (t.diff_missing || 0) + (t.diff_extra || 0) + (t.diff_mismatch || 0) > 0;
   return `
     ${banner}
     <div style="overflow-x:auto;margin-top:10px;">
       <table class="stats-history-table">
-        <thead><tr><th>Table</th><th>Result</th><th>Source rows</th><th>Target rows</th><th>Detail</th></tr></thead>
+        <thead><tr><th>Table</th><th>Result</th><th>Source rows</th><th>Target rows</th><th>Detail</th><th></th></tr></thead>
         <tbody>
           ${tables.map((t) => `
-            <tr>
+            <tr data-table="${esc(t.table_name)}">
               <td class="mono">${esc(t.table_name)}</td>
-              <td>${badgeFor(t)}</td>
+              <td>${badgeFor(t)}${t.level_run ? ` <span class="hint">${esc(t.level_run)}</span>` : ''}</td>
               <td>${count(t.source_rows)}</td>
               <td>${count(t.target_rows)}</td>
-              <td>${esc(t.detail || '')}</td>
+              <td>${esc(t.detail || '')}${t.level_note ? `<div class="level-note">${esc(t.level_note)}</div>` : ''}</td>
+              <td>${hasDiffs(t) ? `<button class="btn small" data-diffs="${esc(t.table_name)}">View rows</button>` : ''}</td>
             </tr>`).join('')}
         </tbody>
       </table>
     </div>`;
+}
+
+// wireDiffButtons opens the diff drawer from each "View rows" button that
+// validationResultsHTML rendered inside container.
+function wireDiffButtons(container, v) {
+  container.querySelectorAll('[data-diffs]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const t = (v.tables || []).find((x) => x.table_name === btn.dataset.diffs);
+      if (t) openDiffDrawer(v.id, t);
+    });
+  });
+}
+
+const DIFF_KINDS = {
+  missing_in_target: { label: 'Missing in target', cls: 'fail' },
+  extra_in_target: { label: 'Only in target', cls: 'warn' },
+  value_mismatch: { label: 'Values differ', cls: 'fail' },
+};
+
+function diffValueHTML(v) {
+  return v === null || v === undefined
+    ? '<span class="diff-value null">NULL</span>'
+    : `<span class="diff-value">${esc(v)}</span>`;
+}
+
+function diffKeyHTML(key) {
+  return Object.keys(key || {}).sort()
+    .map((k) => `<span class="mono">${esc(k)}</span>=${diffValueHTML(key[k])}`).join(' ');
+}
+
+// diffRowHTML renders one example: the differing columns of a mismatch side
+// by side, or the whole row for a row on only one side.
+function diffRowHTML(d) {
+  const kind = DIFF_KINDS[d.kind] || { label: d.kind, cls: 'pending' };
+  let body;
+  if (d.kind === 'value_mismatch') {
+    body = `<table class="stats-history-table"><thead><tr><th>Column</th><th>Source</th><th>Target</th></tr></thead><tbody>
+      ${(d.columns || []).map((c) => `<tr class="diff-changed"><td class="mono">${esc(c)}</td><td>${diffValueHTML(d.source?.[c])}</td><td>${diffValueHTML(d.target?.[c])}</td></tr>`).join('')}
+    </tbody></table>`;
+  } else {
+    const row = d.kind === 'missing_in_target' ? d.source : d.target;
+    body = Object.keys(row || {}).sort()
+      .map((c) => `<span class="mono">${esc(c)}</span>: ${diffValueHTML(row[c])}`).join(' · ');
+  }
+  return `<tr data-kind="${esc(d.kind)}">
+    <td class="diff-kind"><span class="badge ${kind.cls}">${esc(kind.label)}</span></td>
+    <td>${diffKeyHTML(d.key)}</td>
+    <td>${body}</td>
+  </tr>`;
+}
+
+// openDiffDrawer lists the example rows an L3 diff recorded for table t of
+// validation vid.
+async function openDiffDrawer(vid, t) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const totals = [
+    t.diff_missing ? `${fmtInt(t.diff_missing)} missing in target` : '',
+    t.diff_extra ? `${fmtInt(t.diff_extra)} only in target` : '',
+    t.diff_mismatch ? `${fmtInt(t.diff_mismatch)} with different values` : '',
+  ].filter(Boolean).join(' · ');
+  overlay.innerHTML = `
+    <div class="modal drawer" role="dialog" aria-modal="true" aria-label="Differing rows" id="diffDrawer">
+      <h3>Differing rows · <span class="mono">${esc(t.table_name)}</span></h3>
+      <div class="hint">${esc(totals)}${t.sample ? ` · in a ${esc(t.sample)}% sample` : ''}. Values are shown as compared, after normalising each database's representation.</div>
+      <div class="drawer-body" style="margin-top:10px;"><div class="loading-block"><span class="spinner"></span> Loading…</div></div>
+      <div class="actions" style="margin-top:12px;"><button class="btn" data-act="close">Close</button></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => { document.removeEventListener('keydown', onKey); overlay.remove(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('[data-act=close]').addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+
+  const body = overlay.querySelector('.drawer-body');
+  try {
+    const diffs = await api.getValidationDiffs(vid, t.table_name);
+    const total = (t.diff_missing || 0) + (t.diff_extra || 0) + (t.diff_mismatch || 0);
+    body.innerHTML = `
+      ${diffs.length < total ? `<div class="hint">Showing the first ${fmtInt(diffs.length)} of ${fmtInt(total)}.</div>` : ''}
+      <table class="stats-history-table" id="diffTable">
+        <thead><tr><th>Kind</th><th>Key</th><th>Detail</th></tr></thead>
+        <tbody>${diffs.map(diffRowHTML).join('')}</tbody>
+      </table>`;
+  } catch (err) {
+    body.innerHTML = errorBanner('Could not load the differing rows: ' + err.message);
+  }
 }
 
 // mountValidationCard shows a migration's latest validation and lets the user
@@ -752,7 +862,10 @@ function mountValidationCard(container, migId, { waitForAuto = false } = {}) {
           <option value="">Project default level</option>
           <option value="L2">L2 · compare every row</option>
           <option value="L1">L1 · row counts only</option>
+          <option value="L3">L3 · L2, then list differing rows</option>
         </select>
+        <label for="v-sample" class="hint" style="align-self:center;">L3 sample %</label>
+        <input id="v-sample" type="number" min="0" max="100" step="1" value="0" style="width:80px;" disabled>
         <button class="btn" id="validateBtn">${esc(label)}</button>
       </div>
       <div id="validateErr"></div>`;
@@ -761,12 +874,17 @@ function mountValidationCard(container, migId, { waitForAuto = false } = {}) {
   function wireStart() {
     const btn = document.getElementById('validateBtn');
     if (!btn) return;
+    const levelSel = document.getElementById('v-level');
+    const sampleIn = document.getElementById('v-sample');
+    levelSel.addEventListener('change', () => { sampleIn.disabled = levelSel.value !== 'L3'; });
     btn.addEventListener('click', async () => {
-      const level = document.getElementById('v-level').value;
+      const level = levelSel.value;
+      const body = level ? { level } : {};
+      if (level === 'L3') body.sample = readSample('v-sample');
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> Starting…';
       try {
-        await api.startValidation(migId, level ? { level } : {});
+        await api.startValidation(migId, body);
         poll();
       } catch (err) {
         document.getElementById('validateErr').innerHTML = errorBanner('Could not start validation: ' + err.message);
@@ -817,6 +935,7 @@ function mountValidationCard(container, migId, { waitForAuto = false } = {}) {
       <div class="hint">Level ${esc(latest.level)} · ${esc(latest.status)} ${latest.completed_at ? '· ' + esc(fmtDate(latest.completed_at)) : ''}</div>
       ${validationResultsHTML(latest)}
       ${startControlsHTML('Validate again')}`);
+    wireDiffButtons(container, latest);
     wireStart();
   }
 

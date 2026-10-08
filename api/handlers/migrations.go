@@ -96,7 +96,8 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		Tables         []string `json:"tables"`
 		// Per-run validation overrides; the project's settings apply otherwise.
 		Validation      *string `json:"validation"`
-		ValidationLevel *string `json:"validation_level"`
+		ValidationLevel  *string `json:"validation_level"`
+		ValidationSample *int    `json:"validation_sample"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
 	if overrides.RecreateSchema != nil {
@@ -141,11 +142,10 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	if overrides.ValidationLevel != nil {
 		p.TransferConfig.ValidationLevel = *overrides.ValidationLevel
 	}
-	if err := validate.CheckMode(p.TransferConfig.Validation); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	if overrides.ValidationSample != nil {
+		p.TransferConfig.ValidationSample = *overrides.ValidationSample
 	}
-	if err := validate.CheckLevel(p.TransferConfig.ValidationLevel); err != nil {
+	if err := validate.CheckSettings(p.TransferConfig); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -230,7 +230,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		}()
 		eng.Run(ctx) //nolint:errcheck
 		if h.Validations != nil {
-			h.Validations.startAfterMigration(migrationID, p, validationMode, validationLevel, migLog)
+			h.Validations.startAfterMigration(migrationID, p, validationMode, validationLevel, p.TransferConfig.ValidationSample, migLog)
 		}
 	}()
 

@@ -226,3 +226,17 @@ func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 
 	return info, nil
 }
+
+// LookupRows implements adapters.RowLookup.
+func (s *Source) LookupRows(ctx context.Context, table string, keyCols []string, keys [][]interface{}) ([]map[string]interface{}, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	query, args := adapters.LookupQuery(quote, func(int) string { return "?" }, table, keyCols, keys)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("look up rows in %s: %w", table, err)
+	}
+	defer rows.Close()
+	return adapters.ScanRecords(rows)
+}

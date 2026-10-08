@@ -23,12 +23,13 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/state"
 )
 
-// Levels, cheapest first. Each runs only on a table that passed the one
-// below it.
+// Levels, cheapest first. L1 and L2 each run only on a table that passed the
+// one below; L3 runs only on a table that failed one of them, to say which
+// rows differ.
 const (
 	LevelL1 = "L1" // row counts
 	LevelL2 = "L2" // order-independent fingerprint of every row
-	LevelL3 = "L3" // PK-keyed row diff (not yet available)
+	LevelL3 = "L3" // PK-keyed row diff of a table that failed L1 or L2
 )
 
 // Modes decide when validation runs on its own after a migration.
@@ -50,12 +51,22 @@ const defaultBatchSize = 1000
 // CheckLevel reports whether level can be run. Empty means the default.
 func CheckLevel(level string) error {
 	switch level {
-	case "", LevelL1, LevelL2:
+	case "", LevelL1, LevelL2, LevelL3:
 		return nil
-	case LevelL3:
-		return fmt.Errorf("validation level L3 (row diff) is not available yet; use L1 or L2")
 	}
-	return fmt.Errorf("validation level %q must be one of: L1, L2", level)
+	return fmt.Errorf("validation level %q must be one of: L1, L2, L3", level)
+}
+
+// CheckSettings reports whether a project's or run's validation settings
+// can be used.
+func CheckSettings(t adapters.TransferConfig) error {
+	if err := CheckMode(t.Validation); err != nil {
+		return err
+	}
+	if err := CheckLevel(t.ValidationLevel); err != nil {
+		return err
+	}
+	return CheckSample(t.ValidationSample)
 }
 
 // CheckMode reports whether mode can be used. Empty means the default.
@@ -79,6 +90,8 @@ type Request struct {
 	Tables    []string
 	Level     string
 	BatchSize int
+	// Sample is the percentage of a table an L3 diff checks; 0 means all.
+	Sample int
 }
 
 // Run validates each table in req.Tables and hands every outcome to report as
@@ -91,6 +104,9 @@ func Run(ctx context.Context, req Request, report func(state.ValidationTable)) e
 		level = DefaultLevel
 	}
 	if err := CheckLevel(level); err != nil {
+		return err
+	}
+	if err := CheckSample(req.Sample); err != nil {
 		return err
 	}
 	batchSize := req.BatchSize
@@ -134,7 +150,7 @@ func Run(ctx context.Context, req Request, report func(state.ValidationTable)) e
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		res := validateTable(ctx, src, tgt, table, level, batchSize, req.Plan, isMongo)
+		res := validateTable(ctx, src, tgt, table, level, batchSize, req.Sample, req.Plan, isMongo)
 		if err := ctx.Err(); err != nil {
 			// A read cut short by cancellation is not a verdict on the table.
 			return err
@@ -144,8 +160,13 @@ func Run(ctx context.Context, req Request, report func(state.ValidationTable)) e
 	return nil
 }
 
-func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize int, plan []state.SchemaPlanRow, isMongo bool) state.ValidationTable {
-	res := state.ValidationTable{TableName: table, LevelRun: level, Result: state.ValidationFail}
+func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool) state.ValidationTable {
+	// LevelRun starts at what L1/L2 reach; L3 raises it only if it runs.
+	runLevel := level
+	if level == LevelL3 {
+		runLevel = LevelL2
+	}
+	res := state.ValidationTable{TableName: table, LevelRun: runLevel, Result: state.ValidationFail}
 
 	srcSchema, err := src.GetSchema(ctx, table)
 	if err != nil {
@@ -186,6 +207,11 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 	}
 	if srcRows != tgtRows {
 		res.Detail = fmt.Sprintf("row counts differ: source has %d, target has %d", srcRows, tgtRows)
+		if level == LevelL3 {
+			// L2 cannot pass with different counts; go straight to the diff.
+			res.LevelRun = LevelL1
+			rowDiff(ctx, src, tgt, srcSchema, tgtSchema, cols, batchSize, sample, isMongo, &res)
+		}
 		return res
 	}
 	if level == LevelL1 {
@@ -219,8 +245,96 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		res.Detail = "row counts match but row contents differ; L2 cannot say which rows"
 	default:
 		res.Result = state.ValidationPass
+		if level == LevelL3 {
+			res.LevelNote = "passed L2, so no row diff was needed"
+		}
+	}
+	if res.Result == state.ValidationFail && level == LevelL3 {
+		rowDiff(ctx, src, tgt, srcSchema, tgtSchema, cols, batchSize, sample, isMongo, &res)
 	}
 	return res
+}
+
+// rowDiff runs L3 on a table that failed L1 or L2 and rewrites res with what
+// it found. When the table cannot be diffed, res keeps the earlier failure
+// and LevelNote says why L3 did not run.
+func rowDiff(ctx context.Context, src, tgt adapters.SourceAdapter, srcSchema, tgtSchema *adapters.TableSchema, cols []column, batchSize, sample int, isMongo bool, res *state.ValidationTable) {
+	unavailable := func(reason string) { res.LevelNote = "L3 row diff unavailable: " + reason }
+	key, reason := diffKey(srcSchema, cols)
+	if key == nil {
+		unavailable(reason)
+		return
+	}
+	d := newDiffer(src, tgt, srcSchema.Name, cols, key, batchSize, sample)
+
+	var note string
+	var err error
+	if len(key) == 1 && key[0].kind == kindInt && !isMongo {
+		note, err = d.byRange(ctx, *res.SourceRows)
+	} else {
+		lookup, ok := tgt.(adapters.RowLookup)
+		if !ok {
+			unavailable("the target cannot look rows up by key")
+			return
+		}
+		var found int64
+		found, note, err = d.byLookup(ctx, lookup, srcSchema, tgtSchema, isMongo, *res.TargetRows)
+		if err == nil && found == 0 && d.checked > 0 && *res.TargetRows > 0 {
+			// Not one key matched although the target has rows: the keys are
+			// most likely stored in a form the lookup does not match, and
+			// every row would be reported wrongly as missing and extra.
+			unavailable("no source key was found in the target; its keys may be stored in a different form")
+			return
+		}
+	}
+	if err != nil {
+		unavailable(err.Error())
+		return
+	}
+
+	res.LevelRun = LevelL3
+	res.LevelNote = note
+	res.RowsChecked = d.checked
+	res.DiffMissing, res.DiffExtra, res.DiffMismatch = d.missing, d.extra, d.mismatched
+	res.Diffs = d.diffs()
+	if d.sample != 0 {
+		res.Sample = d.sample
+	}
+
+	if d.missing+d.extra+d.mismatched == 0 {
+		if d.sample != 0 {
+			res.Detail = fmt.Sprintf("the %d%% sample found no differing rows; the difference is in rows it did not check", d.sample)
+			return
+		}
+		res.Result = state.ValidationPass
+		res.Detail = ""
+		res.LevelNote = joinNotes("the row diff found every row matching, so the table changed after the earlier check failed", note)
+		return
+	}
+	var parts []string
+	if d.missing > 0 {
+		parts = append(parts, fmt.Sprintf("%d row(s) missing in target", d.missing))
+	}
+	if d.extra > 0 {
+		parts = append(parts, fmt.Sprintf("%d row(s) only in target", d.extra))
+	}
+	if d.mismatched > 0 {
+		parts = append(parts, fmt.Sprintf("%d row(s) with different values", d.mismatched))
+	}
+	res.Detail = strings.Join(parts, ", ")
+	if d.sample != 0 {
+		res.Detail += fmt.Sprintf(" (in a %d%% sample)", d.sample)
+	}
+}
+
+func joinNotes(notes ...string) string {
+	var out []string
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return strings.Join(out, "; ")
 }
 
 // align pairs each intended column with the target column of the same name

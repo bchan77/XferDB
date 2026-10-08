@@ -162,6 +162,18 @@ func (m *MetaDB) migrate() error {
 			detail        TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (validation_id, table_name)
 		);
+
+		CREATE TABLE IF NOT EXISTS validation_diffs (
+			validation_id TEXT NOT NULL REFERENCES validations(id) ON DELETE CASCADE,
+			table_name    TEXT NOT NULL,
+			seq           INTEGER NOT NULL,
+			kind          TEXT NOT NULL,
+			key           TEXT NOT NULL,
+			columns       TEXT NOT NULL DEFAULT '[]',
+			source_row    TEXT NOT NULL DEFAULT '',
+			target_row    TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (validation_id, table_name, seq)
+		);
 	`)
 	if err != nil {
 		return err
@@ -169,7 +181,21 @@ func (m *MetaDB) migrate() error {
 	// schema_plan is a nullable JSON column added to an existing table.
 	// ALTER TABLE in SQLite does not support IF NOT EXISTS, so we swallow
 	// "duplicate column name" when the column already exists.
-	return m.addColumnIfMissing("migrations", "schema_plan TEXT NOT NULL DEFAULT ''")
+	if err := m.addColumnIfMissing("migrations", "schema_plan TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// L3 row-diff totals (#103 phase 2) on a validation_tables created before them.
+	for _, col := range []string{
+		"diff_missing INTEGER NOT NULL DEFAULT 0",
+		"diff_extra INTEGER NOT NULL DEFAULT 0",
+		"diff_mismatch INTEGER NOT NULL DEFAULT 0",
+		"sample INTEGER NOT NULL DEFAULT 0",
+	} {
+		if err := m.addColumnIfMissing("validation_tables", col); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addColumnIfMissing runs ALTER TABLE … ADD COLUMN and ignores the error when

@@ -271,6 +271,18 @@ table.kv td:first-child { color: var(--muted); width: 130px; }
 .modal .body { font-size: 13px; color: var(--text); margin-bottom: 16px; white-space: pre-wrap; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+.modal.drawer {
+  max-width: 920px;
+  max-height: calc(100vh - 40px);
+  display: flex; flex-direction: column;
+}
+.modal.drawer .drawer-body { overflow: auto; flex: 1; min-height: 0; }
+.diff-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.diff-value.null { color: var(--muted); font-style: italic; }
+.diff-changed { background: var(--danger-bg); }
+.diff-kind { white-space: nowrap; }
+.level-note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
 .actions-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
 .section { margin: 26px 0; }
 .section h2 { font-size: 15px; margin: 0 0 10px; }

@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -22,6 +25,10 @@ var validateCmd = &cobra.Command{
 Levels:
   L1  row counts per table
   L2  row counts plus a fingerprint of every row (default)
+  L3  L2, then a row diff of each table that fails, listing the rows missing
+      in the target, the rows only in the target, and the rows whose values
+      differ. Needs a primary key of a type it can pair rows by; other tables
+      keep their L2 result. --sample checks only part of a failing table.
 
 Only tables that completed in the migration are validated. The command waits
 for the result and exits non-zero if any table fails, so it can gate CI.
@@ -29,15 +36,25 @@ for the result and exits non-zero if any table fails, so it can gate CI.
 Examples:
   xferdb validate
   xferdb validate --level L1
+  xferdb validate --level L3 --sample 10
   xferdb validate --migration 3f2a... --tables orders,customers`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectFlag, _ := cmd.Flags().GetString("project")
 		migrationID, _ := cmd.Flags().GetString("migration")
 		level, _ := cmd.Flags().GetString("level")
 		tablesFlag, _ := cmd.Flags().GetString("tables")
+		sample, _ := cmd.Flags().GetInt("sample")
 
 		if err := validate.CheckLevel(level); err != nil {
 			return err
+		}
+		if cmd.Flags().Changed("sample") {
+			if err := validate.CheckSample(sample); err != nil {
+				return err
+			}
+			if level != validate.LevelL3 {
+				return fmt.Errorf("--sample applies only to --level L3")
+			}
 		}
 		var tables []string
 		for _, t := range strings.Split(tablesFlag, ",") {
@@ -67,6 +84,9 @@ Examples:
 		if len(tables) > 0 {
 			req["tables"] = tables
 		}
+		if cmd.Flags().Changed("sample") {
+			req["sample"] = sample
+		}
 		body, _ := json.Marshal(req)
 		resp, err := http.Post(ServerAddr+"/api/v1/migrations/"+migrationID+"/validations",
 			"application/json", bytes.NewReader(body))
@@ -92,7 +112,8 @@ func init() {
 	RootCmd.AddCommand(validateCmd)
 	validateCmd.Flags().StringP("project", "p", "", "Project name (overrides current context)")
 	validateCmd.Flags().String("migration", "", "Migration ID to validate (default: the project's latest migration)")
-	validateCmd.Flags().String("level", "", "L1 (row counts) or L2 (compare every row); default: the project setting, else L2")
+	validateCmd.Flags().String("level", "", "L1 (row counts), L2 (compare every row) or L3 (L2, then list the differing rows of a failing table); default: the project setting, else L2")
+	validateCmd.Flags().Int("sample", 0, "With --level L3: percentage of a failing table to diff; 0 checks every row")
 	validateCmd.Flags().String("tables", "", "Comma-separated tables to validate (default: every table that completed)")
 }
 
@@ -126,12 +147,17 @@ type validationView struct {
 	Status string `json:"status"`
 	Error  string `json:"error"`
 	Tables []struct {
-		TableName  string `json:"table_name"`
-		Result     string `json:"result"`
-		SourceRows *int64 `json:"source_rows"`
-		TargetRows *int64 `json:"target_rows"`
-		Detail     string `json:"detail"`
-		Stale      bool   `json:"stale"`
+		TableName    string `json:"table_name"`
+		Result       string `json:"result"`
+		SourceRows   *int64 `json:"source_rows"`
+		TargetRows   *int64 `json:"target_rows"`
+		Detail       string `json:"detail"`
+		Stale        bool   `json:"stale"`
+		LevelRun     string `json:"level_run"`
+		LevelNote    string `json:"level_note"`
+		DiffMissing  int64  `json:"diff_missing"`
+		DiffExtra    int64  `json:"diff_extra"`
+		DiffMismatch int64  `json:"diff_mismatch"`
 	} `json:"tables"`
 }
 
@@ -182,6 +208,16 @@ func followValidation(id string) error {
 			fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n", t.TableName, result, optCount(t.SourceRows), optCount(t.TargetRows), t.Detail)
 		}
 		w.Flush()
+		for _, t := range v.Tables {
+			if t.LevelNote != "" && t.Result != "skipped" {
+				fmt.Printf("  note: %s: %s\n", t.TableName, t.LevelNote)
+			}
+		}
+		for _, t := range v.Tables {
+			if t.DiffMissing+t.DiffExtra+t.DiffMismatch > 0 {
+				printDiffExamples(v.ID, t.TableName)
+			}
+		}
 	}
 
 	switch {
@@ -193,6 +229,68 @@ func followValidation(id string) error {
 		return fmt.Errorf("validation failed: %d table(s) differ between source and target", failed)
 	}
 	return nil
+}
+
+// diffExamplesShown is how many of a table's recorded diff examples the CLI
+// prints; the rest are in the API and the web UI.
+const diffExamplesShown = 5
+
+type diffExample struct {
+	Kind    string             `json:"kind"`
+	Key     map[string]*string `json:"key"`
+	Columns []string           `json:"columns"`
+	Source  map[string]*string `json:"source"`
+	Target  map[string]*string `json:"target"`
+}
+
+// printDiffExamples prints the first few rows an L3 diff found for table.
+func printDiffExamples(validationID, table string) {
+	resp, err := http.Get(ServerAddr + "/api/v1/validations/" + validationID + "/tables/" + url.PathEscape(table) + "/diffs")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	var diffs []diffExample
+	if json.NewDecoder(resp.Body).Decode(&diffs) != nil || len(diffs) == 0 {
+		return
+	}
+	fmt.Printf("\n  %s: differing rows (first %d of %d recorded)\n", table, min(diffExamplesShown, len(diffs)), len(diffs))
+	for _, d := range diffs[:min(diffExamplesShown, len(diffs))] {
+		key := showValues(d.Key)
+		switch d.Kind {
+		case "missing_in_target":
+			fmt.Printf("    missing in target   %s\n", key)
+		case "extra_in_target":
+			fmt.Printf("    only in target      %s\n", key)
+		default:
+			var cols []string
+			for _, c := range d.Columns {
+				cols = append(cols, fmt.Sprintf("%s: %s -> %s", c, showValue(d.Source[c]), showValue(d.Target[c])))
+			}
+			fmt.Printf("    values differ       %s  %s\n", key, strings.Join(cols, ", "))
+		}
+	}
+}
+
+// showValues renders a key as col=value pairs in column order.
+func showValues(m map[string]*string) string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	parts := make([]string, len(names))
+	for i, k := range names {
+		parts[i] = k + "=" + showValue(m[k])
+	}
+	return strings.Join(parts, " ")
+}
+
+func showValue(v *string) string {
+	if v == nil {
+		return "NULL"
+	}
+	return strconv.Quote(*v)
 }
 
 func optCount(n *int64) string {

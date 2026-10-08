@@ -39,6 +39,11 @@ func migrated(t *testing.T) (*adapters.Project, *sql.DB) {
 		// No primary key, with a duplicated row: compared as a multiset.
 		`CREATE TABLE notes (body TEXT, n INTEGER)`,
 		`INSERT INTO notes VALUES ('same', 1), ('same', 1), ('other', 2)`,
+		// Keyed by text, and by a composite key: L3 pairs these by lookup.
+		`CREATE TABLE tags (code TEXT PRIMARY KEY, label TEXT)`,
+		`INSERT INTO tags VALUES ('a', 'Alpha'), ('b', 'Beta'), ('c', 'Gamma')`,
+		`CREATE TABLE pairs (a INTEGER, b TEXT, v REAL, PRIMARY KEY (a, b))`,
+		`INSERT INTO pairs VALUES (1, 'x', 0.5), (1, 'y', 1.5), (2, 'x', 2.5)`,
 	} {
 		if _, err := src.Exec(stmt); err != nil {
 			t.Fatalf("seed source: %v\n%s", err, stmt)
@@ -77,11 +82,13 @@ func migrated(t *testing.T) (*adapters.Project, *sql.DB) {
 	return p, tgt
 }
 
+var allTables = []string{"items", "notes", "tags", "pairs"}
+
 func runValidation(t *testing.T, p *adapters.Project, level string) map[string]state.ValidationTable {
 	t.Helper()
 	got := map[string]state.ValidationTable{}
 	err := Run(context.Background(), Request{
-		Project: p, Tables: []string{"items", "notes"}, Level: level, BatchSize: 2,
+		Project: p, Tables: allTables, Level: level, BatchSize: 2,
 	}, func(r state.ValidationTable) { got[r.TableName] = r })
 	if err != nil {
 		t.Fatalf("validate: %v", err)
@@ -91,7 +98,7 @@ func runValidation(t *testing.T, p *adapters.Project, level string) map[string]s
 
 func TestValidateSQLitePassesAfterMigration(t *testing.T) {
 	p, _ := migrated(t)
-	for _, level := range []string{LevelL1, LevelL2} {
+	for _, level := range []string{LevelL1, LevelL2, LevelL3} {
 		for table, r := range runValidation(t, p, level) {
 			if r.Result != state.ValidationPass {
 				t.Errorf("%s %s: result %s (%s), want pass", level, table, r.Result, r.Detail)
@@ -151,12 +158,12 @@ func TestValidateMissingTargetTable(t *testing.T) {
 }
 
 func TestCheckLevelAndMode(t *testing.T) {
-	for _, ok := range []string{"", LevelL1, LevelL2} {
+	for _, ok := range []string{"", LevelL1, LevelL2, LevelL3} {
 		if err := CheckLevel(ok); err != nil {
 			t.Errorf("CheckLevel(%q): %v", ok, err)
 		}
 	}
-	for _, bad := range []string{LevelL3, "l2", "full"} {
+	for _, bad := range []string{"L4", "l2", "full"} {
 		if err := CheckLevel(bad); err == nil {
 			t.Errorf("CheckLevel(%q) accepted", bad)
 		}

@@ -183,10 +183,77 @@ func TestSkipValidationPerRun(t *testing.T) {
 func TestValidationRejectsUnavailableOptions(t *testing.T) {
 	srv, projectID := newSQLiteProject(t)
 	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation": "per_table"}, http.StatusBadRequest, nil)
-	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation_level": "L3"}, http.StatusBadRequest, nil)
+	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation_level": "L4"}, http.StatusBadRequest, nil)
+	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation_sample": 101}, http.StatusBadRequest, nil)
 
 	migID, _ := startMigration(t, srv, projectID, map[string]any{"validation": "off"})
-	post(t, srv.URL+"/api/v1/migrations/"+migID+"/validations", map[string]any{"level": "L3"}, http.StatusBadRequest, nil)
+	url := srv.URL + "/api/v1/migrations/" + migID + "/validations"
+	post(t, url, map[string]any{"level": "L4"}, http.StatusBadRequest, nil)
+	post(t, url, map[string]any{"level": "L3", "sample": -1}, http.StatusBadRequest, nil)
+	post(t, url, map[string]any{"level": "L2", "sample": 10}, http.StatusBadRequest, nil)
+}
+
+func TestL3ValidationRecordsDiffs(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	migID, _ := startMigration(t, srv, projectID, map[string]any{"validation": "off"})
+
+	var p struct {
+		TargetConfig struct {
+			DSN string `json:"dsn"`
+		} `json:"target_config"`
+	}
+	get(t, srv.URL+"/api/v1/projects/"+projectID, &p)
+	tgt, err := sql.Open("sqlite3", p.TargetConfig.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tgt.Close()
+	if _, err := tgt.Exec(`UPDATE items SET name = 'changed' WHERE id = 2`); err != nil {
+		t.Fatal(err)
+	}
+
+	var started struct {
+		ID      string `json:"id"`
+		Level   string `json:"level"`
+		Options struct {
+			Sample int `json:"sample"`
+		} `json:"options"`
+	}
+	post(t, srv.URL+"/api/v1/migrations/"+migID+"/validations", map[string]any{"level": "L3", "sample": 100}, http.StatusCreated, &started)
+	if started.Level != "L3" || started.Options.Sample != 0 {
+		t.Fatalf("started at %s with sample %d, want L3 with sample 0 (100%% is every row)", started.Level, started.Options.Sample)
+	}
+	awaitValidation(t, srv, started.ID)
+
+	var v struct {
+		Tables []struct {
+			TableName    string `json:"table_name"`
+			Result       string `json:"result"`
+			LevelRun     string `json:"level_run"`
+			DiffMismatch int64  `json:"diff_mismatch"`
+		} `json:"tables"`
+	}
+	get(t, srv.URL+"/api/v1/validations/"+started.ID, &v)
+	if len(v.Tables) != 1 || v.Tables[0].Result != "fail" || v.Tables[0].LevelRun != "L3" || v.Tables[0].DiffMismatch != 1 {
+		t.Fatalf("tables = %+v, want items failing at L3 with 1 mismatch", v.Tables)
+	}
+
+	var diffs []struct {
+		Kind    string             `json:"kind"`
+		Key     map[string]*string `json:"key"`
+		Columns []string           `json:"columns"`
+		Source  map[string]*string `json:"source"`
+		Target  map[string]*string `json:"target"`
+	}
+	get(t, srv.URL+"/api/v1/validations/"+started.ID+"/tables/items/diffs", &diffs)
+	if len(diffs) != 1 {
+		t.Fatalf("diffs = %+v, want one", diffs)
+	}
+	d := diffs[0]
+	if d.Kind != "value_mismatch" || *d.Key["id"] != "2" || len(d.Columns) != 1 || d.Columns[0] != "name" ||
+		*d.Source["name"] != "b" || *d.Target["name"] != "changed" {
+		t.Errorf("diff = %+v", d)
+	}
 }
 
 func TestValidationMarksStaleAfterRemigration(t *testing.T) {
