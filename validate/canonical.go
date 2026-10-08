@@ -135,7 +135,7 @@ func canonicalize(v interface{}, c column) string {
 	case kindFloat:
 		return canonFloat(v, 15)
 	case kindFloat4:
-		return canonFloat(v, 7)
+		return canonFloat4(v)
 	case kindTimestamp:
 		return canonTimestamp(v, c.frac)
 	case kindDate:
@@ -273,21 +273,40 @@ func trimDecimal(s string) string {
 // canonFloat rounds to sig significant digits before hashing: re-encoding a
 // float through another database's text or binary format can move the last
 // bits, and a single-precision column only holds about 7 digits at all.
-func canonFloat(v interface{}, sig int) string {
-	var f float64
+// canonFloat4 renders a single-precision value at 6 significant digits, the
+// most MySQL shows for FLOAT over its text protocol (3.1415927 reads back as
+// 3.14159, #131). The value is first snapped to single precision, so a source
+// that hands over more digits (a Postgres real as text, a float64) rounds
+// from the same stored value MySQL rounded from.
+func canonFloat4(v interface{}) string {
+	f, ok := parseFloat(v)
+	if !ok {
+		return asString(v)
+	}
+	if f == 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(float64(float32(f)), 'g', 6, 64)
+}
+
+// parseFloat reads a driver value as a float64.
+func parseFloat(v interface{}) (float64, bool) {
 	switch x := v.(type) {
 	case float64:
-		f = x
+		return x, true
 	case float32:
-		f = float64(x)
+		return float64(x), true
 	case int64:
-		f = float64(x)
-	default:
-		p, err := strconv.ParseFloat(strings.TrimSpace(asString(v)), 64)
-		if err != nil {
-			return asString(v)
-		}
-		f = p
+		return float64(x), true
+	}
+	p, err := strconv.ParseFloat(strings.TrimSpace(asString(v)), 64)
+	return p, err == nil
+}
+
+func canonFloat(v interface{}, sig int) string {
+	f, ok := parseFloat(v)
+	if !ok {
+		return asString(v)
 	}
 	if f == 0 {
 		return "0" // folds -0 into 0

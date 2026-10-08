@@ -78,6 +78,9 @@ func TestCanonicalizeMatchesAcrossDrivers(t *testing.T) {
 		{"decimal negative zero", column{kind: kindDecimal}, []interface{}{"-0.00", "0", int64(0)}},
 		{"double", column{kind: kindFloat}, []interface{}{0.1, "0.1", []byte("0.1"), 0.1 + 1e-17}},
 		{"real", column{kind: kindFloat4}, []interface{}{float64(float32(0.1)), "0.1", float32(0.1)}},
+		// MySQL's text protocol shows FLOAT at 6 significant digits (#131).
+		{"real vs mysql float", column{kind: kindFloat4}, []interface{}{"3.1415927", float32(3.1415927), float64(float32(3.1415927)), "3.14159", []byte("3.14159")}},
+		{"real large", column{kind: kindFloat4}, []interface{}{"1.6777216e+07", float32(16777216), int64(16777216), "1.67772e+07"}},
 		{"timestamp", column{kind: kindTimestamp, frac: 6}, []interface{}{
 			ts, ts.In(plus2), "2024-03-01 10:30:00.123456+00:00", "2024-03-01T12:30:00.123456+02:00",
 			"2024-03-01 10:30:00.123456789",
