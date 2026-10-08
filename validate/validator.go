@@ -150,7 +150,7 @@ func Run(ctx context.Context, req Request, report func(state.ValidationTable)) e
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		res := validateTable(ctx, src, tgt, table, level, batchSize, req.Sample, req.Plan, isMongo)
+		res := validateTable(ctx, src, tgt, table, level, batchSize, req.Sample, req.Plan, isMongo, req.Project.TargetConfig.Type)
 		if err := ctx.Err(); err != nil {
 			// A read cut short by cancellation is not a verdict on the table.
 			return err
@@ -160,7 +160,7 @@ func Run(ctx context.Context, req Request, report func(state.ValidationTable)) e
 	return nil
 }
 
-func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool) state.ValidationTable {
+func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string) state.ValidationTable {
 	// LevelRun starts at what L1/L2 reach; L3 raises it only if it runs.
 	runLevel := level
 	if level == LevelL3 {
@@ -173,7 +173,15 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		res.Detail = fmt.Sprintf("read source schema: %v", err)
 		return res
 	}
+	// The source's own types, before the plan's overrides replace them: a
+	// narrowing override is converted by the target as it stores each value.
+	// (A MongoDB source converts values itself, in ReadBatch.)
+	var srcTypes map[string]string
 	if !isMongo && len(plan) > 0 {
+		srcTypes = make(map[string]string, len(srcSchema.Columns))
+		for _, c := range srcSchema.Columns {
+			srcTypes[c.Name] = c.Type
+		}
 		state.ApplyPlanOverrides(srcSchema, plan)
 	}
 	tgtSchema, err := tgt.GetSchema(ctx, table)
@@ -186,6 +194,15 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 	}
 
 	cols, problems := align(srcSchema, tgtSchema)
+	if srcTypes != nil {
+		planned := make(map[string]string, len(srcSchema.Columns))
+		for _, c := range srcSchema.Columns {
+			planned[c.Name] = c.Type
+		}
+		for i := range cols {
+			cols[i].lossy = lossyRule(srcTypes[cols[i].name], planned[cols[i].name], targetType)
+		}
+	}
 
 	// L1: row counts. Counted even when the columns disagree, since the
 	// count is still useful when diagnosing the failure.
@@ -220,9 +237,12 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 	}
 
 	// L2: fingerprint every row on both sides.
+	// The source side hashes each value as the plan meant it to be stored,
+	// and notes the rows a lossy override changed.
 	var srcFP, tgtFP fingerprint
+	planned := newLossyLog(srcSchema, cols)
 	if err := scan(ctx, src, srcSchema, batchSize, isMongo, func(rec map[string]interface{}) {
-		srcFP.add(rec, cols, false)
+		planned.add(rec, srcFP.add(rec, cols, false))
 	}); err != nil {
 		res.Detail = fmt.Sprintf("read source rows: %v", err)
 		return res
@@ -243,6 +263,14 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		res.Detail = fmt.Sprintf("read %d source rows and %d target rows although both counted %d; was a side being written to?", srcFP.rows, tgtFP.rows, srcRows)
 	case srcFP.sum != tgtFP.sum:
 		res.Detail = "row counts match but row contents differ; L2 cannot say which rows"
+	case planned.rows > 0:
+		res.Result = state.ValidationExpectedLossy
+		res.LossyRows = planned.rows
+		res.Detail = planned.detail()
+		res.Diffs = planned.examples
+		if level == LevelL3 {
+			res.LevelNote = "matched L2 once the plan's conversions were applied, so no row diff was needed"
+		}
 	default:
 		res.Result = state.ValidationPass
 		if level == LevelL3 {
@@ -296,6 +324,7 @@ func rowDiff(ctx context.Context, src, tgt adapters.SourceAdapter, srcSchema, tg
 	res.LevelNote = note
 	res.RowsChecked = d.checked
 	res.DiffMissing, res.DiffExtra, res.DiffMismatch = d.missing, d.extra, d.mismatched
+	res.LossyRows = d.lossy
 	res.Diffs = d.diffs()
 	if d.sample != 0 {
 		res.Sample = d.sample
@@ -308,7 +337,11 @@ func rowDiff(ctx context.Context, src, tgt adapters.SourceAdapter, srcSchema, tg
 		}
 		res.Result = state.ValidationPass
 		res.Detail = ""
-		res.LevelNote = joinNotes("the row diff found every row matching, so the table changed after the earlier check failed", note)
+		if d.lossy > 0 {
+			res.Result = state.ValidationExpectedLossy
+			res.Detail = fmt.Sprintf("%d row(s) changed by the plan's type overrides, as expected", d.lossy)
+		}
+		res.LevelNote = joinNotes("the row diff found no real difference, so the table changed after the earlier check failed", note)
 		return
 	}
 	var parts []string
@@ -320,6 +353,9 @@ func rowDiff(ctx context.Context, src, tgt adapters.SourceAdapter, srcSchema, tg
 	}
 	if d.mismatched > 0 {
 		parts = append(parts, fmt.Sprintf("%d row(s) with different values", d.mismatched))
+	}
+	if d.lossy > 0 {
+		parts = append(parts, fmt.Sprintf("%d more changed by the plan's type overrides, as expected", d.lossy))
 	}
 	res.Detail = strings.Join(parts, ", ")
 	if d.sample != 0 {

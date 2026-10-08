@@ -117,6 +117,9 @@ type column struct {
 	tgtKey string // the same column's name in target rows
 	kind   kind
 	frac   int
+	// lossy is the conversion the target applies because a plan override
+	// narrowed this column (lossy.go); nil when there is none.
+	lossy convertFn
 }
 
 // canonicalize renders v as a byte-stable string so that values meaning the
@@ -329,7 +332,9 @@ func canonTimestamp(v interface{}, frac int) string {
 	for i := frac; i < 9; i++ {
 		unit *= 10
 	}
-	return t.UTC().Truncate(unit).Format(time.RFC3339Nano)
+	// PostgreSQL and MySQL both round, not truncate, when a column keeps
+	// fewer fractional digits (10:30:45.5 in TIMESTAMP(0) is 10:30:46).
+	return t.UTC().Round(unit).Format(time.RFC3339Nano)
 }
 
 func canonDate(v interface{}) string {

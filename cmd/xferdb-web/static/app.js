@@ -643,6 +643,9 @@ function validationBadge(status) {
   if (status.result === 'pass') {
     return { cls: 'ok', text: `validated · ${status.level_run || 'L2'}`, title: 'Source and target match.' };
   }
+  if (status.result === 'expected_lossy') {
+    return { cls: 'warn', text: 'validated · lossy (plan)', title: status.detail || "Matches once the plan's lossy type overrides are applied." };
+  }
   return { cls: 'fail', text: 'validation failed', title: status.detail || 'Source and target differ.' };
 }
 
@@ -716,7 +719,8 @@ function readValidationOptions(prefix) {
 function validationResultsHTML(v) {
   const tables = v.tables || [];
   const failed = tables.filter((t) => t.result === 'fail').length;
-  const checked = tables.filter((t) => t.result === 'pass' || t.result === 'fail').length;
+  const lossy = tables.filter((t) => t.result === 'expected_lossy').length;
+  const checked = tables.filter((t) => ['pass', 'fail', 'expected_lossy'].includes(t.result)).length;
   let banner = '';
   if (v.status === 'failed') {
     banner = `<div class="banner error"><span>Validation could not finish: ${esc(v.error || 'unknown error')}</span></div>`;
@@ -724,16 +728,21 @@ function validationResultsHTML(v) {
     banner = `<div class="banner info"><span>Validation cancelled.</span></div>`;
   } else if (failed > 0) {
     banner = `<div class="banner error"><span>${failed} of ${checked} table(s) differ between source and target.</span></div>`;
+  } else if (lossy > 0) {
+    banner = `<div class="banner ok"><span>All ${checked} validated table(s) match. In ${lossy} of them, the plan's lossy type overrides changed some values, as expected.</span></div>`;
   } else {
     banner = `<div class="banner ok"><span>All ${checked} validated table(s) match.</span></div>`;
   }
   const badgeFor = (t) => {
-    const map = { pass: ['ok', 'pass'], fail: ['fail', 'FAIL'], skipped: ['cancelled', 'skipped'] };
+    const map = {
+      pass: ['ok', 'pass'], fail: ['fail', 'FAIL'], skipped: ['cancelled', 'skipped'],
+      expected_lossy: ['warn', 'lossy (plan)'],
+    };
     const [cls, text] = map[t.result] || ['pending', t.result];
     return `<span class="badge ${cls}">${esc(text)}${t.stale ? ' (stale)' : ''}</span>`;
   };
   const count = (n) => (n === undefined || n === null ? '—' : fmtInt(n));
-  const hasDiffs = (t) => (t.diff_missing || 0) + (t.diff_extra || 0) + (t.diff_mismatch || 0) > 0;
+  const hasDiffs = (t) => (t.diff_missing || 0) + (t.diff_extra || 0) + (t.diff_mismatch || 0) + (t.lossy_rows || 0) > 0;
   return `
     ${banner}
     <div style="overflow-x:auto;margin-top:10px;">
@@ -769,6 +778,7 @@ const DIFF_KINDS = {
   missing_in_target: { label: 'Missing in target', cls: 'fail' },
   extra_in_target: { label: 'Only in target', cls: 'warn' },
   value_mismatch: { label: 'Values differ', cls: 'fail' },
+  lossy_by_plan: { label: 'Changed by plan', cls: 'warn' },
 };
 
 function diffValueHTML(v) {
@@ -787,9 +797,10 @@ function diffKeyHTML(key) {
 function diffRowHTML(d) {
   const kind = DIFF_KINDS[d.kind] || { label: d.kind, cls: 'pending' };
   let body;
-  if (d.kind === 'value_mismatch') {
+  if (d.kind === 'value_mismatch' || d.kind === 'lossy_by_plan') {
+    const rowCls = d.kind === 'value_mismatch' ? 'diff-changed' : 'diff-planned';
     body = `<table class="stats-history-table"><thead><tr><th>Column</th><th>Source</th><th>Target</th></tr></thead><tbody>
-      ${(d.columns || []).map((c) => `<tr class="diff-changed"><td class="mono">${esc(c)}</td><td>${diffValueHTML(d.source?.[c])}</td><td>${diffValueHTML(d.target?.[c])}</td></tr>`).join('')}
+      ${(d.columns || []).map((c) => `<tr class="${rowCls}"><td class="mono">${esc(c)}</td><td>${diffValueHTML(d.source?.[c])}</td><td>${diffValueHTML(d.target?.[c])}</td></tr>`).join('')}
     </tbody></table>`;
   } else {
     const row = d.kind === 'missing_in_target' ? d.source : d.target;
@@ -812,6 +823,7 @@ async function openDiffDrawer(vid, t) {
     t.diff_missing ? `${fmtInt(t.diff_missing)} missing in target` : '',
     t.diff_extra ? `${fmtInt(t.diff_extra)} only in target` : '',
     t.diff_mismatch ? `${fmtInt(t.diff_mismatch)} with different values` : '',
+    t.lossy_rows ? `${fmtInt(t.lossy_rows)} changed by the plan's type overrides, as expected` : '',
   ].filter(Boolean).join(' · ');
   overlay.innerHTML = `
     <div class="modal drawer" role="dialog" aria-modal="true" aria-label="Differing rows" id="diffDrawer">
@@ -830,7 +842,7 @@ async function openDiffDrawer(vid, t) {
   const body = overlay.querySelector('.drawer-body');
   try {
     const diffs = await api.getValidationDiffs(vid, t.table_name);
-    const total = (t.diff_missing || 0) + (t.diff_extra || 0) + (t.diff_mismatch || 0);
+    const total = (t.diff_missing || 0) + (t.diff_extra || 0) + (t.diff_mismatch || 0) + (t.lossy_rows || 0);
     body.innerHTML = `
       ${diffs.length < total ? `<div class="hint">Showing the first ${fmtInt(diffs.length)} of ${fmtInt(total)}.</div>` : ''}
       <table class="stats-history-table" id="diffTable">

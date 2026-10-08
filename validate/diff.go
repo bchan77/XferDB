@@ -62,6 +62,11 @@ func diffKey(schema *adapters.TableSchema, cols []column) ([]column, string) {
 		if !ok {
 			return nil, fmt.Sprintf("primary key column %s is not in the target", sc.Name)
 		}
+		if c.lossy != nil {
+			// Converted keys can collide (1.4 and 1.2 both become 1), so
+			// rows cannot be paired by them.
+			return nil, fmt.Sprintf("primary key column %s is narrowed by a type override, so its values change in the target", sc.Name)
+		}
 		switch c.kind {
 		case kindInt, kindText, kindChar, kindDecimal, kindUUID, kindDate:
 		default:
@@ -87,6 +92,7 @@ type differ struct {
 
 	checked                    int64
 	missing, extra, mismatched int64
+	lossy                      int64 // rows that differ only by the plan's conversions
 	examples                   map[string][]state.ValidationDiff
 }
 
@@ -124,15 +130,25 @@ func (d *differ) compare(srcRec, tgtRec map[string]interface{}) {
 		d.record(state.DiffMissingInTarget, srcRec, nil, nil)
 		return
 	}
-	var differing []string
+	var differing, planned []string
 	for _, c := range d.cols {
-		if canonicalize(srcRec[c.name], c) != canonicalize(tgtRec[c.tgtKey], c) {
-			differing = append(differing, c.name)
+		t := canonicalize(tgtRec[c.tgtKey], c)
+		if canonicalize(srcRec[c.name], c) == t {
+			continue
 		}
+		if v, lossy := intended(srcRec[c.name], c); lossy && v == t {
+			planned = append(planned, c.name)
+			continue
+		}
+		differing = append(differing, c.name)
 	}
-	if len(differing) > 0 {
+	switch {
+	case len(differing) > 0:
 		d.mismatched++
 		d.record(state.DiffValueMismatch, srcRec, tgtRec, differing)
+	case len(planned) > 0:
+		d.lossy++
+		d.record(state.DiffLossyByPlan, srcRec, tgtRec, planned)
 	}
 }
 
@@ -160,32 +176,41 @@ func (d *differ) record(kind string, srcRec, tgtRec map[string]interface{}, colu
 	d.examples[kind] = append(d.examples[kind], ex)
 }
 
-// shown renders cols of rec for display: canonical values, so the example
-// shows exactly what was compared, nil for NULL, long values cut short.
+// shown renders cols of rec for display (see shownValues).
 func (d *differ) shown(rec map[string]interface{}, target bool, cols []column) map[string]*string {
+	return shownValues(rec, cols, target)
+}
+
+// shownValues renders cols of rec for display: canonical values, so an
+// example shows exactly what was compared, nil for NULL, long values cut
+// short. target says which side rec came from.
+func shownValues(rec map[string]interface{}, cols []column, target bool) map[string]*string {
 	out := make(map[string]*string, len(cols))
 	for _, c := range cols {
 		k := c.name
 		if target {
 			k = c.tgtKey
 		}
-		v := canonicalize(rec[k], c)
-		if v == nullToken {
-			out[c.name] = nil
-			continue
-		}
-		if r := []rune(v); len(r) > maxShownValue {
-			v = string(r[:maxShownValue]) + "…"
-		}
-		out[c.name] = &v
+		out[c.name] = shownValue(canonicalize(rec[k], c))
 	}
 	return out
+}
+
+// shownValue is one canonical value for display.
+func shownValue(v string) *string {
+	if v == nullToken {
+		return nil
+	}
+	if r := []rune(v); len(r) > maxShownValue {
+		v = string(r[:maxShownValue]) + "…"
+	}
+	return &v
 }
 
 // diffs merges the examples, taking from each kind in turn so one kind
 // cannot crowd out the others.
 func (d *differ) diffs() []state.ValidationDiff {
-	kinds := []string{state.DiffMissingInTarget, state.DiffExtraInTarget, state.DiffValueMismatch}
+	kinds := []string{state.DiffMissingInTarget, state.DiffExtraInTarget, state.DiffValueMismatch, state.DiffLossyByPlan}
 	var out []state.ValidationDiff
 	for i := 0; len(out) < maxExamples; i++ {
 		took := false

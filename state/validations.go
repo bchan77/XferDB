@@ -16,6 +16,10 @@ const (
 	ValidationPass    = "pass"
 	ValidationFail    = "fail"
 	ValidationSkipped = "skipped"
+	// ValidationExpectedLossy: the table matches once the plan's narrowing
+	// type overrides are applied to the source, and some rows were changed
+	// by them. Not a failure; the user chose those conversions.
+	ValidationExpectedLossy = "expected_lossy"
 )
 
 // ValidationOptions are the caller's choices for one validation run.
@@ -62,6 +66,7 @@ type ValidationTable struct {
 	DiffMissing  int64            `db:"diff_missing" json:"diff_missing"`
 	DiffExtra    int64            `db:"diff_extra" json:"diff_extra"`
 	DiffMismatch int64            `db:"diff_mismatch" json:"diff_mismatch"`
+	LossyRows    int64            `db:"lossy_rows" json:"lossy_rows"` // rows a plan conversion changed, as expected
 	Sample       int              `db:"sample" json:"sample,omitempty"`
 	Diffs        []ValidationDiff `db:"-" json:"-"`
 }
@@ -71,6 +76,9 @@ const (
 	DiffMissingInTarget = "missing_in_target"
 	DiffExtraInTarget   = "extra_in_target"
 	DiffValueMismatch   = "value_mismatch"
+	// DiffLossyByPlan: a row whose values the plan's type overrides changed,
+	// matching what the target holds. Shown for information, not a defect.
+	DiffLossyByPlan = "lossy_by_plan"
 )
 
 // ValidationDiff is one example row an L3 diff found. Key, Source and Target
@@ -211,8 +219,8 @@ func (m *MetaDB) UpsertValidationTable(ctx context.Context, t ValidationTable) e
 		INSERT INTO validation_tables
 			(validation_id, table_name, result, source_rows, target_rows,
 			 source_hash, target_hash, rows_checked, level_run, level_note, detail,
-			 diff_missing, diff_extra, diff_mismatch, sample)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 diff_missing, diff_extra, diff_mismatch, sample, lossy_rows)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (validation_id, table_name) DO UPDATE SET
 			result       = excluded.result,
 			source_rows  = excluded.source_rows,
@@ -226,10 +234,11 @@ func (m *MetaDB) UpsertValidationTable(ctx context.Context, t ValidationTable) e
 			diff_missing  = excluded.diff_missing,
 			diff_extra    = excluded.diff_extra,
 			diff_mismatch = excluded.diff_mismatch,
-			sample        = excluded.sample`,
+			sample        = excluded.sample,
+			lossy_rows    = excluded.lossy_rows`,
 		t.ValidationID, t.TableName, t.Result, t.SourceRows, t.TargetRows,
 		t.SourceHash, t.TargetHash, t.RowsChecked, t.LevelRun, t.LevelNote, t.Detail,
-		t.DiffMissing, t.DiffExtra, t.DiffMismatch, t.Sample,
+		t.DiffMissing, t.DiffExtra, t.DiffMismatch, t.Sample, t.LossyRows,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert validation table %s: %w", t.TableName, err)
@@ -318,9 +327,10 @@ type TableValidation struct {
 	CheckedAt    time.Time `db:"created_at" json:"checked_at"`
 }
 
-// LatestTableValidations returns, per table, the most recent pass or fail
-// recorded by any validation of the project's migrations. Skipped entries are
-// ignored: a table a run did not check keeps its earlier result.
+// LatestTableValidations returns, per table, the most recent pass, fail or
+// expected_lossy recorded by any validation of the project's migrations.
+// Skipped entries are ignored: a table a run did not check keeps its earlier
+// result.
 func (m *MetaDB) LatestTableValidations(ctx context.Context, projectID string) ([]TableValidation, error) {
 	var rows []TableValidation
 	if err := m.db.SelectContext(ctx, &rows, `
@@ -329,9 +339,9 @@ func (m *MetaDB) LatestTableValidations(ctx context.Context, projectID string) (
 		FROM validation_tables vt
 		JOIN validations v ON v.id = vt.validation_id
 		JOIN migrations  m ON m.id = v.migration_id
-		WHERE m.project_id = ? AND vt.result IN (?, ?)
+		WHERE m.project_id = ? AND vt.result IN (?, ?, ?)
 		ORDER BY v.created_at DESC`,
-		projectID, ValidationPass, ValidationFail); err != nil {
+		projectID, ValidationPass, ValidationFail, ValidationExpectedLossy); err != nil {
 		return nil, fmt.Errorf("latest table validations: %w", err)
 	}
 	seen := make(map[string]bool, len(rows))
