@@ -28,6 +28,9 @@ type ValidationOptions struct {
 	// Sample is the percentage of each table an L3 row diff checks; 0
 	// means every row.
 	Sample int `json:"sample,omitempty"`
+	// Mode is "per_table" for a run that validated each table as the
+	// migration completed it; empty for one started after the migration.
+	Mode string `json:"mode,omitempty"`
 }
 
 // Validation is one run comparing a migration's source and target. Status

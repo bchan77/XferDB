@@ -147,6 +147,29 @@ func awaitAutoValidation(migrationID string) error {
 	return fmt.Errorf("no validation appeared for migration %s; start one with 'xferdb validate --migration %s'", migrationID, migrationID)
 }
 
+// showPerTableAfterFailure prints the per_table validation of a migration
+// that failed, if any table completed before it did. Its own errors are only
+// printed: the migration's failure is what the command reports.
+func showPerTableAfterFailure(migrationID string) {
+	resp, err := http.Get(ServerAddr + "/api/v1/migrations/" + migrationID + "/validations")
+	if err != nil {
+		return
+	}
+	var vs []struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(resp.Body).Decode(&vs)
+	resp.Body.Close()
+	if len(vs) == 0 {
+		fmt.Println("\nNo table completed, so none was validated.")
+		return
+	}
+	fmt.Println("\nValidation of the tables that completed before the failure:")
+	if err := followValidation(vs[0].ID); err != nil {
+		fmt.Printf("  %v\n", err)
+	}
+}
+
 type validationView struct {
 	ID     string `json:"id"`
 	Level  string `json:"level"`

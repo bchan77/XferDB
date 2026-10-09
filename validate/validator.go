@@ -35,7 +35,7 @@ const (
 // Modes decide when validation runs on its own after a migration.
 const (
 	ModeAfter    = "after"     // once the migration completes (default)
-	ModePerTable = "per_table" // as each table completes (not yet available)
+	ModePerTable = "per_table" // as each table completes, while the rest copy
 	ModeOff      = "off"       // never; tables show as not validated
 )
 
@@ -72,12 +72,10 @@ func CheckSettings(t adapters.TransferConfig) error {
 // CheckMode reports whether mode can be used. Empty means the default.
 func CheckMode(mode string) error {
 	switch mode {
-	case "", ModeAfter, ModeOff:
+	case "", ModeAfter, ModePerTable, ModeOff:
 		return nil
-	case ModePerTable:
-		return fmt.Errorf("validation mode per_table is not available yet; use after or off")
 	}
-	return fmt.Errorf("validation mode %q must be one of: after, off", mode)
+	return fmt.Errorf("validation mode %q must be one of: after, per_table, off", mode)
 }
 
 // Request describes one validation run.
@@ -99,15 +97,46 @@ type Request struct {
 // or when ctx is cancelled; a table that fails validation is a result, not an
 // error.
 func Run(ctx context.Context, req Request, report func(state.ValidationTable)) error {
+	s, err := Open(ctx, req)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	for _, table := range req.Tables {
+		res, err := s.Table(ctx, table)
+		if err != nil {
+			return err
+		}
+		report(res)
+	}
+	return nil
+}
+
+// Session holds open connections to a project's source and target, so many
+// tables can be validated one after another without reconnecting. A Session
+// is not safe for concurrent use; open one per worker.
+type Session struct {
+	src, tgt  adapters.SourceAdapter
+	isMongo   bool
+	level     string
+	batchSize int
+	sample    int
+	plan      []state.SchemaPlanRow
+	tgtType   string
+}
+
+// Open connects to req's source and target. req.Tables is ignored; pass each
+// table to Table.
+func Open(ctx context.Context, req Request) (*Session, error) {
 	level := req.Level
 	if level == "" {
 		level = DefaultLevel
 	}
 	if err := CheckLevel(level); err != nil {
-		return err
+		return nil, err
 	}
 	if err := CheckSample(req.Sample); err != nil {
-		return err
+		return nil, err
 	}
 	batchSize := req.BatchSize
 	if batchSize <= 0 {
@@ -116,19 +145,20 @@ func Run(ctx context.Context, req Request, report func(state.ValidationTable)) e
 
 	src, err := registry.NewSource(req.Project.SourceConfig.Type)
 	if err != nil {
-		return fmt.Errorf("source adapter: %w", err)
+		return nil, fmt.Errorf("source adapter: %w", err)
 	}
 	if err := src.Connect(ctx, req.Project.SourceConfig); err != nil {
-		return fmt.Errorf("connect source: %w", err)
+		return nil, fmt.Errorf("connect source: %w", err)
 	}
-	defer src.Close()
 
 	if mongoSrc, ok := src.(*mongo.Source); ok {
 		if len(req.Plan) == 0 {
-			return fmt.Errorf("no schema plan found for this MongoDB source — run 'xferdb project analyze' first")
+			src.Close()
+			return nil, fmt.Errorf("no schema plan found for this MongoDB source — run 'xferdb project analyze' first")
 		}
 		if err := mongoSrc.SetPlan(req.Plan); err != nil {
-			return fmt.Errorf("set schema plan: %w", err)
+			src.Close()
+			return nil, fmt.Errorf("set schema plan: %w", err)
 		}
 		// An estimate is not a validation.
 		mongoSrc.SetAccurateCounts(true)
@@ -138,26 +168,38 @@ func Run(ctx context.Context, req Request, report func(state.ValidationTable)) e
 	// supported target type also has a source adapter.
 	tgt, err := registry.NewSource(req.Project.TargetConfig.Type)
 	if err != nil {
-		return fmt.Errorf("target reader: %w", err)
+		src.Close()
+		return nil, fmt.Errorf("target reader: %w", err)
 	}
 	if err := tgt.Connect(ctx, req.Project.TargetConfig); err != nil {
-		return fmt.Errorf("connect target: %w", err)
+		src.Close()
+		return nil, fmt.Errorf("connect target: %w", err)
 	}
-	defer tgt.Close()
 
 	_, isMongo := src.(*mongo.Source)
-	for _, table := range req.Tables {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		res := validateTable(ctx, src, tgt, table, level, batchSize, req.Sample, req.Plan, isMongo, req.Project.TargetConfig.Type)
-		if err := ctx.Err(); err != nil {
-			// A read cut short by cancellation is not a verdict on the table.
-			return err
-		}
-		report(res)
+	return &Session{
+		src: src, tgt: tgt, isMongo: isMongo, level: level, batchSize: batchSize,
+		sample: req.Sample, plan: req.Plan, tgtType: req.Project.TargetConfig.Type,
+	}, nil
+}
+
+// Table validates one table. The error is non-nil only when ctx is
+// cancelled: a read cut short that way is not a verdict on the table.
+func (s *Session) Table(ctx context.Context, table string) (state.ValidationTable, error) {
+	if err := ctx.Err(); err != nil {
+		return state.ValidationTable{}, err
 	}
-	return nil
+	res := validateTable(ctx, s.src, s.tgt, table, s.level, s.batchSize, s.sample, s.plan, s.isMongo, s.tgtType)
+	if err := ctx.Err(); err != nil {
+		return state.ValidationTable{}, err
+	}
+	return res, nil
+}
+
+// Close closes both connections.
+func (s *Session) Close() {
+	s.src.Close()
+	s.tgt.Close()
 }
 
 func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string) state.ValidationTable {

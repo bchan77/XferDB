@@ -82,16 +82,9 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 		}
 	}
 
-	// The plan frozen on the migration when there is one; otherwise the
-	// project's current plan, which is what the engine itself reads.
-	plan, err := h.DB.GetMigrationPlan(ctx, migrationID)
+	plan, err := h.migrationPlan(ctx, migrationID, p)
 	if err != nil {
 		return nil, err
-	}
-	if len(plan) == 0 {
-		if plan, err = h.DB.GetPlanForProject(ctx, p.ID); err != nil {
-			return nil, err
-		}
 	}
 
 	h.mu.Lock()
@@ -148,18 +141,8 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 			BatchSize: p.TransferConfig.BatchSize,
 			Sample:    sample,
 		}, func(t state.ValidationTable) {
-			t.ValidationID = v.ID
-			if t.Result == state.ValidationFail {
+			if h.saveTable(writeCtx, v.ID, t, log) {
 				failed++
-				log.Warn("validation.table_failed", "table", t.TableName, "detail", t.Detail)
-			}
-			if err := h.DB.UpsertValidationTable(writeCtx, t); err != nil {
-				log.Error("validation.save_failed", "table", t.TableName, "error", err)
-			}
-			if len(t.Diffs) > 0 {
-				if err := h.DB.SaveValidationDiffs(writeCtx, v.ID, t.TableName, t.Diffs); err != nil {
-					log.Error("validation.save_diffs_failed", "table", t.TableName, "error", err)
-				}
 			}
 		})
 		switch {
@@ -175,6 +158,36 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 		}
 	}()
 	return v, nil
+}
+
+// migrationPlan returns the schema plan frozen on the migration when there is
+// one; otherwise the project's current plan, which is what the engine itself
+// reads.
+func (h *ValidationsHandler) migrationPlan(ctx context.Context, migrationID string, p *adapters.Project) ([]state.SchemaPlanRow, error) {
+	plan, err := h.DB.GetMigrationPlan(ctx, migrationID)
+	if err != nil || len(plan) > 0 {
+		return plan, err
+	}
+	return h.DB.GetPlanForProject(ctx, p.ID)
+}
+
+// saveTable records one table's outcome and its example diffs, and reports
+// whether the table failed.
+func (h *ValidationsHandler) saveTable(ctx context.Context, validationID string, t state.ValidationTable, log *slog.Logger) bool {
+	t.ValidationID = validationID
+	failed := t.Result == state.ValidationFail
+	if failed {
+		log.Warn("validation.table_failed", "table", t.TableName, "detail", t.Detail)
+	}
+	if err := h.DB.UpsertValidationTable(ctx, t); err != nil {
+		log.Error("validation.save_failed", "table", t.TableName, "error", err)
+	}
+	if len(t.Diffs) > 0 {
+		if err := h.DB.SaveValidationDiffs(ctx, validationID, t.TableName, t.Diffs); err != nil {
+			log.Error("validation.save_diffs_failed", "table", t.TableName, "error", err)
+		}
+	}
+	return failed
 }
 
 // StartValidation handles POST /api/v1/migrations/{id}/validations.

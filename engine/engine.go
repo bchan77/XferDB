@@ -26,6 +26,25 @@ type Engine struct {
 	events   chan ProgressEvent
 	pauseCh  chan struct{} // buffered(1): send to signal pause
 	resumeCh chan struct{} // buffered(1): send to signal resume
+
+	// onTableDone, when set, is called with a table's name right after
+	// its completed status is saved. Unlike EventTableDone it is never
+	// dropped, so per-table validation can rely on it.
+	onTableDone func(table string)
+}
+
+// OnTableDone registers fn to be called, from the engine's worker goroutine,
+// each time a table finishes transferring and is recorded as completed. fn
+// must not block. Call before Run.
+func (e *Engine) OnTableDone(fn func(table string)) {
+	e.onTableDone = fn
+}
+
+// tableDone notifies the OnTableDone callback, if any.
+func (e *Engine) tableDone(table string) {
+	if e.onTableDone != nil {
+		e.onTableDone(table)
+	}
 }
 
 // New creates a new Engine. Call Run to start the migration.

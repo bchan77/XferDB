@@ -182,7 +182,7 @@ func TestSkipValidationPerRun(t *testing.T) {
 
 func TestValidationRejectsUnavailableOptions(t *testing.T) {
 	srv, projectID := newSQLiteProject(t)
-	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation": "per_table"}, http.StatusBadRequest, nil)
+	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation": "per-table"}, http.StatusBadRequest, nil)
 	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation_level": "L4"}, http.StatusBadRequest, nil)
 	post(t, srv.URL+"/api/v1/projects/"+projectID+"/migrations", map[string]any{"validation_sample": 101}, http.StatusBadRequest, nil)
 
@@ -400,6 +400,37 @@ func TestUpdateProjectSetsValidationDefaults(t *testing.T) {
 	}
 
 	// Values the server can't run are rejected.
-	body["transfer_config"] = map[string]any{"validation": "per_table"}
+	body["transfer_config"] = map[string]any{"validation": "sometimes"}
 	put(t, projURL, body, http.StatusBadRequest)
 }
+
+func TestPerTableValidation(t *testing.T) {
+	srv, projectID := newSQLiteProject(t)
+	migID, mode := startMigration(t, srv, projectID, map[string]any{"validation": "per_table", "table_workers": 2})
+	if mode != "per_table" {
+		t.Fatalf("effective validation mode %q, want per_table", mode)
+	}
+
+	var vs []validationResult
+	waitFor(t, "per-table validation to appear", func() bool {
+		vs = listValidations(t, srv, migID)
+		return len(vs) > 0
+	})
+	if len(vs) != 1 {
+		t.Fatalf("%d validations, want exactly one per migration", len(vs))
+	}
+	v := awaitValidation(t, srv, vs[0].ID)
+	if v.Status != "completed" || len(v.Tables) != 1 || v.Tables[0].Result != "pass" {
+		t.Fatalf("validation = %+v, want completed with items: pass", v)
+	}
+	var full struct {
+		Options struct {
+			Mode string `json:"mode"`
+		} `json:"options"`
+	}
+	get(t, srv.URL+"/api/v1/validations/"+v.ID, &full)
+	if full.Options.Mode != "per_table" {
+		t.Errorf("options.mode = %q, want per_table", full.Options.Mode)
+	}
+}
+

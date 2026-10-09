@@ -26,10 +26,15 @@ Examples:
   xferdb migrate --skip-validation
   xferdb migrate --validation-level L1
   xferdb migrate --validation-level L3 --validation-sample 10
+  xferdb migrate --validation per_table
 
 A completed migration is validated by default (an L2 comparison of every row);
 the command waits for that validation and exits non-zero if any table fails.
-At L3, a table that fails is also diffed row by row to list which rows differ.`,
+At L3, a table that fails is also diffed row by row to list which rows differ.
+With --validation per_table, each table is validated as soon as it is copied,
+while the others are still copying (as many at once as --table-workers); the
+results are printed once the migration ends. If the migration fails, the
+tables that did complete are still validated.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectFlag, _ := cmd.Flags().GetString("project")
 		preflightOnly, _ := cmd.Flags().GetBool("preflight")
@@ -170,6 +175,11 @@ At L3, a table that fails is also diffed row by row to list which rows differ.`,
 		fmt.Println("Tracking progress (Ctrl+C to detach)...")
 
 		if err := pollStats(migrationID); err != nil {
+			if effectiveValidation == validate.ModePerTable {
+				// The tables that completed before the failure were
+				// validated; show how they came out.
+				showPerTableAfterFailure(migrationID)
+			}
 			return err
 		}
 		if effectiveValidation == validate.ModeOff {
@@ -196,7 +206,7 @@ func init() {
 	migrateCmd.Flags().Bool("accurate-counts", false, "Use accurate row counts instead of estimates (slower for MongoDB but shows correct progress)")
 	migrateCmd.Flags().Bool("async-pipeline", false, "Overlap reading and writing for faster throughput (reads batch N+1 while writing batch N)")
 	migrateCmd.Flags().Bool("history", false, "Show recorded stats history for the latest migration")
-	migrateCmd.Flags().String("validation", validate.DefaultMode, "When to validate the migration: after (once it completes) or off (overrides the project setting)")
+	migrateCmd.Flags().String("validation", validate.DefaultMode, "When to validate the migration: after (once it completes), per_table (each table as soon as it is copied, while the rest copy) or off (overrides the project setting)")
 	migrateCmd.Flags().String("validation-level", validate.DefaultLevel, "Validation check to run: L1 (row counts), L2 (compare every row) or L3 (L2, then list the differing rows of a failing table) (overrides the project setting)")
 	migrateCmd.Flags().Int("validation-sample", 0, "Percentage of a failing table the L3 row diff checks; 0 checks every row (overrides the project setting)")
 	migrateCmd.Flags().Bool("skip-validation", false, "Do not validate this migration (same as --validation off)")
