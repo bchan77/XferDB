@@ -179,6 +179,7 @@ func (e *Engine) transferTableSequential(ctx context.Context, sourceSchema adapt
 		RowsTotal:       total,
 		Timestamp:       done,
 	})
+	e.tableDone(table)
 	return nil
 }
 
@@ -403,6 +404,7 @@ func (e *Engine) transferTablePipelined(ctx context.Context, sourceSchema adapte
 		RowsTotal:       total,
 		Timestamp:       done,
 	})
+	e.tableDone(table)
 	return nil
 }
 
@@ -490,6 +492,7 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 		Kind: EventTableDone, TableName: table,
 		RowsTransferred: written, RowsTotal: total, Timestamp: done,
 	})
+	e.tableDone(table)
 	return nil
 }
 
@@ -567,6 +570,7 @@ func (e *Engine) transferTableParallelOffset(ctx context.Context, schema adapter
 		Kind: EventTableDone, TableName: table,
 		RowsTransferred: written, RowsTotal: total, Timestamp: done,
 	})
+	e.tableDone(table)
 	return nil
 }
 

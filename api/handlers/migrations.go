@@ -220,6 +220,14 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 
 	col.SetSaver(&statsSaverAdapter{db: h.DB})
 	col.Start(ctx)
+
+	// In per_table mode each table is validated as soon as the engine
+	// records it completed, while the rest are still copying.
+	var perTable *perTableRun
+	if h.Validations != nil && validationMode == validate.ModePerTable {
+		perTable = h.Validations.beginPerTable(migrationID, p, validationLevel, p.TransferConfig.ValidationSample, effectiveTableWorkers, migLog)
+		eng.OnTableDone(perTable.tableDone)
+	}
 	go func() {
 		defer func() {
 			cancel()
@@ -229,7 +237,10 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 			h.Mu.Unlock()
 		}()
 		eng.Run(ctx) //nolint:errcheck
-		if h.Validations != nil {
+		switch {
+		case perTable != nil:
+			perTable.finish()
+		case h.Validations != nil:
 			h.Validations.startAfterMigration(migrationID, p, validationMode, validationLevel, p.TransferConfig.ValidationSample, migLog)
 		}
 	}()

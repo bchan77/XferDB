@@ -168,12 +168,12 @@ func TestCheckLevelAndMode(t *testing.T) {
 			t.Errorf("CheckLevel(%q) accepted", bad)
 		}
 	}
-	for _, ok := range []string{"", ModeAfter, ModeOff} {
+	for _, ok := range []string{"", ModeAfter, ModePerTable, ModeOff} {
 		if err := CheckMode(ok); err != nil {
 			t.Errorf("CheckMode(%q): %v", ok, err)
 		}
 	}
-	for _, bad := range []string{ModePerTable, "never"} {
+	for _, bad := range []string{"per-table", "never"} {
 		if err := CheckMode(bad); err == nil {
 			t.Errorf("CheckMode(%q) accepted", bad)
 		}

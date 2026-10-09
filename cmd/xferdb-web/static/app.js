@@ -664,9 +664,10 @@ function validationOptionsHTML(prefix, cfg) {
         <label for="${prefix}-validation">Validation</label>
         <select id="${prefix}-validation">
           <option value="after" ${sel(mode === 'after')}>After migration</option>
+          <option value="per_table" ${sel(mode === 'per_table')}>As each table finishes</option>
           <option value="off" ${sel(mode === 'off')}>Skip</option>
         </select>
-        <div class="hint">Compare source and target once the migration completes</div>
+        <div class="hint">Compare source and target once the migration completes, or each table as soon as it is copied</div>
       </div>
       <div>
         <label for="${prefix}-validation-level">Validation level</label>
@@ -716,13 +717,17 @@ function readValidationOptions(prefix) {
   };
 }
 
-function validationResultsHTML(v) {
+// validationResultsHTML renders a run's per-table results. partial (a
+// per_table run still going) leaves out the overall verdict banner.
+function validationResultsHTML(v, { partial = false } = {}) {
   const tables = v.tables || [];
   const failed = tables.filter((t) => t.result === 'fail').length;
   const lossy = tables.filter((t) => t.result === 'expected_lossy').length;
   const checked = tables.filter((t) => ['pass', 'fail', 'expected_lossy'].includes(t.result)).length;
   let banner = '';
-  if (v.status === 'failed') {
+  if (partial) {
+    banner = '';
+  } else if (v.status === 'failed') {
     banner = `<div class="banner error"><span>Validation could not finish: ${esc(v.error || 'unknown error')}</span></div>`;
   } else if (v.status === 'cancelled') {
     banner = `<div class="banner info"><span>Validation cancelled.</span></div>`;
@@ -932,9 +937,14 @@ function mountValidationCard(container, migId, { waitForAuto = false } = {}) {
 
     if (latest.status === 'pending' || latest.status === 'in_progress') {
       const done = (latest.tables || []).filter((t) => t.result !== 'skipped').length;
+      const perTable = latest.options && latest.options.mode === 'per_table';
       card(`
-        <div class="loading-block"><span class="spinner"></span> Validating (${esc(latest.level)})… ${done} table(s) checked</div>
+        <div class="loading-block"><span class="spinner"></span> ${perTable
+          ? `Validating each table as it finishes (${esc(latest.level)})… ${done} table(s) checked so far`
+          : `Validating (${esc(latest.level)})… ${done} table(s) checked`}</div>
+        ${perTable && done ? validationResultsHTML(latest, { partial: true }) : ''}
         <div class="actions-row"><button class="btn small" id="cancelValidationBtn">Cancel validation</button></div>`);
+      wireDiffButtons(container, latest);
       document.getElementById('cancelValidationBtn').addEventListener('click', async () => {
         try { await api.cancelValidation(latest.id); } catch (err) { /* finished meanwhile; next poll shows it */ }
         poll();
@@ -944,7 +954,7 @@ function mountValidationCard(container, migId, { waitForAuto = false } = {}) {
     }
 
     card(`
-      <div class="hint">Level ${esc(latest.level)} · ${esc(latest.status)} ${latest.completed_at ? '· ' + esc(fmtDate(latest.completed_at)) : ''}</div>
+      <div class="hint">Level ${esc(latest.level)}${latest.options && latest.options.mode === 'per_table' ? ' · each table as it finished' : ''} · ${esc(latest.status)} ${latest.completed_at ? '· ' + esc(fmtDate(latest.completed_at)) : ''}</div>
       ${validationResultsHTML(latest)}
       ${startControlsHTML('Validate again')}`);
     wireDiffButtons(container, latest);
@@ -1140,7 +1150,9 @@ async function renderTablesList(id) {
     }
     syncValidateButton();
     renderRows();
-    if (activeValidation) validationTimer = setTimeout(loadValidationStatus, 3000);
+    // Keep checking while a validation runs, and (slower) while a migration
+    // runs, since a per_table validation starts partway through.
+    if (activeValidation || locked) validationTimer = setTimeout(loadValidationStatus, activeValidation ? 3000 : 5000);
   }
 
   function readAnalyzeOpts() {
@@ -1163,8 +1175,9 @@ async function renderTablesList(id) {
     const wasLocked = locked;
     locked = isLocked;
     syncValidateButton();
-    // A migration just finished: the server may have started validating it.
-    if (wasLocked && !isLocked) loadValidationStatus();
+    // A migration started: a per_table validation may begin mid-run. Or one
+    // just finished: the server may have started validating it.
+    if (wasLocked !== isLocked) loadValidationStatus();
     document.getElementById('lockBanner').innerHTML = locked
       ? `<div class="banner info">Table changes are disabled while a migration is ${esc(status)}.</div>`
       : '';
@@ -2120,11 +2133,23 @@ async function renderMigrationProgress(migId) {
     }
   }
 
+  // A per_table validation starts while the migration is still copying;
+  // show its card as soon as it exists, checking every few ticks.
+  let ticks = 0;
+  async function checkEarlyValidation() {
+    if (stopValidationCard || ++ticks % 3 !== 1) return;
+    try {
+      const vs = await api.listValidations(migId);
+      if (vs && vs.length) showValidation(false);
+    } catch (err) { /* secondary; the card mounts when the migration ends */ }
+  }
+
   async function tick() {
     if (stopped) return;
     try {
       const snap = await api.getStats(migId);
       renderProgress(snap);
+      checkEarlyValidation();
       if (snap.Phase === 'complete' || snap.Phase === 'failed' || snap.Phase === 'cancelled') {
         clearTimer();
         // The server starts the automatic validation right after a
