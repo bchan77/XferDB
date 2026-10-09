@@ -190,6 +190,8 @@ func (m *MetaDB) migrate() error {
 		"diff_extra INTEGER NOT NULL DEFAULT 0",
 		"diff_mismatch INTEGER NOT NULL DEFAULT 0",
 		"sample INTEGER NOT NULL DEFAULT 0",
+		// Rows lossy plan overrides changed (#103 phase 3).
+		"lossy_rows INTEGER NOT NULL DEFAULT 0",
 	} {
 		if err := m.addColumnIfMissing("validation_tables", col); err != nil {
 			return err

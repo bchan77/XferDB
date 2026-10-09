@@ -19,20 +19,29 @@ type fingerprint struct {
 // add folds one row into the fingerprint. cols must be sorted by name and
 // identical for both sides, so the same values always hash the same; target
 // says which side rec came from, since a column's key can differ in case.
-func (f *fingerprint) add(rec map[string]interface{}, cols []column, target bool) {
+// A source row is hashed as the plan meant it to be stored (see intended);
+// add returns the columns a lossy plan conversion changed.
+func (f *fingerprint) add(rec map[string]interface{}, cols []column, target bool) []string {
 	h := fnv.New64a()
+	var changed []string
 	for _, c := range cols {
-		key := c.name
+		var v string
 		if target {
-			key = c.tgtKey
+			v = canonicalize(rec[c.tgtKey], c)
+		} else {
+			var lossy bool
+			if v, lossy = intended(rec[c.name], c); lossy {
+				changed = append(changed, c.name)
+			}
 		}
 		h.Write([]byte(c.name))
 		h.Write([]byte{0x1e})
-		h.Write([]byte(canonicalize(rec[key], c)))
+		h.Write([]byte(v))
 		h.Write([]byte{0x1f})
 	}
 	f.rows++
 	f.sum += mix64(h.Sum64())
+	return changed
 }
 
 // String renders the fingerprint for storage and display.

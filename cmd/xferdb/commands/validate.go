@@ -30,6 +30,12 @@ Levels:
       differ. Needs a primary key of a type it can pair rows by; other tables
       keep their L2 result. --sample checks only part of a failing table.
 
+A column narrowed by a schema-plan type override (numeric(10,4) to
+numeric(10,2), double to integer, timestamp to date) is converted by the
+target as it is stored. Validation applies the same conversion to the source
+value, and a table whose only differences are those conversions is reported
+as "lossy (plan)": not a failure, with the changed values listed.
+
 Only tables that completed in the migration are validated. The command waits
 for the result and exits non-zero if any table fails, so it can gate CI.
 
@@ -158,6 +164,7 @@ type validationView struct {
 		DiffMissing  int64  `json:"diff_missing"`
 		DiffExtra    int64  `json:"diff_extra"`
 		DiffMismatch int64  `json:"diff_mismatch"`
+		LossyRows    int64  `json:"lossy_rows"`
 	} `json:"tables"`
 }
 
@@ -192,15 +199,19 @@ func followValidation(id string) error {
 	}
 
 	fmt.Printf("Validation %s (%s): %s\n", v.ID, v.Level, v.Status)
-	failed := 0
+	failed, lossy := 0, 0
 	if len(v.Tables) > 0 {
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(w, "  TABLE\tRESULT\tSOURCE ROWS\tTARGET ROWS\tDETAIL")
 		for _, t := range v.Tables {
 			result := t.Result
-			if result == "fail" {
+			switch result {
+			case "fail":
 				failed++
 				result = "FAIL"
+			case "expected_lossy":
+				lossy++
+				result = "lossy (plan)"
 			}
 			if t.Stale {
 				result += " (stale)"
@@ -214,7 +225,7 @@ func followValidation(id string) error {
 			}
 		}
 		for _, t := range v.Tables {
-			if t.DiffMissing+t.DiffExtra+t.DiffMismatch > 0 {
+			if t.DiffMissing+t.DiffExtra+t.DiffMismatch+t.LossyRows > 0 {
 				printDiffExamples(v.ID, t.TableName)
 			}
 		}
@@ -227,6 +238,10 @@ func followValidation(id string) error {
 		return fmt.Errorf("validation cancelled")
 	case failed > 0:
 		return fmt.Errorf("validation failed: %d table(s) differ between source and target", failed)
+	}
+	if lossy > 0 {
+		// Not a failure: the user's own type overrides changed these values.
+		fmt.Printf("%d table(s) match once the plan's lossy type overrides are applied; the values they changed are listed above.\n", lossy)
 	}
 	return nil
 }
@@ -262,14 +277,21 @@ func printDiffExamples(validationID, table string) {
 			fmt.Printf("    missing in target   %s\n", key)
 		case "extra_in_target":
 			fmt.Printf("    only in target      %s\n", key)
+		case "lossy_by_plan":
+			fmt.Printf("    changed by plan     %s  %s\n", key, changedColumns(d))
 		default:
-			var cols []string
-			for _, c := range d.Columns {
-				cols = append(cols, fmt.Sprintf("%s: %s -> %s", c, showValue(d.Source[c]), showValue(d.Target[c])))
-			}
-			fmt.Printf("    values differ       %s  %s\n", key, strings.Join(cols, ", "))
+			fmt.Printf("    values differ       %s  %s\n", key, changedColumns(d))
 		}
 	}
+}
+
+// changedColumns renders a diff's columns as col: source -> target.
+func changedColumns(d diffExample) string {
+	var cols []string
+	for _, c := range d.Columns {
+		cols = append(cols, fmt.Sprintf("%s: %s -> %s", c, showValue(d.Source[c]), showValue(d.Target[c])))
+	}
+	return strings.Join(cols, ", ")
 }
 
 // showValues renders a key as col=value pairs in column order.

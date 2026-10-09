@@ -83,8 +83,11 @@ func TestCanonicalizeMatchesAcrossDrivers(t *testing.T) {
 		{"real large", column{kind: kindFloat4}, []interface{}{"1.6777216e+07", float32(16777216), int64(16777216), "1.67772e+07"}},
 		{"timestamp", column{kind: kindTimestamp, frac: 6}, []interface{}{
 			ts, ts.In(plus2), "2024-03-01 10:30:00.123456+00:00", "2024-03-01T12:30:00.123456+02:00",
-			"2024-03-01 10:30:00.123456789",
+			"2024-03-01 10:30:00.1234564", // rounds down to the microsecond
 		}},
+		// PostgreSQL and MySQL round when a column keeps fewer digits.
+		{"timestamp rounds to seconds", column{kind: kindTimestamp, frac: 0}, []interface{}{"2024-03-01 10:30:45.5", "2024-03-01 10:30:46"}},
+		{"timestamp rounds to centiseconds", column{kind: kindTimestamp, frac: 2}, []interface{}{"2024-03-01 10:30:45.125", "2024-03-01 10:30:45.13"}},
 		{"timestamp to seconds", column{kind: kindTimestamp, frac: 0}, []interface{}{ts, time.Date(2024, 3, 1, 10, 30, 0, 0, time.UTC)}},
 		{"date", column{kind: kindDate}, []interface{}{time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC), "2024-03-01", []byte("2024-03-01"), "2024-03-01T00:00:00Z"}},
 		{"time", column{kind: kindTime}, []interface{}{"10:30:00", []byte("10:30:00.000000"), "10:30:00."}},
