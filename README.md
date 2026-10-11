@@ -493,6 +493,33 @@ Logged events include: server start, project create/delete, preflight checks, mi
 
 ---
 
+## Metrics (Prometheus)
+
+`xferdb server` serves Prometheus metrics at `GET /metrics` on the same address as the API (not under `/api/`, so the web UI process doesn't proxy it: point Prometheus at the server directly). Scrapes are left out of the request log.
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: xferdb
+    static_configs:
+      - targets: ["xferdb-server:8080"]
+```
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `xferdb_rows_transferred_total` | counter | `project`, `table` |
+| `xferdb_tables_finished_total` | counter | `project`, `status` (completed, failed, cancelled) |
+| `xferdb_migrations_finished_total` | counter | `project`, `status` (completed, failed, cancelled) |
+| `xferdb_batch_read_duration_seconds`, `xferdb_batch_write_duration_seconds` | histogram | `project` |
+| `xferdb_migrations_active` | gauge | `phase` |
+| `xferdb_migration_phase` | gauge (1) | `project`, `migration`, `phase` |
+| `xferdb_migration_progress_ratio`, `_rows_expected`, `_rows_transferred`, `_rows_per_second`, `_eta_seconds` | gauge | `project`, `migration` |
+| `xferdb_migration_tables` | gauge | `project`, `migration`, `state` |
+
+The `xferdb_migration_*` gauges exist only while that migration runs, so a `migration` label never outlives its run. The batch-duration histograms are a sample: batch progress events may be dropped under load (row counts are not affected). Go runtime (`go_*`) and process (`process_*`) metrics are included. If the server dies, the scrape target goes down (`up == 0`), which is the signal to alert on.
+
+---
+
 ## REST API
 
 The CLI is a thin wrapper. All operations are available directly:
@@ -522,6 +549,7 @@ GET    /api/v1/migrations/:id/stats
 GET    /api/v1/migrations/:id/stats/history # recorded snapshots (every 5s during migration)
 
 GET    /api/v1/health
+GET    /metrics                             # Prometheus metrics (see above)
 ```
 
 ---
@@ -624,6 +652,7 @@ go build -o xferdb ./cmd/xferdb
 - [x] Migration stats history (`--history`)
 - [x] Database info in preflight (type, version, host, table count, size, SSL)
 - [x] Support bundle (`xferdb support-bundle`)
+- [x] Prometheus metrics (`GET /metrics`)
 - [ ] MongoDB target adapter
 - [x] Web UI (projects, live table browser, migration status/controls, schema editor for every adapter pairing)
 - [ ] WebSocket live progress
