@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -172,6 +173,10 @@ func (c *Collector) Snapshot() StatsSnapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	s := c.snapshot
+	// Copy the slices so the caller can't reorder or edit the collector's own
+	// rows: tableIndex addresses TableDetails by position (#125).
+	s.TableDetails = slices.Clone(s.TableDetails)
+	s.Errors = slices.Clone(s.Errors)
 	s.ElapsedSeconds = time.Since(c.startedAt).Seconds()
 	// Recompute Rows.Total and Rows.Transferred from per-table values.
 	// This is more robust than tracking increments across multiple event handlers.
