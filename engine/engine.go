@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -23,13 +25,17 @@ type Engine struct {
 	source adapters.SourceAdapter
 	target adapters.TargetAdapter
 
-	events   chan ProgressEvent
-	pauseCh  chan struct{} // buffered(1): send to signal pause
-	resumeCh chan struct{} // buffered(1): send to signal resume
+	events chan ProgressEvent
+	// subscribed is set once Events() is called. From then on emit blocks
+	// rather than drop anything but EventBatch, since that caller must drain
+	// the channel until it is closed (#137).
+	subscribed atomic.Bool
+	pauseCh    chan struct{} // buffered(1): send to signal pause
+	resumeCh   chan struct{} // buffered(1): send to signal resume
 
 	// onTableDone, when set, is called with a table's name right after
-	// its completed status is saved. Unlike EventTableDone it is never
-	// dropped, so per-table validation can rely on it.
+	// its completed status is saved. Unlike EventTableDone it doesn't depend
+	// on an Events() subscriber, so per-table validation can rely on it.
 	onTableDone func(table string)
 }
 
@@ -59,9 +65,12 @@ func New(migrationID string, project *adapters.Project, db *state.MetaDB) *Engin
 	}
 }
 
-// Events returns the channel of progress events. The caller should drain
-// this channel promptly; slow consumers cause events to be dropped (not blocked).
+// Events returns the channel of progress events. Call it before Run; the
+// caller must then drain the channel until it is closed, because the engine
+// blocks on it to deliver every event except EventBatch, which is dropped
+// when the consumer falls behind (the next batch supersedes it).
 func (e *Engine) Events() <-chan ProgressEvent {
+	e.subscribed.Store(true)
 	return e.events
 }
 
@@ -256,37 +265,33 @@ func (e *Engine) Run(ctx context.Context) error {
 						// Mark only this table as failed (or cancelled, when this
 						// stems from ctx being cancelled by an explicit user
 						// Cancel/Delete rather than a real error); other tables
-						// keep going. Cancelled writes use a ctx that ignores that
+						// keep going. Status writes use a ctx that ignores that
 						// same cancellation so they still land.
 						now := time.Now()
+						writeCtx := context.WithoutCancel(ctx)
+						status, kind, regStatus := adapters.StatusFailed, EventTableFailed, "failed"
 						if ctx.Err() != nil {
-							writeCtx := context.WithoutCancel(ctx)
-							e.db.UpsertTableProgress(writeCtx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
-								TableName:   schema.Name,
-								Status:      adapters.StatusCancelled,
-								CompletedAt: &now,
-							})
-							e.emit(ProgressEvent{
-								Kind:      EventTableCancelled,
-								TableName: schema.Name,
-								Timestamp: now,
-							})
-							e.db.UpdateProjectTableStatus(writeCtx, e.project.ID, schema.Name, //nolint:errcheck
-								"cancelled", e.migrationID, 0, 0)
-						} else {
-							e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
-								TableName:   schema.Name,
-								Status:      adapters.StatusFailed,
-								CompletedAt: &now,
-							})
-							e.emit(ProgressEvent{
-								Kind:      EventTableFailed,
-								TableName: schema.Name,
-								Err:       err,
-								Timestamp: now,
-							})
-							e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
-								"failed", e.migrationID, 0, 0)
+							status, kind, regStatus = adapters.StatusCancelled, EventTableCancelled, "cancelled"
+						}
+						// A lost status write leaves the table's previous status
+						// in migration_tables, which resume and validation go by,
+						// so report it with the table's error (#138).
+						if werr := e.db.UpsertTableProgress(writeCtx, e.migrationID, adapters.TableProgress{
+							TableName:   schema.Name,
+							Status:      status,
+							CompletedAt: &now,
+						}); werr != nil {
+							err = fmt.Errorf("%w (recording table as %s also failed: %v)", err, status, werr)
+						}
+						ev := ProgressEvent{Kind: kind, TableName: schema.Name, Timestamp: now}
+						if kind == EventTableFailed {
+							ev.Err = err
+						}
+						e.emit(ev)
+						if werr := e.db.UpdateProjectTableStatus(writeCtx, e.project.ID, schema.Name,
+							regStatus, e.migrationID, 0, 0); werr != nil {
+							slog.Warn("engine: update project table status", "migration_id", e.migrationID,
+								"table", schema.Name, "status", regStatus, "error", werr)
 						}
 						mu.Lock()
 						tableErrors = append(tableErrors, fmt.Errorf("%s: %w", schema.Name, err))
@@ -294,8 +299,11 @@ func (e *Engine) Run(ctx context.Context) error {
 					} else {
 						// Persist final counts to the project registry.
 						transferred, total, _ := e.db.GetTableFinalProgress(ctx, e.migrationID, schema.Name)
-						e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name, //nolint:errcheck
-							"done", e.migrationID, transferred, total)
+						if werr := e.db.UpdateProjectTableStatus(ctx, e.project.ID, schema.Name,
+							"done", e.migrationID, transferred, total); werr != nil {
+							slog.Warn("engine: update project table status", "migration_id", e.migrationID,
+								"table", schema.Name, "status", "done", "error", werr)
+						}
 					}
 				}
 			}()
@@ -541,9 +549,17 @@ func (e *Engine) checkPause(ctx context.Context) error {
 	return nil
 }
 
-// emit sends a progress event, dropping it if the consumer is behind.
+// emit sends a progress event. Only EventBatch may be dropped when the
+// consumer is behind: every other kind is delivered once a consumer has
+// subscribed, since the collector never sees a lost table-done, failed or
+// terminal event again (#137). With no consumer (tests running the engine
+// directly), nothing would drain a blocking send, so everything may drop.
 func (e *Engine) emit(ev ProgressEvent) {
 	ev.MigrationID = e.migrationID
+	if ev.Kind != EventBatch && e.subscribed.Load() {
+		e.events <- ev
+		return
+	}
 	select {
 	case e.events <- ev:
 	default:

@@ -435,9 +435,11 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 		return e.transferTableParallelOffset(ctx, schema, workers)
 	}
 
-	e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
 		TableName: table, Status: adapters.StatusInProgress, RowsTotal: total, StartedAt: &now,
-	})
+	}); err != nil {
+		return err
+	}
 	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: total, Timestamp: time.Now()})
 
 	// Divide [pkMin, pkMax] into N equal-width ranges.
@@ -484,10 +486,14 @@ func (e *Engine) transferTableParallelPK(ctx context.Context, schema adapters.Ta
 
 	done := time.Now()
 	written := rowsWritten.Load()
-	e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+	// Validation and resume go by this status, so a table whose completed
+	// write fails must fail rather than finish unrecorded (#138).
+	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
 		TableName: table, Status: adapters.StatusCompleted,
 		RowsTotal: total, RowsTransferred: written, CompletedAt: &done,
-	})
+	}); err != nil {
+		return err
+	}
 	e.emit(ProgressEvent{
 		Kind: EventTableDone, TableName: table,
 		RowsTransferred: written, RowsTotal: total, Timestamp: done,
@@ -517,9 +523,11 @@ func (e *Engine) transferTableParallelOffset(ctx context.Context, schema adapter
 		return fmt.Errorf("row count(%s): %w", table, err)
 	}
 
-	e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
 		TableName: table, Status: adapters.StatusInProgress, RowsTotal: total, StartedAt: &now,
-	})
+	}); err != nil {
+		return err
+	}
 	e.emit(ProgressEvent{Kind: EventTableStart, TableName: table, RowsTotal: total, Timestamp: time.Now()})
 
 	// Divide rows into N equal segments.
@@ -562,10 +570,14 @@ func (e *Engine) transferTableParallelOffset(ctx context.Context, schema adapter
 
 	done := time.Now()
 	written := rowsWritten.Load()
-	e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{ //nolint:errcheck
+	// Validation and resume go by this status, so a table whose completed
+	// write fails must fail rather than finish unrecorded (#138).
+	if err := e.db.UpsertTableProgress(ctx, e.migrationID, adapters.TableProgress{
 		TableName: table, Status: adapters.StatusCompleted,
 		RowsTotal: total, RowsTransferred: written, CompletedAt: &done,
-	})
+	}); err != nil {
+		return err
+	}
 	e.emit(ProgressEvent{
 		Kind: EventTableDone, TableName: table,
 		RowsTransferred: written, RowsTotal: total, Timestamp: done,
