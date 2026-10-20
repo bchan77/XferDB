@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/engine"
+	"gitea.homelab.local/nextdevops/XferDB/metrics"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/stats"
 	"gitea.homelab.local/nextdevops/XferDB/validate"
@@ -29,6 +30,8 @@ type MigrationsHandler struct {
 	// Validations validates a migration once it completes, unless the
 	// effective validation mode is off.
 	Validations *ValidationsHandler
+	// Metrics, when set, records each migration for GET /metrics.
+	Metrics *metrics.Metrics
 }
 
 // statsSaverAdapter wraps MetaDB to implement stats.StatsSaver.
@@ -219,6 +222,9 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	)
 
 	col.SetSaver(&statsSaverAdapter{db: h.DB})
+	if h.Metrics != nil {
+		col.SetObserver(h.Metrics.Track(migrationID, p.Name, col))
+	}
 	col.Start(ctx)
 
 	// In per_table mode each table is validated as soon as the engine

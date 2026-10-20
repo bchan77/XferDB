@@ -136,6 +136,7 @@ All clients interact exclusively through the REST API. The CLI and Web UI are th
 | `PATCH` | `/api/v1/validations/:id` | Cancel (`{"action":"cancel"}`) |
 | `GET` | `/api/v1/projects/:id/validation-status` | Latest pass/fail per table (with `stale`), plus the running validation |
 | `GET` | `/api/v1/health` | Health check |
+| `GET` | `/metrics` | Prometheus metrics (`metrics/`); outside `/api/` and the request log |
 
 ---
 
@@ -288,6 +289,10 @@ Consumes the engine's `ProgressEvent` channel in a background goroutine. Maintai
 #### Rate Calculation
 
 Uses exponential smoothing (α = 0.3) over 1-second sample windows. Per-table row counts are tracked separately and summed to produce accurate cross-table totals.
+
+#### Metrics
+
+`stats.Observer` (`SetObserver`) sees every event the collector applies, and is told when the stream ends. The `metrics/` package registers one per migration (`metrics.Track`): counters (rows, finished tables and migrations, batch durations) are fed from those events, while per-migration gauges are read from the active migrations' `Snapshot()` at scrape time and disappear when the run ends. Rows are counted from each event's per-table running total, adding only increases, so a dropped batch event or out-of-order segment events can't skew the counter.
 
 ---
 
@@ -456,6 +461,9 @@ xferdb/
 │   └── registry.go          # NewSource/NewTarget, ParseConnectionString
 │                            # (own package to avoid import cycle with adapters/)
 │
+├── metrics/
+│   └── metrics.go           # Prometheus registry for GET /metrics; Track → per-migration stats.Observer
+│
 ├── state/
 │   ├── metadb.go            # MetaDB struct, Open, migrate (DDL)
 │   ├── projects.go          # CreateProject, GetProject, ListProjects, DeleteProject
@@ -463,7 +471,7 @@ xferdb/
 │   └── checkpoints.go       # SaveCheckpoint, GetLastCheckpoint, DeleteCheckpoints
 │
 ├── stats/
-│   ├── collector.go         # Collector, Start, Snapshot, apply, updateRate
+│   ├── collector.go         # Collector, Start, Snapshot, apply, updateRate, SetObserver
 │   └── types.go             # StatsSnapshot, TableStats, RowStats
 │
 └── tools/                   # planned

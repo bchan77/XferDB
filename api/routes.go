@@ -20,6 +20,7 @@ func (s *Server) routes() http.Handler {
 		Cancels:     s.cancels,
 		Log:         s.log,
 		Validations: s.validations,
+		Metrics:     s.metrics,
 	}
 
 	// Health
@@ -64,5 +65,10 @@ func (s *Server) routes() http.Handler {
 
 	// TODO: WebSocket live progress at GET /api/v1/migrations/{id}/ws
 
-	return middleware.Logging(s.log, middleware.Recovery(s.log, mux))
+	// Prometheus scrapes /metrics every few seconds, so it stays out of the
+	// request log.
+	root := http.NewServeMux()
+	root.Handle("GET /metrics", middleware.Recovery(s.log, s.metrics.Handler()))
+	root.Handle("/", middleware.Logging(s.log, middleware.Recovery(s.log, mux)))
+	return root
 }
