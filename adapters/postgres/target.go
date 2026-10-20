@@ -496,3 +496,15 @@ func (t *Target) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 
 	return info, nil
 }
+
+// CreateDatabase implements adapters.DatabaseCreator. Postgres has no
+// CREATE DATABASE IF NOT EXISTS, so duplicate_database (42P04) counts as done.
+func (t *Target) CreateDatabase(ctx context.Context, name string) error {
+	if _, err := t.db.ExecContext(ctx, "CREATE DATABASE "+quote(name)); err != nil {
+		if strings.Contains(err.Error(), "42P04") {
+			return nil
+		}
+		return fmt.Errorf("create database %s: %w", name, err)
+	}
+	return nil
+}

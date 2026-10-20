@@ -199,6 +199,10 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		SourceInfo *adapters.DatabaseInfo    `json:"source_info,omitempty"`
 		TargetInfo *adapters.DatabaseInfo    `json:"target_info,omitempty"`
 		Status     string                    `json:"status"`
+		// TargetMissingDatabase names the target database when the target
+		// failed only because it doesn't exist, which POST
+		// /projects/{id}/target-database can fix.
+		TargetMissingDatabase string `json:"target_missing_database,omitempty"`
 	}
 
 	result := checkResult{Status: "ready"}
@@ -227,6 +231,9 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 	} else if err := tgt.Connect(ctx, p.TargetConfig); err != nil {
 		result.Target = &adapters.PermissionCheck{Errors: []string{friendlyConnectError(err)}}
 		result.Status = "failed"
+		if _, ok := tgt.(adapters.DatabaseCreator); ok && p.TargetConfig.DSN == "" && isMissingDatabase(err) {
+			result.TargetMissingDatabase = p.TargetConfig.Database
+		}
 	} else {
 		defer tgt.Close()
 		result.Target, _ = tgt.CheckPermissions(ctx)
