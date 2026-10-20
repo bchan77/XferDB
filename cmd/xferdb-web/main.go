@@ -82,6 +82,11 @@ func staticHandler() (http.Handler, error) {
 	fileServer := http.FileServer(http.FS(sub))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The assets are embedded, so they change only when xferdb-web is
+		// rebuilt, and embedded files carry no modification time for the
+		// browser to revalidate against. Without this a browser may keep
+		// running the previous build's app.js after an upgrade.
+		w.Header().Set("Cache-Control", "no-cache")
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
 			path = "index.html"
