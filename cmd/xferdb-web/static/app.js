@@ -1973,8 +1973,48 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     }
   }
 
+  // saveRunOptions stores a started run's tuning and validation choices as
+  // the project's defaults, so the form opens with them next time. It
+  // re-reads the project so a concurrent settings edit isn't overwritten. A
+  // failure only costs the remembered values, so it doesn't block the run.
+  async function saveRunOptions(body) {
+    try {
+      const fresh = await api.getProject(projectId);
+      const merged = {
+        ...(fresh.transfer_config || {}),
+        table_workers: body.table_workers,
+        segment_workers: body.segment_workers,
+        batch_size: body.batch_size,
+        async_pipeline: body.async_pipeline,
+        accurate_counts: body.accurate_counts,
+        offset_fallback: body.offset_fallback,
+        validation: body.validation,
+        validation_level: body.validation_level,
+        validation_sample: body.validation_sample,
+        run_options_saved: true,
+      };
+      await api.updateProject(projectId, {
+        name: fresh.name,
+        description: fresh.description,
+        source_config: fresh.source_config,
+        target_config: fresh.target_config,
+        transfer_config: merged,
+      });
+      transferCfg = merged;
+    } catch (err) {
+      console.warn('could not save run options as project defaults', err);
+    }
+  }
+
   function mountStartForm(migs, sourceType, targetType) {
     const segmentDisabled = sourceType === 'mongodb';
+    // The form starts from the project's saved defaults, which the last run
+    // from this form wrote (see saveRunOptions). Schema mode, bulk copy and
+    // table selection aren't remembered: a stale "drop & recreate" left
+    // selected is too easy to run by accident.
+    const tc = transferCfg || {};
+    const asyncOn = tc.run_options_saved ? !!tc.async_pipeline : true;
+    const checked = (on) => (on ? 'checked' : '');
     container.innerHTML = `
       <h2>Migration</h2>
       <details class="advanced" open>
@@ -1983,20 +2023,20 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
         <div class="field-row">
-          <div><label>Table workers</label><input type="number" id="m-workers" value="1"><div class="hint">Parallel tables to migrate</div></div>
-          <div><label>Batch size</label><input type="number" id="m-batch" value="1000"><div class="hint">Rows per INSERT batch</div></div>
+          <div><label>Table workers</label><input type="number" id="m-workers" value="${esc(tc.table_workers > 0 ? tc.table_workers : 1)}"><div class="hint">Parallel tables to migrate</div></div>
+          <div><label>Batch size</label><input type="number" id="m-batch" value="${esc(tc.batch_size > 0 ? tc.batch_size : 1000)}"><div class="hint">Rows per INSERT batch</div></div>
         </div>
         <div class="field-row">
-          <div><label>Segment workers</label><input type="number" id="m-segment" value="0" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
+          <div><label>Segment workers</label><input type="number" id="m-segment" value="${esc(tc.segment_workers > 0 ? tc.segment_workers : 0)}" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
           <div></div>
         </div>
         ${validationOptionsHTML('m', transferCfg)}
         <details class="advanced" style="margin-top:12px;">
           <summary>Performance options</summary>
-          <div class="checkbox-row"><input type="checkbox" id="m-async" checked><label for="m-async">Async pipeline</label><span class="hint" style="margin-left:8px;">Overlap reading and writing for faster throughput</span></div>
+          <div class="checkbox-row"><input type="checkbox" id="m-async" ${checked(asyncOn)}><label for="m-async">Async pipeline</label><span class="hint" style="margin-left:8px;">Overlap reading and writing for faster throughput</span></div>
           <div class="checkbox-row"><input type="checkbox" id="m-bulk"><label for="m-bulk">Bulk copy</label><span class="hint" style="margin-left:8px;">Faster writes (postgres: COPY; mysql: LOAD DATA; sqlite: batched inserts); only available with truncate or drop &amp; recreate above</span></div>
-          <div class="checkbox-row"><input type="checkbox" id="m-accurate"><label for="m-accurate">Accurate row counts</label><span class="hint" style="margin-left:8px;">Use exact counts instead of estimates (slower)</span></div>
-          <div class="checkbox-row" id="m-offset-row" style="display:none;"><input type="checkbox" id="m-offset"><label for="m-offset">Force OFFSET segments</label><span class="hint" style="margin-left:8px;">Use OFFSET-based splitting instead of PK range</span></div>
+          <div class="checkbox-row"><input type="checkbox" id="m-accurate" ${checked(tc.accurate_counts)}><label for="m-accurate">Accurate row counts</label><span class="hint" style="margin-left:8px;">Use exact counts instead of estimates (slower)</span></div>
+          <div class="checkbox-row" id="m-offset-row" style="display:none;"><input type="checkbox" id="m-offset" ${checked(tc.offset_fallback)}><label for="m-offset">Force OFFSET segments</label><span class="hint" style="margin-left:8px;">Use OFFSET-based splitting instead of PK range</span></div>
         </details>
         <div id="tableSelectBlock"></div>
       </details>
@@ -2117,6 +2157,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
       btn.innerHTML = '<span class="spinner"></span> Starting…';
       try {
         const mig = await api.startMigration(projectId, body);
+        await saveRunOptions(body);
         navigate(`#/migrations/${encodeURIComponent(mig.id)}`);
       } catch (err) {
         document.getElementById('startErr').innerHTML = errorBanner('Could not start migration: ' + err.message);
