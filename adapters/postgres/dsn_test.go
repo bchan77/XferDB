@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -45,4 +46,23 @@ func TestConnectWithEmptyPassword(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	src.Close()
+}
+
+func TestBuildDSNSchema(t *testing.T) {
+	got := buildDSN(adapters.ConnectionConfig{Host: "h", Database: "d", Username: "u", Schema: `Load"Test`})
+	if want := ` search_path='"Load""Test"'`; !strings.HasSuffix(got, want) {
+		t.Errorf("fields: %s\nwant suffix %s", got, want)
+	}
+	for dsn, want := range map[string]string{
+		"host=h dbname=d":              `host=h dbname=d search_path='"loadtest"'`,
+		"postgres://u@h/d":             `postgres://u@h/d?search_path=%22loadtest%22`,
+		"postgres://u@h/d?sslmode=off": `postgres://u@h/d?sslmode=off&search_path=%22loadtest%22`,
+	} {
+		if got := buildDSN(adapters.ConnectionConfig{DSN: dsn, Schema: "loadtest"}); got != want {
+			t.Errorf("dsn %q: %s, want %s", dsn, got, want)
+		}
+	}
+	if got := buildDSN(adapters.ConnectionConfig{DSN: "host=h"}); got != "host=h" {
+		t.Errorf("no schema changed the DSN: %s", got)
+	}
 }

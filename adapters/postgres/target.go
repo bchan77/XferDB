@@ -53,7 +53,7 @@ func (t *Target) Ping(ctx context.Context) error {
 }
 
 func (t *Target) ListTables(ctx context.Context) ([]adapters.TableSchema, error) {
-	names, err := listTables(ctx, t.db)
+	names, err := listTables(ctx, t.db, t.config.Schema == "")
 	if err != nil {
 		return nil, err
 	}
@@ -73,6 +73,17 @@ func (t *Target) GetSchema(ctx context.Context, table string) (*adapters.TableSc
 }
 
 func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) error {
+	// The table's schema may not exist yet: a "schema.table" name from a
+	// source migrating all its schemas, or the configured Schema (which,
+	// missing, leaves current_schema() NULL and a bare name nowhere to go).
+	if s, _ := splitName(schema.Name); s != "" || t.config.Schema != "" {
+		if s == "" {
+			s = t.config.Schema
+		}
+		if _, err := t.db.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+quote(s)); err != nil {
+			return fmt.Errorf("create schema %s: %w", s, err)
+		}
+	}
 	defs := make([]string, 0, len(schema.Columns))
 	var pks []string
 	for _, c := range schema.Columns {
@@ -94,7 +105,7 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 	}
 
 	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (%s)`,
-		quote(schema.Name), strings.Join(defs, ", "))
+		qualify(schema.Name), strings.Join(defs, ", "))
 	if _, err := t.db.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("create table %s: %w", schema.Name, err)
 	}
@@ -116,7 +127,7 @@ func (t *Target) CreateIndexes(ctx context.Context, table string, indexes []adap
 			unique = "UNIQUE "
 		}
 		query := fmt.Sprintf(`CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)`,
-			unique, quote(idx.Name), quote(table), strings.Join(cols, ", "))
+			unique, quote(idx.Name), qualify(table), strings.Join(cols, ", "))
 		if _, err := t.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("create index %s on %s: %w", idx.Name, table, err)
 		}
@@ -125,12 +136,13 @@ func (t *Target) CreateIndexes(ctx context.Context, table string, indexes []adap
 }
 
 func (t *Target) CreateConstraints(ctx context.Context, table string, fks []adapters.ForeignKey, checks []adapters.CheckConstraint) error {
+	tableSchema, tableName := splitName(table)
 	for _, fk := range fks {
 		var count int
 		if err := t.db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM information_schema.table_constraints
-			WHERE constraint_schema = 'public' AND table_name = $1 AND constraint_name = $2`,
-			table, fk.Name).Scan(&count); err != nil {
+			WHERE constraint_schema = `+schemaExpr(3)+` AND table_name = $1 AND constraint_name = $2`,
+			tableName, fk.Name, tableSchema).Scan(&count); err != nil {
 			return fmt.Errorf("check fk existence %s: %w", fk.Name, err)
 		}
 		if count > 0 {
@@ -146,9 +158,9 @@ func (t *Target) CreateConstraints(ctx context.Context, table string, fks []adap
 		}
 		q := fmt.Sprintf(
 			`ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)`,
-			quote(table), quote(fk.Name),
+			qualify(table), quote(fk.Name),
 			strings.Join(fromCols, ", "),
-			quote(fk.RefTable),
+			qualify(fk.RefTable),
 			strings.Join(toCols, ", "),
 		)
 		if fk.OnDelete != "" && fk.OnDelete != "NO ACTION" {
@@ -166,15 +178,15 @@ func (t *Target) CreateConstraints(ctx context.Context, table string, fks []adap
 		var count int
 		if err := t.db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM information_schema.table_constraints
-			WHERE constraint_schema = 'public' AND table_name = $1 AND constraint_name = $2`,
-			table, chk.Name).Scan(&count); err != nil {
+			WHERE constraint_schema = `+schemaExpr(3)+` AND table_name = $1 AND constraint_name = $2`,
+			tableName, chk.Name, tableSchema).Scan(&count); err != nil {
 			return fmt.Errorf("check constraint existence %s: %w", chk.Name, err)
 		}
 		if count > 0 {
 			continue
 		}
 		q := fmt.Sprintf(`ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s)`,
-			quote(table), quote(chk.Name), chk.Expression)
+			qualify(table), quote(chk.Name), chk.Expression)
 		if _, err := t.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("add check constraint %s.%s: %w", table, chk.Name, err)
 		}
@@ -183,12 +195,12 @@ func (t *Target) CreateConstraints(ctx context.Context, table string, fks []adap
 }
 
 func (t *Target) DropTable(ctx context.Context, table string) error {
-	_, err := t.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, quote(table)))
+	_, err := t.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualify(table)))
 	return err
 }
 
 func (t *Target) TruncateTable(ctx context.Context, table string) error {
-	_, err := t.db.ExecContext(ctx, fmt.Sprintf(`TRUNCATE TABLE %s`, quote(table)))
+	_, err := t.db.ExecContext(ctx, fmt.Sprintf(`TRUNCATE TABLE %s`, qualify(table)))
 	return err
 }
 
@@ -205,14 +217,14 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 			if change.Column.DefaultValue != nil {
 				def += fmt.Sprintf(" DEFAULT %s", *change.Column.DefaultValue)
 			}
-			query = fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, quote(table), def)
+			query = fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, qualify(table), def)
 		case adapters.ChangeDropColumn:
 			query = fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`,
-				quote(table), quote(change.Column.Name))
+				qualify(table), quote(change.Column.Name))
 		case adapters.ChangeAlterColumn:
 			pgType := mapTypeToPostgres(change.Column.Type)
 			query = fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s TYPE %s`,
-				quote(table), quote(change.Column.Name), pgType)
+				qualify(table), quote(change.Column.Name), pgType)
 		default:
 			return fmt.Errorf("unsupported change type: %s", change.Type)
 		}
@@ -318,7 +330,7 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		}
 
 		chunkQuery := fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s %s`,
-			quote(table),
+			qualify(table),
 			strings.Join(quotedCols, ", "),
 			strings.Join(rowPlaceholders, ", "),
 			upsertClause,
@@ -362,7 +374,12 @@ func (t *Target) writeBatchCopy(ctx context.Context, table string, batch *adapte
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, pq.CopyIn(table, cols...))
+	copySchema, copyTable := splitName(table)
+	copyStmt := pq.CopyIn(copyTable, cols...)
+	if copySchema != "" {
+		copyStmt = pq.CopyInSchema(copySchema, copyTable, cols...)
+	}
+	stmt, err := tx.PrepareContext(ctx, copyStmt)
 	if err != nil {
 		return fmt.Errorf("prepare copy into %s: %w", table, err)
 	}
@@ -455,6 +472,12 @@ func (t *Target) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 		info.Database = dbName
 	}
 
+	var schema sql.NullString
+	t.db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema) //nolint:errcheck
+	if t.config.Schema != "" {
+		info.Schema = schema.String
+	}
+
 	// Get host info from config or inet_server_addr()
 	if t.config.Host != "" {
 		port := t.config.Port
@@ -472,7 +495,7 @@ func (t *Target) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 	}
 
 	// Count tables
-	tables, err := listTables(ctx, t.db)
+	tables, err := listTables(ctx, t.db, t.config.Schema == "")
 	if err == nil {
 		info.Tables = len(tables)
 	}

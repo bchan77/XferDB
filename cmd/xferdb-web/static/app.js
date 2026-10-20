@@ -46,7 +46,7 @@ function shortTail(s) {
   return s.length > 16 ? '…' + s.slice(-16) : s;
 }
 
-function subFieldsHTML(prefix, type, cfg) {
+function subFieldsHTML(prefix, type, cfg, isTarget) {
   cfg = cfg || {};
   if (type === 'sqlite') {
     return `
@@ -94,6 +94,17 @@ function subFieldsHTML(prefix, type, cfg) {
       <button type="button" class="btn" id="${prefix}-loaddbs">Load databases</button>
     </div>
     <div id="${prefix}-dbstatus"></div>
+    ${type === 'postgres' ? `
+    <div class="field-row">
+      <div>
+        <label>Schema</label>
+        <input type="text" id="${prefix}-schema" value="${esc(cfg.schema || '')}" placeholder="all schemas">
+        <div class="hint">${isTarget
+          ? 'Leave empty to keep each table in its source schema; set one to put tables from the source\'s default schema there'
+          : 'Leave empty to migrate every schema; set one to migrate only that schema'}</div>
+      </div>
+      <div></div>
+    </div>` : ''}
   `;
 }
 
@@ -186,12 +197,12 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
   container.innerHTML = `
     <label>Type</label>
     <select id="${prefix}-type">${connTypeOptions(isTarget, type)}</select>
-    <div id="${prefix}-sub">${subFieldsHTML(prefix, type, cfg)}</div>
+    <div id="${prefix}-sub">${subFieldsHTML(prefix, type, cfg, isTarget)}</div>
   `;
   const typeSel = container.querySelector(`#${prefix}-type`);
   typeSel.value = type;
   typeSel.addEventListener('change', () => {
-    container.querySelector(`#${prefix}-sub`).innerHTML = subFieldsHTML(prefix, typeSel.value, {});
+    container.querySelector(`#${prefix}-sub`).innerHTML = subFieldsHTML(prefix, typeSel.value, {}, isTarget);
     wireDbPicker(container, prefix, container.read, opts);
   });
   container.read = () => {
@@ -211,6 +222,7 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
       username: g(`${prefix}-username`).trim(),
       password: g(`${prefix}-password`),
       ssl_mode: g(`${prefix}-sslmode`) || '',
+      schema: t === 'postgres' ? g(`${prefix}-schema`).trim() : '',
       dsn: '',
     };
   };
@@ -446,6 +458,7 @@ function connSummaryHTML(cfg) {
     if (cfg.username) rows.push(['Username', cfg.username]);
     rows.push(['Password', cfg.password ? '•'.repeat(10) : '(none set)']);
     if (cfg.ssl_mode) rows.push(['SSL mode', cfg.ssl_mode]);
+    if (cfg.type === 'postgres') rows.push(['Schema', cfg.schema || '(all schemas)']);
   }
   return `<table class="kv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`;
 }
@@ -538,10 +551,14 @@ function permBlock(label, info, perm, missingDb) {
           <tr><td>Type</td><td>${esc(info.type)} ${esc(info.version)}</td></tr>
           ${info.host ? `<tr><td>Host</td><td>${esc(info.host)}</td></tr>` : ''}
           ${info.database ? `<tr><td>Database</td><td>${esc(info.database)}</td></tr>` : ''}
+          ${info.schema ? `<tr><td>Schema</td><td>${esc(info.schema)}</td></tr>` : ''}
+          ${(info.schemas || []).length ? `<tr><td>Schemas</td><td>${info.schemas.map(esc).join(', ')}</td></tr>` : ''}
           <tr><td>Tables</td><td>${esc(info.tables)}</td></tr>
           ${info.size_human ? `<tr><td>Size</td><td>${esc(info.size_human)}</td></tr>` : ''}
           ${info.ssl ? `<tr><td>SSL</td><td>${esc(info.ssl)}</td></tr>` : ''}
         </table>` : '<div class="hint">No connection info available.</div>'}
+      ${info && !info.tables && (info.other_schemas || []).length ? `
+        <div class="banner info"><span>No tables in schema "${esc(info.schema || 'public')}". Tables were found in: ${info.other_schemas.map(esc).join(', ')}. Clear <strong>Schema</strong> under Edit Connection to migrate every schema, or set it to one of these.</span></div>` : ''}
       ${perm ? `<div class="hint">read: ${perm.can_read ? '✓' : '✗'} · write: ${perm.can_write ? '✓' : '✗'} · create table: ${perm.can_create_table ? '✓' : '✗'}</div>` : ''}
       ${errs.map((e) => `<div class="banner error"><span>${esc(e)}</span></div>`).join('')}
       ${missingDb ? `
