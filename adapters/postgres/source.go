@@ -205,6 +205,11 @@ func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 		info.Database = dbName
 	}
 
+	var schema sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err == nil {
+		info.Schema = schema.String
+	}
+
 	// Get host info from config or inet_server_addr()
 	if s.config.Host != "" {
 		port := s.config.Port
@@ -225,6 +230,9 @@ func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 	tables, err := listTables(ctx, s.db)
 	if err == nil {
 		info.Tables = len(tables)
+	}
+	if err == nil && len(tables) == 0 {
+		info.OtherSchemas, _ = schemasWithTables(ctx, s.db)
 	}
 
 	// Get database size

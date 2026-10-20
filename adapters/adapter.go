@@ -14,6 +14,9 @@ type ConnectionConfig struct {
 	Username string `json:"username" yaml:"username"`
 	Password string `json:"password" yaml:"password"`
 	SSLMode  string `json:"ssl_mode" yaml:"ssl_mode"`
+	// Schema is the PostgreSQL schema to read tables from or write them to;
+	// empty means public. Other adapters ignore it.
+	Schema string `json:"schema,omitempty" yaml:"schema,omitempty"`
 	DSN      string `json:"dsn" yaml:"dsn"` // optional raw DSN; overrides individual fields if set
 }
 
@@ -197,6 +200,10 @@ type DatabaseInfo struct {
 	Version      string `json:"version"`                 // e.g. "13.23", "8.0.3"
 	Host         string `json:"host"`                    // e.g. "postgres.homelab.local:5432"
 	Database     string `json:"database"`                // database/schema name
+	Schema       string `json:"schema,omitempty"`        // postgres: the schema tables are listed in
+	// OtherSchemas (postgres, only when Tables is 0) lists the schemas that do
+	// hold tables, so a client can point at the Schema setting.
+	OtherSchemas []string `json:"other_schemas,omitempty"`
 	Tables       int    `json:"tables"`                  // number of tables/collections
 	SizeBytes    int64  `json:"size_bytes,omitempty"`    // total size in bytes (0 if unknown)
 	SizeHuman    string `json:"size_human,omitempty"`    // human-readable size e.g. "1.2 GB"

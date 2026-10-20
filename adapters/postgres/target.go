@@ -73,6 +73,13 @@ func (t *Target) GetSchema(ctx context.Context, table string) (*adapters.TableSc
 }
 
 func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) error {
+	// A target schema that doesn't exist yet leaves current_schema() NULL and
+	// the CREATE TABLE below with nowhere to go, so make it first.
+	if t.config.Schema != "" {
+		if _, err := t.db.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+quote(t.config.Schema)); err != nil {
+			return fmt.Errorf("create schema %s: %w", t.config.Schema, err)
+		}
+	}
 	defs := make([]string, 0, len(schema.Columns))
 	var pks []string
 	for _, c := range schema.Columns {
@@ -129,7 +136,7 @@ func (t *Target) CreateConstraints(ctx context.Context, table string, fks []adap
 		var count int
 		if err := t.db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM information_schema.table_constraints
-			WHERE constraint_schema = 'public' AND table_name = $1 AND constraint_name = $2`,
+			WHERE constraint_schema = current_schema() AND table_name = $1 AND constraint_name = $2`,
 			table, fk.Name).Scan(&count); err != nil {
 			return fmt.Errorf("check fk existence %s: %w", fk.Name, err)
 		}
@@ -166,7 +173,7 @@ func (t *Target) CreateConstraints(ctx context.Context, table string, fks []adap
 		var count int
 		if err := t.db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM information_schema.table_constraints
-			WHERE constraint_schema = 'public' AND table_name = $1 AND constraint_name = $2`,
+			WHERE constraint_schema = current_schema() AND table_name = $1 AND constraint_name = $2`,
 			table, chk.Name).Scan(&count); err != nil {
 			return fmt.Errorf("check constraint existence %s: %w", chk.Name, err)
 		}
@@ -453,6 +460,11 @@ func (t *Target) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 	var dbName string
 	if err := t.db.QueryRowContext(ctx, `SELECT current_database()`).Scan(&dbName); err == nil {
 		info.Database = dbName
+	}
+
+	var schema sql.NullString
+	if err := t.db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err == nil {
+		info.Schema = schema.String
 	}
 
 	// Get host info from config or inet_server_addr()

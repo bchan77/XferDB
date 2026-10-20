@@ -94,6 +94,15 @@ function subFieldsHTML(prefix, type, cfg) {
       <button type="button" class="btn" id="${prefix}-loaddbs">Load databases</button>
     </div>
     <div id="${prefix}-dbstatus"></div>
+    ${type === 'postgres' ? `
+    <div class="field-row">
+      <div>
+        <label>Schema</label>
+        <input type="text" id="${prefix}-schema" value="${esc(cfg.schema || '')}" placeholder="public">
+        <div class="hint">Tables are read from / written to this schema</div>
+      </div>
+      <div></div>
+    </div>` : ''}
   `;
 }
 
@@ -211,6 +220,7 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
       username: g(`${prefix}-username`).trim(),
       password: g(`${prefix}-password`),
       ssl_mode: g(`${prefix}-sslmode`) || '',
+      schema: t === 'postgres' ? g(`${prefix}-schema`).trim() : '',
       dsn: '',
     };
   };
@@ -446,6 +456,7 @@ function connSummaryHTML(cfg) {
     if (cfg.username) rows.push(['Username', cfg.username]);
     rows.push(['Password', cfg.password ? '•'.repeat(10) : '(none set)']);
     if (cfg.ssl_mode) rows.push(['SSL mode', cfg.ssl_mode]);
+    if (cfg.type === 'postgres') rows.push(['Schema', cfg.schema || 'public']);
   }
   return `<table class="kv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`;
 }
@@ -538,10 +549,13 @@ function permBlock(label, info, perm, missingDb) {
           <tr><td>Type</td><td>${esc(info.type)} ${esc(info.version)}</td></tr>
           ${info.host ? `<tr><td>Host</td><td>${esc(info.host)}</td></tr>` : ''}
           ${info.database ? `<tr><td>Database</td><td>${esc(info.database)}</td></tr>` : ''}
+          ${info.schema ? `<tr><td>Schema</td><td>${esc(info.schema)}</td></tr>` : ''}
           <tr><td>Tables</td><td>${esc(info.tables)}</td></tr>
           ${info.size_human ? `<tr><td>Size</td><td>${esc(info.size_human)}</td></tr>` : ''}
           ${info.ssl ? `<tr><td>SSL</td><td>${esc(info.ssl)}</td></tr>` : ''}
         </table>` : '<div class="hint">No connection info available.</div>'}
+      ${info && !info.tables && (info.other_schemas || []).length ? `
+        <div class="banner info"><span>No tables in schema "${esc(info.schema || 'public')}". Tables were found in: ${info.other_schemas.map(esc).join(', ')}. Set <strong>Schema</strong> under Edit Connection.</span></div>` : ''}
       ${perm ? `<div class="hint">read: ${perm.can_read ? '✓' : '✗'} · write: ${perm.can_write ? '✓' : '✗'} · create table: ${perm.can_create_table ? '✓' : '✗'}</div>` : ''}
       ${errs.map((e) => `<div class="banner error"><span>${esc(e)}</span></div>`).join('')}
       ${missingDb ? `

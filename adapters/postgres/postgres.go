@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -14,7 +15,7 @@ import (
 // If DSN is already set it is used directly.
 func buildDSN(config adapters.ConnectionConfig) string {
 	if config.DSN != "" {
-		return config.DSN
+		return withSearchPath(config.DSN, config.Schema)
 	}
 	sslMode := config.SSLMode
 	if sslMode == "" {
@@ -24,11 +25,32 @@ func buildDSN(config adapters.ConnectionConfig) string {
 	if port == 0 {
 		port = 5432
 	}
-	return fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
 		dsnValue(config.Host), port, dsnValue(config.Database), dsnValue(config.Username),
 		dsnValue(config.Password), dsnValue(sslMode),
 	)
+	return withSearchPath(dsn, config.Schema)
+}
+
+// withSearchPath adds schema to dsn (keyword or URL form) as the session's
+// search_path; lib/pq passes unknown keys on as run-time parameters. Every
+// unqualified table name the adapter uses (reads, upserts, COPY) then
+// resolves in that schema, and the catalog queries filter on
+// current_schema(). Empty schema leaves dsn as is: public, or whatever the
+// DSN itself sets.
+func withSearchPath(dsn, schema string) string {
+	if schema == "" {
+		return dsn
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		return dsn + sep + "search_path=" + url.QueryEscape(quote(schema))
+	}
+	return dsn + " search_path=" + dsnValue(quote(schema))
 }
 
 // dsnValue quotes a keyword/value connection-string value. Unquoted, an empty
@@ -44,12 +66,14 @@ func quote(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
-// listTables returns all base tables in the public schema.
+// listTables returns all base tables in the connection's schema:
+// current_schema(), which is ConnectionConfig.Schema (via search_path, see
+// buildDSN) or public.
 func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT table_name
 		FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+		WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
 		ORDER BY table_name`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres list tables: %w", err)
@@ -67,6 +91,31 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 	return names, rows.Err()
 }
 
+// schemasWithTables returns the schemas other than the connection's own that
+// hold base tables, for pointing a user whose schema is empty at the right one.
+func schemasWithTables(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT table_schema
+		FROM information_schema.tables
+		WHERE table_type = 'BASE TABLE'
+		  AND table_schema NOT IN ('pg_catalog', 'information_schema')
+		  AND table_schema IS DISTINCT FROM current_schema()
+		ORDER BY table_schema`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
 // getSchema introspects a table using information_schema and pg catalog tables.
 func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSchema, error) {
 	// Primary key columns.
@@ -77,7 +126,7 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 		    ON tc.constraint_name = kcu.constraint_name
 		   AND tc.table_schema    = kcu.table_schema
 		WHERE tc.constraint_type = 'PRIMARY KEY'
-		  AND tc.table_schema    = 'public'
+		  AND tc.table_schema    = current_schema()
 		  AND tc.table_name      = $1`, table)
 	if err != nil {
 		return nil, fmt.Errorf("postgres primary keys(%s): %w", table, err)
@@ -109,7 +158,7 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 		FROM pg_catalog.pg_attribute a
 		LEFT JOIN pg_catalog.pg_attrdef d
 			ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-		WHERE a.attrelid = ('public.' || $1)::regclass
+		WHERE a.attrelid = format('%I.%I', current_schema(), $1::text)::regclass
 		AND a.attnum > 0
 		AND NOT a.attisdropped
 		ORDER BY a.attnum`, table)
@@ -178,7 +227,7 @@ func getIndexes(ctx context.Context, db *sql.DB, table string) ([]adapters.Index
 		JOIN pg_namespace n ON n.oid = t.relnamespace
 		JOIN generate_subscripts(ix.indkey, 1) AS k(pos) ON true
 		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ix.indkey[k.pos]
-		WHERE n.nspname = 'public' AND t.relname = $1 AND t.relkind = 'r'
+		WHERE n.nspname = current_schema() AND t.relname = $1 AND t.relkind = 'r'
 		AND NOT ix.indisprimary
 		AND ix.indkey[k.pos] != 0
 		GROUP BY i.relname, ix.indisunique
@@ -221,7 +270,7 @@ func getForeignKeys(ctx context.Context, db *sql.DB, table string) ([]adapters.F
 		JOIN information_schema.constraint_column_usage ccu
 		    ON ccu.constraint_name = rc.unique_constraint_name
 		   AND ccu.constraint_schema = rc.unique_constraint_schema
-		WHERE rc.constraint_schema = 'public'
+		WHERE rc.constraint_schema = current_schema()
 		AND kcu.table_name = $1
 		ORDER BY rc.constraint_name, kcu.ordinal_position`, table)
 	if err != nil {
@@ -268,7 +317,7 @@ func getCheckConstraints(ctx context.Context, db *sql.DB, table string) ([]adapt
 		JOIN information_schema.table_constraints tc
 		    ON tc.constraint_name = cc.constraint_name
 		   AND tc.constraint_schema = cc.constraint_schema
-		WHERE tc.table_schema = 'public' AND tc.table_name = $1
+		WHERE tc.table_schema = current_schema() AND tc.table_name = $1
 		AND tc.constraint_type = 'CHECK'
 		AND cc.check_clause NOT LIKE '% IS NOT NULL'
 		ORDER BY cc.constraint_name`, table)
