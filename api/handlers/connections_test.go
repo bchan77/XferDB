@@ -241,3 +241,63 @@ func dropTestDatabase(t *testing.T, admin adapters.ConnectionConfig, name string
 		t.Logf("drop %s: %v", name, err)
 	}
 }
+
+func postCreateDatabase(h *ProjectsHandler, body any) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/create-database", bytes.NewReader(b))
+	rec := httptest.NewRecorder()
+	h.CreateDatabase(rec, req)
+	return rec
+}
+
+func TestCreateDatabaseRejectsBadRequests(t *testing.T) {
+	h, _, cleanup := newTestHandler(t)
+	defer cleanup()
+	for name, c := range map[string]struct {
+		body listDatabasesRequest
+		want int
+	}{
+		"sqlite":  {listDatabasesRequest{Config: adapters.ConnectionConfig{Type: "sqlite", DSN: "/tmp/x.db"}}, 400},
+		"no host": {listDatabasesRequest{Config: adapters.ConnectionConfig{Type: "postgres", Database: "d"}}, 400},
+		"no db":   {listDatabasesRequest{Config: adapters.ConnectionConfig{Type: "mysql", Host: "h"}}, 400},
+		"unknown project": {listDatabasesRequest{
+			Config: adapters.ConnectionConfig{Type: "postgres", Host: "h", Database: "d"}, ProjectID: "nope"}, 404},
+	} {
+		if rec := postCreateDatabase(h, c.body); rec.Code != c.want {
+			t.Errorf("%s: status %d, want %d (%s)", name, rec.Code, c.want, rec.Body)
+		}
+	}
+}
+
+// TestCreateDatabaseLive creates a database from unsaved form fields on the
+// XFERDB_TEST_TARGET_DSN server, twice, and expects it in the listing after.
+func TestCreateDatabaseLive(t *testing.T) {
+	dsn := os.Getenv("XFERDB_TEST_TARGET_DSN")
+	if dsn == "" {
+		t.Skip("XFERDB_TEST_TARGET_DSN not set")
+	}
+	cfg, err := registry.ParseConnectionString(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := cfg
+	cfg.DSN = ""
+	cfg.Database = fmt.Sprintf("xferdb_form_create_%d", time.Now().UnixNano())
+	t.Cleanup(func() { dropTestDatabase(t, admin, cfg.Database) })
+	h, _, cleanup := newTestHandler(t)
+	defer cleanup()
+	for i := 0; i < 2; i++ {
+		if rec := postCreateDatabase(h, listDatabasesRequest{Config: cfg}); rec.Code != http.StatusCreated {
+			t.Fatalf("create #%d: status %d: %s", i+1, rec.Code, rec.Body)
+		}
+	}
+	// The listing connects through cfg's own database first; it exists now.
+	_, out := postListDatabases(t, h, listDatabasesRequest{Config: cfg})
+	dbs, _ := out["databases"].([]any)
+	for _, d := range dbs {
+		if d == cfg.Database {
+			return
+		}
+	}
+	t.Errorf("databases %v lack %q", dbs, cfg.Database)
+}

@@ -178,7 +178,57 @@ func (h *ProjectsHandler) CreateTargetDatabase(w http.ResponseWriter, r *http.Re
 
 	ctx, cancel := context.WithTimeout(r.Context(), listDatabasesTimeout)
 	defer cancel()
-	err = onServer(ctx, cfg, func(c adapters.ConnectionConfig) error {
+	if err := createDatabase(ctx, cfg); err != nil {
+		h.Log.Info("project.create_target_database", "project_id", id, "database", cfg.Database, "error", err)
+		writeError(w, http.StatusUnprocessableEntity, friendlyCreateDatabaseError(err))
+		return
+	}
+	h.Log.Info("project.create_target_database", "project_id", id, "database", cfg.Database)
+	writeJSON(w, http.StatusCreated, map[string]string{"database": cfg.Database})
+}
+
+// CreateDatabase handles POST /api/v1/connections/create-database: the
+// connection form's counterpart of CreateTargetDatabase, taking the fields
+// as typed (same body as ListDatabases, so the settings form can have the
+// stored password filled in) and creating config.database on that server.
+func (h *ProjectsHandler) CreateDatabase(w http.ResponseWriter, r *http.Request) {
+	var body listDatabasesRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	cfg := body.Config
+	if cfg.Type != "postgres" && cfg.Type != "mysql" {
+		writeError(w, http.StatusBadRequest, "creating a database is supported for postgres and mysql only")
+		return
+	}
+	if strings.TrimSpace(cfg.Host) == "" || strings.TrimSpace(cfg.Database) == "" {
+		writeError(w, http.StatusBadRequest, "host and database are required")
+		return
+	}
+	if cfg.Password == "" && body.ProjectID != "" {
+		if err := h.fillStoredPassword(r.Context(), &cfg, body.ProjectID, body.Side); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), listDatabasesTimeout)
+	defer cancel()
+	if err := createDatabase(ctx, cfg); err != nil {
+		h.Log.Info("connection.create_database", "type", cfg.Type, "host", cfg.Host, "database", cfg.Database, "error", err)
+		writeError(w, http.StatusUnprocessableEntity, friendlyCreateDatabaseError(err))
+		return
+	}
+	h.Log.Info("connection.create_database", "type", cfg.Type, "host", cfg.Host, "database", cfg.Database)
+	writeJSON(w, http.StatusCreated, map[string]string{"database": cfg.Database})
+}
+
+// createDatabase creates cfg.Database on cfg's server, connecting without it
+// (see onServer). An existing database is not an error.
+func createDatabase(ctx context.Context, cfg adapters.ConnectionConfig) error {
+	name := cfg.Database
+	return onServer(ctx, cfg, func(c adapters.ConnectionConfig) error {
 		tgt, err := registry.NewTarget(c.Type)
 		if err != nil {
 			return err
@@ -191,15 +241,8 @@ func (h *ProjectsHandler) CreateTargetDatabase(w http.ResponseWriter, r *http.Re
 		if !ok {
 			return fmt.Errorf("%s does not support creating databases", c.Type)
 		}
-		return creator.CreateDatabase(ctx, cfg.Database)
+		return creator.CreateDatabase(ctx, name)
 	})
-	if err != nil {
-		h.Log.Info("project.create_target_database", "project_id", id, "database", cfg.Database, "error", err)
-		writeError(w, http.StatusUnprocessableEntity, friendlyCreateDatabaseError(err))
-		return
-	}
-	h.Log.Info("project.create_target_database", "project_id", id, "database", cfg.Database)
-	writeJSON(w, http.StatusCreated, map[string]string{"database": cfg.Database})
 }
 
 func friendlyCreateDatabaseError(err error) string {

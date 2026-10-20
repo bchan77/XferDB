@@ -44,6 +44,7 @@ export const api = {
   deleteProject: (id) => req('DELETE', `/api/v1/projects/${encodeURIComponent(id)}`),
 
   listDatabases: (body) => req('POST', '/api/v1/connections/databases', body),
+  createDatabase: (body) => req('POST', '/api/v1/connections/create-database', body),
 
   createTargetDatabase: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/target-database`),
   preflight: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/preflight`),

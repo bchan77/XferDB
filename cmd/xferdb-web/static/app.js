@@ -102,7 +102,8 @@ function subFieldsHTML(prefix, type, cfg) {
 // databases, then swaps the Database text box for a dropdown of them. A
 // connection failure is shown under the field so the user can fix the
 // host/port/credentials and retry. `opts.projectId`/`opts.side` let the
-// settings form, which never shows the stored password, use it.
+// settings form, which never shows the stored password, use it. On a target
+// whose typed database isn't on the server, it offers to create it.
 function wireDbPicker(container, prefix, readCfg, opts) {
   const btn = container.querySelector(`#${prefix}-loaddbs`);
   if (!btn) return;
@@ -138,18 +139,49 @@ function wireDbPicker(container, prefix, readCfg, opts) {
         slot.innerHTML = textInput(container.querySelector(`#${prefix}-database`).value);
         status.innerHTML = '';
       });
+      if (current && !dbs.includes(current)) offerCreate(current);
     } catch (err) {
       status.innerHTML = errorBanner('Could not connect: ' + err.message);
+      // Listing falls back to the server's maintenance database, so this
+      // only happens when that is missing too, but the fix is the same.
+      if (cfg.database && /3D000|Error 1049/.test(err.message)) offerCreate(cfg.database);
     } finally {
       btn.disabled = false;
     }
   });
+
+  // Appends a "database doesn't exist yet" note with a Create button to the
+  // status line; once created, the list is reloaded so it shows as chosen.
+  function offerCreate(name) {
+    if (!opts.isTarget) {
+      status.insertAdjacentHTML('beforeend',
+        `<div class="hint">"${esc(name)}" is not on this server — pick one from the list.</div>`);
+      return;
+    }
+    status.insertAdjacentHTML('beforeend', `
+      <div class="banner info">
+        <span>"${esc(name)}" does not exist on this server yet.</span>
+        <button type="button" class="btn small primary" id="${prefix}-createdb">Create database</button>
+      </div>`);
+    const createBtn = status.querySelector(`#${prefix}-createdb`);
+    createBtn.addEventListener('click', async () => {
+      createBtn.disabled = true;
+      createBtn.textContent = 'Creating…';
+      try {
+        await api.createDatabase({ config: { ...readCfg(), database: name }, project_id: opts.projectId, side: opts.side });
+        btn.click();
+      } catch (err) {
+        status.innerHTML = errorBanner('Could not create the database: ' + err.message);
+      }
+    });
+  }
 }
 
 // Mounts a connection-config editor into `container`. Attaches a .read()
 // method to the container element that returns the current ConnectionConfig.
 function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
   cfg = cfg || {};
+  opts = { ...opts, isTarget };
   const type = cfg.type || 'postgres';
   container.innerHTML = `
     <label>Type</label>
