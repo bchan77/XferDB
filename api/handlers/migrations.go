@@ -279,7 +279,20 @@ func (h *MigrationsHandler) GetMigration(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "migration not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, mig)
+	// Each table's outcome, from migration_tables: the only per-table record
+	// of a finished migration, whose stats collector may be gone.
+	tables, err := h.DB.GetTableProgress(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tables == nil {
+		tables = []adapters.TableProgress{}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		*adapters.Migration
+		Tables []adapters.TableProgress `json:"tables"`
+	}{mig, tables})
 }
 
 // PatchMigration handles PATCH /api/v1/migrations/{id} for pause/resume.
