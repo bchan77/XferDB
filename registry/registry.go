@@ -139,16 +139,10 @@ func parseMongoDBConnectionString(dsn string) (adapters.ConnectionConfig, error)
 		DSN:  dsn, // full URI passed to the driver unchanged via ApplyURI
 	}
 
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return adapters.ConnectionConfig{}, fmt.Errorf("invalid mongodb connection string: %w", err)
-	}
-
-	// Extract database name from the path for display only.
-	// Path is "/dbname" for mongodb:// and "/dbname?opts" for mongodb+srv://.
-	if db := strings.TrimPrefix(u.Path, "/"); db != "" {
-		cfg.Database = db
-	}
+	// Extract database name from the path for display only. Not url.Parse:
+	// it rejects userinfo the driver accepts, and the driver is what reports
+	// a malformed URI, when it connects.
+	cfg.Database = mongoadapter.DatabaseFromURI(dsn)
 
 	return cfg, nil
 }

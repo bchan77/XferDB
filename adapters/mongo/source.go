@@ -90,23 +90,40 @@ func (s *Source) Connect(ctx context.Context, cfg adapters.ConnectionConfig) err
 	s.database = cfg.Database
 	// Extract database from DSN if not explicitly provided in config.
 	if s.database == "" {
-		s.database = databaseFromDSN(cfg.DSN)
+		s.database = DatabaseFromURI(cfg.DSN)
+	}
+	if s.database == "" {
+		client.Disconnect(ctx) //nolint:errcheck
+		s.client = nil
+		return fmt.Errorf("mongo source: the connection string names no database; add it after the host, e.g. mongodb://host:27017/shop")
 	}
 	return nil
 }
 
-// databaseFromDSN extracts the database name from a MongoDB connection string.
-// Returns empty string if the DSN doesn't contain a database path.
-func databaseFromDSN(dsn string) string {
-	u, err := url.Parse(dsn)
-	if err != nil {
+// DatabaseFromURI returns the database named in a mongodb:// or
+// mongodb+srv:// URI's path, or "" if it names none. It is deliberately more
+// lenient than url.Parse, which rejects userinfo the driver accepts (a
+// password with a stray backslash, say) and so used to lose the database:
+// credentials end at the last '@', the path at the first '?'.
+func DatabaseFromURI(dsn string) string {
+	i := strings.Index(dsn, "://")
+	if i < 0 {
 		return ""
 	}
-	// Path is "/dbname" or "/dbname?opts"; trim the leading slash.
-	db := strings.TrimPrefix(u.Path, "/")
-	// Remove query string if present (shouldn't be, but defensive).
-	if idx := strings.Index(db, "?"); idx >= 0 {
-		db = db[:idx]
+	rest := dsn[i+3:]
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
+	slash := strings.Index(rest, "/")
+	if slash < 0 {
+		return ""
+	}
+	db := rest[slash+1:]
+	if q := strings.Index(db, "?"); q >= 0 {
+		db = db[:q]
+	}
+	if u, err := url.PathUnescape(db); err == nil {
+		db = u
 	}
 	return db
 }
