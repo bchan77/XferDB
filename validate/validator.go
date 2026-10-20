@@ -90,6 +90,9 @@ type Request struct {
 	BatchSize int
 	// Sample is the percentage of a table an L3 diff checks; 0 means all.
 	Sample int
+	// OnProgress, when set, is called as each table's validation advances
+	// (see Progress), from the goroutine validating it.
+	OnProgress func(Progress)
 }
 
 // Run validates each table in req.Tables and hands every outcome to report as
@@ -123,6 +126,7 @@ type Session struct {
 	sample    int
 	plan      []state.SchemaPlanRow
 	tgtType   string
+	progress  func(Progress)
 }
 
 // Open connects to req's source and target. req.Tables is ignored; pass each
@@ -180,6 +184,7 @@ func Open(ctx context.Context, req Request) (*Session, error) {
 	return &Session{
 		src: src, tgt: tgt, isMongo: isMongo, level: level, batchSize: batchSize,
 		sample: req.Sample, plan: req.Plan, tgtType: req.Project.TargetConfig.Type,
+		progress: req.OnProgress,
 	}, nil
 }
 
@@ -189,7 +194,8 @@ func (s *Session) Table(ctx context.Context, table string) (state.ValidationTabl
 	if err := ctx.Err(); err != nil {
 		return state.ValidationTable{}, err
 	}
-	res := validateTable(ctx, s.src, s.tgt, table, s.level, s.batchSize, s.sample, s.plan, s.isMongo, s.tgtType)
+	tr := newTracker(s.progress, table, s.batchSize)
+	res := validateTable(ctx, s.src, s.tgt, table, s.level, s.batchSize, s.sample, s.plan, s.isMongo, s.tgtType, tr)
 	if err := ctx.Err(); err != nil {
 		return state.ValidationTable{}, err
 	}
@@ -202,7 +208,8 @@ func (s *Session) Close() {
 	s.tgt.Close()
 }
 
-func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string) state.ValidationTable {
+func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string, tr *tracker) state.ValidationTable {
+	tr.step(StepCounting)
 	// LevelRun starts at what L1/L2 reach; L3 raises it only if it runs.
 	runLevel := level
 	if level == LevelL3 {
@@ -269,6 +276,7 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		if level == LevelL3 {
 			// L2 cannot pass with different counts; go straight to the diff.
 			res.LevelRun = LevelL1
+			tr.step(StepRowDiff)
 			rowDiff(ctx, src, tgt, srcSchema, tgtSchema, cols, batchSize, sample, isMongo, &res)
 		}
 		return res
@@ -283,14 +291,19 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 	// and notes the rows a lossy override changed.
 	var srcFP, tgtFP fingerprint
 	planned := newLossyLog(srcSchema, cols)
+	tr.total(srcRows + tgtRows)
+	tr.step(StepReadingSource)
 	if err := scan(ctx, src, srcSchema, batchSize, isMongo, func(rec map[string]interface{}) {
 		planned.add(rec, srcFP.add(rec, cols, false))
+		tr.row()
 	}); err != nil {
 		res.Detail = fmt.Sprintf("read source rows: %v", err)
 		return res
 	}
+	tr.step(StepReadingTarget)
 	if err := scan(ctx, tgt, tgtSchema, batchSize, false, func(rec map[string]interface{}) {
 		tgtFP.add(rec, cols, true)
+		tr.row()
 	}); err != nil {
 		res.Detail = fmt.Sprintf("read target rows: %v", err)
 		return res
@@ -320,6 +333,7 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		}
 	}
 	if res.Result == state.ValidationFail && level == LevelL3 {
+		tr.step(StepRowDiff)
 		rowDiff(ctx, src, tgt, srcSchema, tgtSchema, cols, batchSize, sample, isMongo, &res)
 	}
 	return res

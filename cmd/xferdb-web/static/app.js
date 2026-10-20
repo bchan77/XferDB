@@ -987,6 +987,38 @@ async function openDiffDrawer(vid, t) {
   }
 }
 
+const VALIDATION_STEPS = {
+  counting: 'Counting rows',
+  reading_source: 'Reading source',
+  reading_target: 'Reading target',
+  row_diff: 'Diffing rows by key',
+};
+
+// validationProgressHTML shows each table being validated right now: its
+// step, and while reading both sides (L2), rows read of rows to read with a
+// bar and an ETA from the table's own read rate so far.
+function validationProgressHTML(items) {
+  if (!items || !items.length) return '';
+  return `<div class="validation-progress">${items.map((p) => {
+    const step = VALIDATION_STEPS[p.step] || p.step;
+    const elapsed = Math.max(0, (Date.now() - new Date(p.started_at).getTime()) / 1000);
+    let detail = `${esc(step)}… · ${esc(fmtDuration(elapsed))}`;
+    let bar = '';
+    if (p.rows_total > 0) {
+      const pct = Math.min(100, (p.rows_done / p.rows_total) * 100);
+      const rate = elapsed > 0 ? p.rows_done / elapsed : 0;
+      const eta = rate > 0 && p.rows_done < p.rows_total ? (p.rows_total - p.rows_done) / rate : 0;
+      detail = `${esc(step)} · ${fmtInt(p.rows_done)} / ${fmtInt(p.rows_total)} rows (${pct.toFixed(0)}%)` +
+        `${rate > 0 ? ` · ${fmtInt(Math.round(rate))}/s` : ''}${eta > 0 ? ` · about ${esc(fmtDuration(eta))} left` : ''}`;
+      bar = `<div class="progress-bar"><div class="fill" style="width:${pct.toFixed(1)}%"></div></div>`;
+    }
+    return `<div class="validation-progress-row" data-table="${esc(p.table_name)}">
+      <div><span class="mono">${esc(p.table_name)}</span> <span class="hint">${detail}</span></div>
+      ${bar}
+    </div>`;
+  }).join('')}</div>`;
+}
+
 // mountValidationCard shows a migration's latest validation and lets the user
 // start one. waitForAuto keeps polling briefly for the validation the server
 // starts on its own right after a migration completes, instead of reporting
@@ -1070,7 +1102,8 @@ function mountValidationCard(container, migId, { waitForAuto = false } = {}) {
         <div class="loading-block"><span class="spinner"></span> ${perTable
           ? `Validating each table as it finishes (${esc(latest.level)})… ${done} table(s) checked so far`
           : `Validating (${esc(latest.level)})… ${done} table(s) checked`}</div>
-        ${perTable && done ? validationResultsHTML(latest, { partial: true }) : ''}
+        ${validationProgressHTML(latest.in_progress)}
+        ${done ? validationResultsHTML(latest, { partial: true }) : ''}
         <div class="actions-row"><button class="btn small" id="cancelValidationBtn">Cancel validation</button></div>`);
       wireDiffButtons(container, latest);
       document.getElementById('cancelValidationBtn').addEventListener('click', async () => {

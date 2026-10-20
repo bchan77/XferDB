@@ -122,7 +122,7 @@ func TestExpectedLossyResult(t *testing.T) {
 	plan := []state.SchemaPlanRow{{Collection: "t", FieldName: "d", PgType: "numeric(10,2)", Nullable: true}}
 
 	for _, level := range []string{LevelL2, LevelL3} {
-		r := validateTable(ctx, src, tgt, "t", level, 2, 0, plan, false, "postgres")
+		r := validateTable(ctx, src, tgt, "t", level, 2, 0, plan, false, "postgres", newTracker(nil, "t", 0))
 		if r.Result != state.ValidationExpectedLossy || r.LossyRows != 2 {
 			t.Fatalf("%s: result %s with %d lossy rows (%s), want expected_lossy with 2", level, r.Result, r.LossyRows, r.Detail)
 		}
@@ -135,14 +135,14 @@ func TestExpectedLossyResult(t *testing.T) {
 	}
 
 	// Without the override the same target is a plain failure.
-	if r := validateTable(ctx, src, tgt, "t", LevelL2, 2, 0, nil, false, "postgres"); r.Result != state.ValidationFail {
+	if r := validateTable(ctx, src, tgt, "t", LevelL2, 2, 0, nil, false, "postgres", newTracker(nil, "t", 0)); r.Result != state.ValidationFail {
 		t.Errorf("no plan: result %s, want fail", r.Result)
 	}
 
 	// A real defect next to the plan's conversion fails, and L3 says which.
 	bad := setup("bad", `CREATE TABLE t (id INTEGER PRIMARY KEY, d NUMERIC(10,2), n TEXT)`,
 		`INSERT INTO t VALUES (1, '1.23', 'a'), (2, '1.23', 'X'), (3, '10.00', 'c')`)
-	r := validateTable(ctx, src, bad, "t", LevelL3, 2, 0, plan, false, "postgres")
+	r := validateTable(ctx, src, bad, "t", LevelL3, 2, 0, plan, false, "postgres", newTracker(nil, "t", 0))
 	if r.Result != state.ValidationFail || r.DiffMismatch != 1 || r.LossyRows != 2 {
 		t.Fatalf("defect: result %s, %d mismatches, %d lossy (%s); want fail, 1, 2", r.Result, r.DiffMismatch, r.LossyRows, r.Detail)
 	}
