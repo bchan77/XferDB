@@ -2170,6 +2170,13 @@ async function renderMigrationProgress(migId) {
     if (stopValidationCard) stopValidationCard();
   });
 
+  // A finished migration's tables, from the migration record (stats history
+  // has no per-table rows), in the shape of a stats snapshot's TableDetails.
+  const STATUS_TO_DETAIL = { completed: 'done', in_progress: 'in_progress', failed: 'failed', cancelled: 'cancelled', pending: 'pending', paused: 'pending' };
+  const finishedTableDetails = (mig.tables || [])
+    .map((t) => ({ Name: t.table_name, Status: STATUS_TO_DETAIL[t.status] || t.status, Transferred: t.rows_transferred, Total: t.rows_total }))
+    .sort((a, b) => a.Name.localeCompare(b.Name));
+
   // For completed/failed/cancelled migrations, load from history instead of live stats
   const finishedStatuses = ['completed', 'failed', 'cancelled'];
   if (finishedStatuses.includes(mig.status)) {
@@ -2195,7 +2202,7 @@ async function renderMigrationProgress(migId) {
             MemSysMB: last.mem_sys_mb,
             Goroutines: last.goroutines,
           },
-          TableDetails: [], // Not stored in history records
+          TableDetails: finishedTableDetails,
           Errors: mig.error ? [mig.error] : [],
         };
         renderProgress(snap);
@@ -2207,7 +2214,7 @@ async function renderMigrationProgress(migId) {
           ETASeconds: 0,
           Rows: { Total: 0, Transferred: 0, RatePerSecond: 0 },
           resource: {},
-          TableDetails: [],
+          TableDetails: finishedTableDetails,
           Errors: mig.error ? [mig.error] : [],
         };
         renderProgress(snap);
