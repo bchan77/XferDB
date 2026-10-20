@@ -440,8 +440,14 @@ func (h *ValidationsHandler) ValidationStatus(w http.ResponseWriter, r *http.Req
 		last := lastMigration[t.TableName]
 		tables = append(tables, tableStatus{TableValidation: t, Stale: last != "" && last != t.MigrationID})
 	}
+	inProgress := []validate.Progress{}
+	if active != nil {
+		inProgress = h.inProgress(active.ID)
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Active *state.Validation `json:"active"`
 		Tables []tableStatus     `json:"tables"`
-	}{active, tables})
+		// InProgress: the active validation's tables being checked now.
+		InProgress []validate.Progress `json:"in_progress"`
+	}{active, tables, inProgress})
 }

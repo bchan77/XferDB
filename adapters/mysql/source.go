@@ -282,3 +282,13 @@ func (s *Source) ListDatabases(ctx context.Context) ([]string, error) {
 	}
 	return names, rows.Err()
 }
+
+// StreamTable implements adapters.TableStreamer.
+func (s *Source) StreamTable(ctx context.Context, table string, fn func(map[string]interface{}) error) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT * FROM "+quote(table))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", table, err)
+	}
+	defer rows.Close()
+	return adapters.StreamRecords(rows, fn)
+}

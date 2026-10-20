@@ -479,10 +479,14 @@ func align(src, tgt *adapters.TableSchema) ([]column, []string) {
 	return cols, problems
 }
 
-// scan reads every row of a table in pages and passes each to fn. It pages by
-// keyset where it can: MongoDB by _id, a relational table by its single
-// integer primary key. Anything else falls back to LIMIT/OFFSET, the same
-// path the engine uses for such tables.
+// scan reads every row of a table and passes each to fn, in no particular
+// order: the fingerprint and the diff's lookups don't depend on it. An
+// adapter that can stream a table (adapters.TableStreamer) reads it in one
+// query; paging cost a full table scan per page on a YugabyteDB table with a
+// hash-sharded key (12s a page for 1.2M rows), and one query also reads a
+// single snapshot. Otherwise it pages by keyset where it can: MongoDB by
+// _id, a relational table by its single integer primary key, and anything
+// else by LIMIT/OFFSET, the same path the engine uses for such tables.
 func scan(ctx context.Context, a adapters.SourceAdapter, schema *adapters.TableSchema, batchSize int, isMongo bool, fn func(map[string]interface{})) error {
 	table := schema.Name
 	if isMongo {
@@ -500,6 +504,13 @@ func scan(ctx context.Context, a adapters.SourceAdapter, schema *adapters.TableS
 			}
 			lastKey = b.LastKey
 		}
+	}
+
+	if st, ok := a.(adapters.TableStreamer); ok {
+		return st.StreamTable(ctx, table, func(r map[string]interface{}) error {
+			fn(r)
+			return ctx.Err()
+		})
 	}
 
 	if pk := integerPK(schema); pk != "" {

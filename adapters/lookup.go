@@ -78,3 +78,41 @@ func ScanRecords(rows *sql.Rows) ([]map[string]interface{}, error) {
 	}
 	return records, rows.Err()
 }
+
+// TableStreamer is an optional interface for source adapters that can read a
+// whole table in one query, rows in no particular order. The validator's
+// row fingerprint doesn't depend on order, and a single scan avoids paging,
+// which on some tables costs a full scan per page: a YugabyteDB table whose
+// primary key is hash-sharded can't be read in key order, so every "next
+// page by key" query scanned and sorted the whole table.
+type TableStreamer interface {
+	// StreamTable calls fn with each row of table; an error from fn stops it.
+	StreamTable(ctx context.Context, table string, fn func(map[string]interface{}) error) error
+}
+
+// StreamRecords passes each row of rows to fn as a column -> value map, the
+// way ScanRecords collects them.
+func StreamRecords(rows *sql.Rows, fn func(map[string]interface{}) error) error {
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		vals := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		rec := make(map[string]interface{}, len(cols))
+		for i, col := range cols {
+			rec[col] = vals[i]
+		}
+		if err := fn(rec); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
