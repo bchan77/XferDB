@@ -43,6 +43,8 @@ export const api = {
   updateProject: (id, body) => req('PUT', `/api/v1/projects/${encodeURIComponent(id)}`, body),
   deleteProject: (id) => req('DELETE', `/api/v1/projects/${encodeURIComponent(id)}`),
 
+  listDatabases: (body) => req('POST', '/api/v1/connections/databases', body),
+
   preflight: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/preflight`),
   analyze: (id, body) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/analyze`, body || {}),
   getTableSchema: (id, table) =>

@@ -260,3 +260,23 @@ func (s *Source) LookupRows(ctx context.Context, table string, keyCols []string,
 	defer rows.Close()
 	return adapters.ScanRecords(rows)
 }
+
+// ListDatabases implements adapters.DatabaseLister: every database that
+// accepts connections, minus the templates.
+func (s *Source) ListDatabases(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname`)
+	if err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}

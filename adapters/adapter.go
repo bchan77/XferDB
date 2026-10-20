@@ -221,6 +221,15 @@ type SourceAdapter interface {
 	GetInfo(ctx context.Context) (*DatabaseInfo, error)
 }
 
+// DatabaseLister is an optional interface for source adapters on a server
+// that hosts several databases (postgres, mysql). ListDatabases returns the
+// user databases the connected login can see, so a client can offer them as
+// a choice instead of making the user type the name. System databases
+// (templates, information_schema, ...) are left out.
+type DatabaseLister interface {
+	ListDatabases(ctx context.Context) ([]string, error)
+}
+
 // BulkCopyWriter is an optional interface for target adapters that support a
 // fast bulk-loading write path in place of their normal upsert-capable one —
 // postgres's COPY protocol, mysql's LOAD DATA LOCAL INFILE, sqlite's

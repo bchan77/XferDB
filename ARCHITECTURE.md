@@ -119,6 +119,7 @@ All clients interact exclusively through the REST API. The CLI and Web UI are th
 | `GET` | `/api/v1/projects/:id` | Get project details |
 | `DELETE` | `/api/v1/projects/:id` | Delete a project |
 | `POST` | `/api/v1/projects/:id/preflight` | Verify connectivity and permissions |
+| `POST` | `/api/v1/connections/databases` | List the databases on a postgres/mysql server from unsaved connection fields (for the project form's database picker); a connection failure is a 422 with the driver error |
 | `POST` | `/api/v1/projects/:id/analyze` | Diff schemas, generate suggestions |
 | `POST` | `/api/v1/projects/:id/migrations` | Start a new migration |
 | `GET` | `/api/v1/projects/:id/migrations` | List migrations for a project |
