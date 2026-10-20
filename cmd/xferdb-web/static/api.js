@@ -45,6 +45,7 @@ export const api = {
 
   listDatabases: (body) => req('POST', '/api/v1/connections/databases', body),
 
+  createTargetDatabase: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/target-database`),
   preflight: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/preflight`),
   analyze: (id, body) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/analyze`, body || {}),
   getTableSchema: (id, table) =>

@@ -98,44 +98,114 @@ func effectivePort(c adapters.ConnectionConfig) int {
 	return 5432
 }
 
-// listDatabases connects with cfg and lists its server's databases. With no
-// database given, postgres would default to one named after the user, which
-// usually doesn't exist, so it connects to the "postgres" maintenance
-// database, then "template1" if that one has been dropped. MySQL needs no
-// database to connect.
-func listDatabases(ctx context.Context, cfg adapters.ConnectionConfig) ([]string, error) {
+// onServer runs fn on a connection to cfg's server that doesn't need cfg's
+// own database to exist: listing a server's databases, or creating the one
+// that is missing. MySQL connects with no database. Postgres must name one
+// and would otherwise default to a database named after the user, which
+// usually doesn't exist, so it tries cfg's database (when set), then the
+// "postgres" maintenance database, then "template1", moving on only while
+// the error is that the database doesn't exist.
+func onServer(ctx context.Context, cfg adapters.ConnectionConfig, fn func(adapters.ConnectionConfig) error) error {
 	cfg.DSN = ""
-	candidates := []string{cfg.Database}
-	if cfg.Type == "postgres" && cfg.Database == "" {
+	var candidates []string
+	switch {
+	case cfg.Type == "mysql":
+		candidates = []string{""}
+	case cfg.Database != "":
+		candidates = []string{cfg.Database, "postgres", "template1"}
+	default:
 		candidates = []string{"postgres", "template1"}
 	}
-	var lastErr error
+	var err error
 	for _, db := range candidates {
 		cfg.Database = db
-		names, err := listDatabasesOnce(ctx, cfg)
-		if err == nil {
-			return names, nil
-		}
-		lastErr = err
-		if !strings.Contains(err.Error(), "does not exist") {
-			break
+		if err = fn(cfg); err == nil || !isMissingDatabase(err) {
+			return err
 		}
 	}
-	return nil, lastErr
+	return err
 }
 
-func listDatabasesOnce(ctx context.Context, cfg adapters.ConnectionConfig) ([]string, error) {
-	src, err := registry.NewSource(cfg.Type)
+// isMissingDatabase reports whether err is the server refusing a connection
+// because its database doesn't exist: postgres 3D000, mysql 1049.
+func isMissingDatabase(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "3D000") || strings.Contains(msg, "Error 1049")
+}
+
+func listDatabases(ctx context.Context, cfg adapters.ConnectionConfig) ([]string, error) {
+	var names []string
+	err := onServer(ctx, cfg, func(cfg adapters.ConnectionConfig) error {
+		src, err := registry.NewSource(cfg.Type)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		if err := src.Connect(ctx, cfg); err != nil {
+			return err
+		}
+		lister, ok := src.(adapters.DatabaseLister)
+		if !ok {
+			return fmt.Errorf("%s does not support listing databases", cfg.Type)
+		}
+		names, err = lister.ListDatabases(ctx)
+		return err
+	})
+	return names, err
+}
+
+// CreateTargetDatabase handles POST /api/v1/projects/{id}/target-database:
+// it creates the database the project's target config names, for a target
+// whose preflight failed because that database doesn't exist yet. It
+// connects to the server without that database (see onServer). An existing
+// database is not an error, so a retried click is harmless.
+func (h *ProjectsHandler) CreateTargetDatabase(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	p, err := h.DB.GetProject(r.Context(), id)
 	if err != nil {
-		return nil, err
+		writeError(w, http.StatusNotFound, "project not found")
+		return
 	}
-	defer src.Close()
-	if err := src.Connect(ctx, cfg); err != nil {
-		return nil, err
+	cfg := p.TargetConfig
+	if cfg.Type != "postgres" && cfg.Type != "mysql" {
+		writeError(w, http.StatusBadRequest, "creating the target database is supported for postgres and mysql only")
+		return
 	}
-	lister, ok := src.(adapters.DatabaseLister)
-	if !ok {
-		return nil, fmt.Errorf("%s does not support listing databases", cfg.Type)
+	if cfg.Database == "" {
+		writeError(w, http.StatusBadRequest, "the target connection names no database")
+		return
 	}
-	return lister.ListDatabases(ctx)
+
+	ctx, cancel := context.WithTimeout(r.Context(), listDatabasesTimeout)
+	defer cancel()
+	err = onServer(ctx, cfg, func(c adapters.ConnectionConfig) error {
+		tgt, err := registry.NewTarget(c.Type)
+		if err != nil {
+			return err
+		}
+		defer tgt.Close()
+		if err := tgt.Connect(ctx, c); err != nil {
+			return err
+		}
+		creator, ok := tgt.(adapters.DatabaseCreator)
+		if !ok {
+			return fmt.Errorf("%s does not support creating databases", c.Type)
+		}
+		return creator.CreateDatabase(ctx, cfg.Database)
+	})
+	if err != nil {
+		h.Log.Info("project.create_target_database", "project_id", id, "database", cfg.Database, "error", err)
+		writeError(w, http.StatusUnprocessableEntity, friendlyCreateDatabaseError(err))
+		return
+	}
+	h.Log.Info("project.create_target_database", "project_id", id, "database", cfg.Database)
+	writeJSON(w, http.StatusCreated, map[string]string{"database": cfg.Database})
+}
+
+func friendlyCreateDatabaseError(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "42501") || strings.Contains(msg, "Error 1044") || strings.Contains(msg, "permission denied") {
+		return msg + " — this user may not create databases: ask an administrator to create it, or to let this user create databases"
+	}
+	return friendlyConnectError(err)
 }

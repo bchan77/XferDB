@@ -230,6 +230,14 @@ type DatabaseLister interface {
 	ListDatabases(ctx context.Context) ([]string, error)
 }
 
+// DatabaseCreator is an optional interface for target adapters that can
+// create a database on their server (postgres, mysql), so a project whose
+// target database doesn't exist yet can have it made instead of failing
+// preflight. CreateDatabase succeeds if the database already exists.
+type DatabaseCreator interface {
+	CreateDatabase(ctx context.Context, name string) error
+}
+
 // BulkCopyWriter is an optional interface for target adapters that support a
 // fast bulk-loading write path in place of their normal upsert-capable one —
 // postgres's COPY protocol, mysql's LOAD DATA LOCAL INFILE, sqlite's

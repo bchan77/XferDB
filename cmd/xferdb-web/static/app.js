@@ -496,7 +496,7 @@ function toggleEditConn(project) {
   });
 }
 
-function permBlock(label, info, perm) {
+function permBlock(label, info, perm, missingDb) {
   const errs = (perm && perm.errors) || [];
   return `
     <div class="card">
@@ -512,6 +512,11 @@ function permBlock(label, info, perm) {
         </table>` : '<div class="hint">No connection info available.</div>'}
       ${perm ? `<div class="hint">read: ${perm.can_read ? '✓' : '✗'} · write: ${perm.can_write ? '✓' : '✗'} · create table: ${perm.can_create_table ? '✓' : '✗'}</div>` : ''}
       ${errs.map((e) => `<div class="banner error"><span>${esc(e)}</span></div>`).join('')}
+      ${missingDb ? `
+        <div class="actions-row">
+          <button class="btn primary" id="createTargetDbBtn">Create database "${esc(missingDb)}"</button>
+        </div>
+        <div id="createTargetDbErr"></div>` : ''}
     </div>
   `;
 }
@@ -523,7 +528,7 @@ function renderPreflightResult(result) {
     </div>
     <div class="split">
       ${permBlock('Source', result.source_info, result.source)}
-      ${permBlock('Target', result.target_info, result.target)}
+      ${permBlock('Target', result.target_info, result.target, result.target_missing_database)}
     </div>
   `;
 }
@@ -535,6 +540,21 @@ async function runPreflight(id) {
   try {
     const result = await api.preflight(id);
     area.innerHTML = renderPreflightResult(result);
+    const createBtn = document.getElementById('createTargetDbBtn');
+    if (createBtn) {
+      createBtn.addEventListener('click', async () => {
+        createBtn.disabled = true;
+        createBtn.textContent = 'Creating…';
+        try {
+          await api.createTargetDatabase(id);
+          await runPreflight(id);
+        } catch (err) {
+          createBtn.disabled = false;
+          createBtn.textContent = `Create database "${result.target_missing_database}"`;
+          document.getElementById('createTargetDbErr').innerHTML = errorBanner('Could not create the database: ' + err.message);
+        }
+      });
+    }
   } catch (err) {
     area.innerHTML = errorBanner('Preflight failed: ' + err.message, { retry: () => runPreflight(id) });
   }
