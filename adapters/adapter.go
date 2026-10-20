@@ -200,7 +200,9 @@ type DatabaseInfo struct {
 	Version      string `json:"version"`                 // e.g. "13.23", "8.0.3"
 	Host         string `json:"host"`                    // e.g. "postgres.homelab.local:5432"
 	Database     string `json:"database"`                // database/schema name
-	Schema       string `json:"schema,omitempty"`        // postgres: the schema tables are listed in
+	Schema       string `json:"schema,omitempty"`        // postgres: the one schema configured, empty when migrating all
+	// Schemas (postgres, all-schemas mode) lists the schemas holding tables.
+	Schemas []string `json:"schemas,omitempty"`
 	// OtherSchemas (postgres, only when Tables is 0) lists the schemas that do
 	// hold tables, so a client can point at the Schema setting.
 	OtherSchemas []string `json:"other_schemas,omitempty"`

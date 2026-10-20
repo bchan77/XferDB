@@ -31,12 +31,41 @@ func (e *Engine) pgDumpPreData(ctx context.Context, src, tgt adapters.Connection
 	if !hasPgTools() {
 		return false, nil
 	}
-	args := []string{"--section=pre-data", "--no-owner", "--no-privileges", "--no-comments"}
+	schemaArgs, ok := pgDumpSchemaArgs(src, tgt)
+	if !ok {
+		return false, nil
+	}
+	args := append([]string{"--section=pre-data", "--no-owner", "--no-privileges", "--no-comments"}, schemaArgs...)
 	if recreate {
 		args = append(args, "--clean", "--if-exists")
 	}
 	args = append(args, pgConnStr(src))
 	return e.runPgDumpPsql(ctx, args, src, tgt)
+}
+
+// pgDumpSchemaArgs reconciles pg_dump with the postgres adapter's table
+// names. pg_dump keeps every object in its source schema (its DDL is schema-
+// qualified), while the engine names a table in the source's own schema
+// bare and writes it to the target's own schema; ConnectionConfig.Schema,
+// or public, on each side. The two agree only when those schemas are the
+// same, so otherwise ok is false and the caller falls back to CreateTable.
+// A source limited to one schema dumps only that schema; with no Schema the
+// whole database is dumped, matching the adapter listing every schema.
+func pgDumpSchemaArgs(src, tgt adapters.ConnectionConfig) (args []string, ok bool) {
+	own := func(c adapters.ConnectionConfig) string {
+		if c.Schema != "" {
+			return c.Schema
+		}
+		return "public"
+	}
+	if own(src) != own(tgt) {
+		return nil, false
+	}
+	if src.Schema != "" {
+		// Double quotes make pg_dump match the name literally, not as a pattern.
+		return []string{`--schema="` + strings.ReplaceAll(src.Schema, `"`, `""`) + `"`}, true
+	}
+	return nil, true
 }
 
 // pgDumpPostData transfers the post-data schema section (indexes, FK constraints,
@@ -49,14 +78,18 @@ func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.Connectio
 		return false, nil
 	}
 
+	schemaArgs, ok := pgDumpSchemaArgs(src, tgt)
+	if !ok {
+		return false, nil
+	}
 	// Capture the post-data SQL from the source.
-	dumpArgs := []string{
+	dumpArgs := append([]string{
 		"--section=post-data",
 		"--no-owner",
 		"--no-privileges",
 		"--no-comments",
-		pgConnStr(src),
-	}
+	}, schemaArgs...)
+	dumpArgs = append(dumpArgs, pgConnStr(src))
 	dumpCmd := exec.CommandContext(ctx, "pg_dump", dumpArgs...)
 	dumpCmd.Env = withPGPassword(src)
 	var dumpOut, dumpErr bytes.Buffer

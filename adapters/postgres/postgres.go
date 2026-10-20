@@ -66,15 +66,51 @@ func quote(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
-// listTables returns all base tables in the connection's schema:
-// current_schema(), which is ConnectionConfig.Schema (via search_path, see
-// buildDSN) or public.
-func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
+// Table names. A table in the connection's own schema (current_schema():
+// ConnectionConfig.Schema via search_path, or public) is named bare, as it
+// always has been, so existing projects, checkpoints and plans keep their
+// names; a table in any other schema is named "schema.table". splitName and
+// qualify turn such a name back into its parts and into SQL.
+
+// splitName splits "schema.table" at the first dot; a bare name returns an
+// empty schema, meaning the connection's own.
+func splitName(name string) (schema, table string) {
+	if i := strings.IndexByte(name, '.'); i > 0 {
+		return name[:i], name[i+1:]
+	}
+	return "", name
+}
+
+// qualify returns name as a quoted SQL identifier, schema-qualified when it
+// names one.
+func qualify(name string) string {
+	schema, table := splitName(name)
+	if schema == "" {
+		return quote(table)
+	}
+	return quote(schema) + "." + quote(table)
+}
+
+// schemaExpr is the SQL for the schema a name's catalog lookup filters on:
+// the given one ($n), or the connection's own when it is empty.
+func schemaExpr(n int) string {
+	return fmt.Sprintf("COALESCE(NULLIF($%d::text, ''), current_schema())", n)
+}
+
+// listTables returns the base tables of the connection's own schema, or with
+// all set, of every schema except the system ones, named as described above.
+func listTables(ctx context.Context, db *sql.DB, all bool) ([]string, error) {
+	filter := "table_schema = current_schema()"
+	if all {
+		filter = `table_schema NOT IN ('pg_catalog', 'information_schema')
+		  AND table_schema NOT LIKE 'pg\_%'`
+	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT table_name
+		SELECT CASE WHEN table_schema = current_schema() THEN table_name
+		            ELSE table_schema || '.' || table_name END
 		FROM information_schema.tables
-		WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
-		ORDER BY table_name`)
+		WHERE table_type = 'BASE TABLE' AND `+filter+`
+		ORDER BY table_schema <> current_schema(), table_schema, table_name`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres list tables: %w", err)
 	}
@@ -89,6 +125,24 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 		names = append(names, name)
 	}
 	return names, rows.Err()
+}
+
+// schemasOf returns the distinct schemas of table names from listTables, a
+// bare name counting as own, the connection's schema.
+func schemasOf(names []string, own string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, n := range names {
+		s, _ := splitName(n)
+		if s == "" {
+			s = own
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // schemasWithTables returns the schemas other than the connection's own that
@@ -117,7 +171,8 @@ func schemasWithTables(ctx context.Context, db *sql.DB) ([]string, error) {
 }
 
 // getSchema introspects a table using information_schema and pg catalog tables.
-func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSchema, error) {
+func getSchema(ctx context.Context, db *sql.DB, name string) (*adapters.TableSchema, error) {
+	schemaName, table := splitName(name)
 	// Primary key columns.
 	pkRows, err := db.QueryContext(ctx, `
 		SELECT kcu.column_name
@@ -126,8 +181,8 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 		    ON tc.constraint_name = kcu.constraint_name
 		   AND tc.table_schema    = kcu.table_schema
 		WHERE tc.constraint_type = 'PRIMARY KEY'
-		  AND tc.table_schema    = current_schema()
-		  AND tc.table_name      = $1`, table)
+		  AND tc.table_schema    = `+schemaExpr(2)+`
+		  AND tc.table_name      = $1`, table, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("postgres primary keys(%s): %w", table, err)
 	}
@@ -158,16 +213,16 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 		FROM pg_catalog.pg_attribute a
 		LEFT JOIN pg_catalog.pg_attrdef d
 			ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-		WHERE a.attrelid = format('%I.%I', current_schema(), $1::text)::regclass
+		WHERE a.attrelid = format('%I.%I', `+schemaExpr(2)+`, $1::text)::regclass
 		AND a.attnum > 0
 		AND NOT a.attisdropped
-		ORDER BY a.attnum`, table)
+		ORDER BY a.attnum`, table, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("postgres schema(%s): %w", table, err)
 	}
 	defer colRows.Close()
 
-	schema := &adapters.TableSchema{Name: table}
+	schema := &adapters.TableSchema{Name: name}
 	for colRows.Next() {
 		var (
 			name     string
@@ -193,19 +248,19 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 		return nil, err
 	}
 
-	indexes, err := getIndexes(ctx, db, table)
+	indexes, err := getIndexes(ctx, db, schemaName, table)
 	if err != nil {
 		return nil, err
 	}
 	schema.Indexes = indexes
 
-	fks, err := getForeignKeys(ctx, db, table)
+	fks, err := getForeignKeys(ctx, db, schemaName, table)
 	if err != nil {
 		return nil, err
 	}
 	schema.ForeignKeys = fks
 
-	checks, err := getCheckConstraints(ctx, db, table)
+	checks, err := getCheckConstraints(ctx, db, schemaName, table)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +270,7 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 }
 
 // getIndexes returns non-primary-key indexes for a table using pg catalog tables.
-func getIndexes(ctx context.Context, db *sql.DB, table string) ([]adapters.IndexDef, error) {
+func getIndexes(ctx context.Context, db *sql.DB, schemaName, table string) ([]adapters.IndexDef, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 		    i.relname AS index_name,
@@ -227,11 +282,11 @@ func getIndexes(ctx context.Context, db *sql.DB, table string) ([]adapters.Index
 		JOIN pg_namespace n ON n.oid = t.relnamespace
 		JOIN generate_subscripts(ix.indkey, 1) AS k(pos) ON true
 		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ix.indkey[k.pos]
-		WHERE n.nspname = current_schema() AND t.relname = $1 AND t.relkind = 'r'
+		WHERE n.nspname = `+schemaExpr(2)+` AND t.relname = $1 AND t.relkind = 'r'
 		AND NOT ix.indisprimary
 		AND ix.indkey[k.pos] != 0
 		GROUP BY i.relname, ix.indisunique
-		ORDER BY i.relname`, table)
+		ORDER BY i.relname`, table, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("postgres indexes(%s): %w", table, err)
 	}
@@ -253,13 +308,15 @@ func getIndexes(ctx context.Context, db *sql.DB, table string) ([]adapters.Index
 	return result, rows.Err()
 }
 
-// getForeignKeys returns foreign key constraints for a table.
-func getForeignKeys(ctx context.Context, db *sql.DB, table string) ([]adapters.ForeignKey, error) {
+// getForeignKeys returns foreign key constraints for a table. A referenced
+// table outside the connection's own schema is named "schema.table".
+func getForeignKeys(ctx context.Context, db *sql.DB, schemaName, table string) ([]adapters.ForeignKey, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 		    rc.constraint_name,
 		    kcu.column_name,
-		    ccu.table_name  AS ref_table,
+		    CASE WHEN ccu.table_schema = current_schema() THEN ccu.table_name
+		         ELSE ccu.table_schema || '.' || ccu.table_name END AS ref_table,
 		    ccu.column_name AS ref_column,
 		    rc.update_rule,
 		    rc.delete_rule
@@ -270,9 +327,9 @@ func getForeignKeys(ctx context.Context, db *sql.DB, table string) ([]adapters.F
 		JOIN information_schema.constraint_column_usage ccu
 		    ON ccu.constraint_name = rc.unique_constraint_name
 		   AND ccu.constraint_schema = rc.unique_constraint_schema
-		WHERE rc.constraint_schema = current_schema()
+		WHERE rc.constraint_schema = `+schemaExpr(2)+`
 		AND kcu.table_name = $1
-		ORDER BY rc.constraint_name, kcu.ordinal_position`, table)
+		ORDER BY rc.constraint_name, kcu.ordinal_position`, table, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("postgres foreign keys(%s): %w", table, err)
 	}
@@ -310,17 +367,17 @@ func getForeignKeys(ctx context.Context, db *sql.DB, table string) ([]adapters.F
 
 // getCheckConstraints returns user-defined CHECK constraints for a table.
 // Implicit NOT NULL checks generated by PostgreSQL are excluded.
-func getCheckConstraints(ctx context.Context, db *sql.DB, table string) ([]adapters.CheckConstraint, error) {
+func getCheckConstraints(ctx context.Context, db *sql.DB, schemaName, table string) ([]adapters.CheckConstraint, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT cc.constraint_name, cc.check_clause
 		FROM information_schema.check_constraints cc
 		JOIN information_schema.table_constraints tc
 		    ON tc.constraint_name = cc.constraint_name
 		   AND tc.constraint_schema = cc.constraint_schema
-		WHERE tc.table_schema = current_schema() AND tc.table_name = $1
+		WHERE tc.table_schema = `+schemaExpr(2)+` AND tc.table_name = $1
 		AND tc.constraint_type = 'CHECK'
 		AND cc.check_clause NOT LIKE '% IS NOT NULL'
-		ORDER BY cc.constraint_name`, table)
+		ORDER BY cc.constraint_name`, table, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("postgres check constraints(%s): %w", table, err)
 	}
