@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
@@ -14,6 +15,9 @@ import (
 type Source struct {
 	db     *sql.DB
 	config adapters.ConnectionConfig
+
+	orderMu sync.Mutex
+	orderBy map[string]string // table -> "ORDER BY pk" for OFFSET paging, "" without a PK
 }
 
 func NewSource() adapters.SourceAdapter {
@@ -83,6 +87,38 @@ func (s *Source) GetPKRange(ctx context.Context, table, pkColumn string) (int64,
 	return minVal.Int64, maxVal.Int64, nil
 }
 
+// offsetOrder returns the ORDER BY that makes LIMIT/OFFSET paging of table
+// deterministic: its primary key, looked up once per table. Without it
+// PostgreSQL may return the rows of consecutive pages in different orders;
+// on a large table, synchronized sequential scans start each query where the
+// previous scan stopped, so pages overlap and skip, and a copy silently
+// duplicated some rows and lost others. A table without a primary key gets
+// no ORDER BY, as before.
+func (s *Source) offsetOrder(ctx context.Context, table string) (string, error) {
+	s.orderMu.Lock()
+	defer s.orderMu.Unlock()
+	if order, ok := s.orderBy[table]; ok {
+		return order, nil
+	}
+	schema, err := getSchema(ctx, s.db, table)
+	if err != nil {
+		return "", fmt.Errorf("primary key of %s: %w", table, err)
+	}
+	var cols []string
+	for _, c := range pkColumns(schema) {
+		cols = append(cols, quote(c))
+	}
+	order := ""
+	if len(cols) > 0 {
+		order = "ORDER BY " + strings.Join(cols, ", ")
+	}
+	if s.orderBy == nil {
+		s.orderBy = make(map[string]string)
+	}
+	s.orderBy[table] = order
+	return order, nil
+}
+
 func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.BatchOptions) (*adapters.Batch, error) {
 	var query string
 	if opts.PKCol != "" {
@@ -98,7 +134,11 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 			quote(opts.PKCol), opts.Limit,
 		)
 	} else {
-		query = fmt.Sprintf(`SELECT * FROM %s LIMIT %d OFFSET %d`, qualify(table), opts.Limit, opts.Offset)
+		order, err := s.offsetOrder(ctx, table)
+		if err != nil {
+			return nil, err
+		}
+		query = fmt.Sprintf(`SELECT * FROM %s %s LIMIT %d OFFSET %d`, qualify(table), order, opts.Limit, opts.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query)
