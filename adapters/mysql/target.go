@@ -539,3 +539,11 @@ func (t *Target) cachedSchema(ctx context.Context, table string) (*adapters.Tabl
 	t.mu.Unlock()
 	return schema, nil
 }
+
+// CreateDatabase implements adapters.DatabaseCreator.
+func (t *Target) CreateDatabase(ctx context.Context, name string) error {
+	if _, err := t.db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+quote(name)); err != nil {
+		return fmt.Errorf("create database %s: %w", name, err)
+	}
+	return nil
+}

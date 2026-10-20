@@ -46,7 +46,7 @@ func (s *Source) Ping(ctx context.Context) error {
 }
 
 func (s *Source) ListTables(ctx context.Context) ([]adapters.TableSchema, error) {
-	names, err := listTables(ctx, s.db)
+	names, err := listTables(ctx, s.db, s.config.Schema == "")
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func (s *Source) GetSchema(ctx context.Context, table string) (*adapters.TableSc
 func (s *Source) GetRowCount(ctx context.Context, table string) (int64, error) {
 	var count int64
 	err := s.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT COUNT(*) FROM %s`, quote(table))).Scan(&count)
+		fmt.Sprintf(`SELECT COUNT(*) FROM %s`, qualify(table))).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count(%s): %w", table, err)
 	}
@@ -76,7 +76,7 @@ func (s *Source) GetRowCount(ctx context.Context, table string) (int64, error) {
 }
 
 func (s *Source) GetPKRange(ctx context.Context, table, pkColumn string) (int64, int64, error) {
-	q := fmt.Sprintf(`SELECT MIN(%s), MAX(%s) FROM %s`, quote(pkColumn), quote(pkColumn), quote(table))
+	q := fmt.Sprintf(`SELECT MIN(%s), MAX(%s) FROM %s`, quote(pkColumn), quote(pkColumn), qualify(table))
 	var minVal, maxVal sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, q).Scan(&minVal, &maxVal); err != nil {
 		return 0, 0, fmt.Errorf("pk range(%s.%s): %w", table, pkColumn, err)
@@ -128,7 +128,7 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 		}
 		query = fmt.Sprintf(
 			`SELECT * FROM %s WHERE %s >= %d AND %s %s %d ORDER BY %s LIMIT %d`,
-			quote(table),
+			qualify(table),
 			quote(opts.PKCol), opts.PKMin,
 			quote(opts.PKCol), op, opts.PKMax,
 			quote(opts.PKCol), opts.Limit,
@@ -138,7 +138,7 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 		if err != nil {
 			return nil, err
 		}
-		query = fmt.Sprintf(`SELECT * FROM %s %s LIMIT %d OFFSET %d`, quote(table), order, opts.Limit, opts.Offset)
+		query = fmt.Sprintf(`SELECT * FROM %s %s LIMIT %d OFFSET %d`, qualify(table), order, opts.Limit, opts.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query)
@@ -246,6 +246,12 @@ func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 		info.Database = dbName
 	}
 
+	var schema sql.NullString
+	s.db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema) //nolint:errcheck
+	if s.config.Schema != "" {
+		info.Schema = schema.String
+	}
+
 	// Get host info from config or inet_server_addr()
 	if s.config.Host != "" {
 		port := s.config.Port
@@ -263,9 +269,15 @@ func (s *Source) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 	}
 
 	// Count tables
-	tables, err := listTables(ctx, s.db)
+	tables, err := listTables(ctx, s.db, s.config.Schema == "")
 	if err == nil {
 		info.Tables = len(tables)
+	}
+	if err == nil && s.config.Schema == "" {
+		info.Schemas = schemasOf(tables, schema.String)
+	}
+	if err == nil && len(tables) == 0 && s.config.Schema != "" {
+		info.OtherSchemas, _ = schemasWithTables(ctx, s.db)
 	}
 
 	// Get database size
@@ -294,10 +306,33 @@ func (s *Source) LookupRows(ctx context.Context, table string, keyCols []string,
 		return nil, nil
 	}
 	query, args := adapters.LookupQuery(quote, func(n int) string { return "$" + strconv.Itoa(n) }, table, keyCols, keys)
+	// LookupQuery quotes the table like a column; a "schema.table" name
+	// needs qualify instead.
+	query = strings.Replace(query, "FROM "+quote(table), "FROM "+qualify(table), 1)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("look up rows in %s: %w", table, err)
 	}
 	defer rows.Close()
 	return adapters.ScanRecords(rows)
+}
+
+// ListDatabases implements adapters.DatabaseLister: every database that
+// accepts connections, minus the templates.
+func (s *Source) ListDatabases(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname`)
+	if err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
 }

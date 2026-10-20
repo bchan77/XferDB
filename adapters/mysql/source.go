@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
@@ -254,4 +255,30 @@ func (s *Source) LookupRows(ctx context.Context, table string, keyCols []string,
 	}
 	defer rows.Close()
 	return adapters.ScanRecords(rows)
+}
+
+// mysqlSystemDatabases are the server's own schemas, never a migration's subject.
+var mysqlSystemDatabases = map[string]bool{
+	"information_schema": true, "mysql": true, "performance_schema": true, "sys": true,
+}
+
+// ListDatabases implements adapters.DatabaseLister: the databases SHOW
+// DATABASES returns for this login, minus the system schemas.
+func (s *Source) ListDatabases(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SHOW DATABASES`)
+	if err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		if !mysqlSystemDatabases[strings.ToLower(n)] {
+			names = append(names, n)
+		}
+	}
+	return names, rows.Err()
 }

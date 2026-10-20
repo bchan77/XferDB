@@ -14,6 +14,9 @@ type ConnectionConfig struct {
 	Username string `json:"username" yaml:"username"`
 	Password string `json:"password" yaml:"password"`
 	SSLMode  string `json:"ssl_mode" yaml:"ssl_mode"`
+	// Schema is the PostgreSQL schema to read tables from or write them to;
+	// empty means public. Other adapters ignore it.
+	Schema string `json:"schema,omitempty" yaml:"schema,omitempty"`
 	DSN      string `json:"dsn" yaml:"dsn"` // optional raw DSN; overrides individual fields if set
 }
 
@@ -197,6 +200,12 @@ type DatabaseInfo struct {
 	Version      string `json:"version"`                 // e.g. "13.23", "8.0.3"
 	Host         string `json:"host"`                    // e.g. "postgres.homelab.local:5432"
 	Database     string `json:"database"`                // database/schema name
+	Schema       string `json:"schema,omitempty"`        // postgres: the one schema configured, empty when migrating all
+	// Schemas (postgres, all-schemas mode) lists the schemas holding tables.
+	Schemas []string `json:"schemas,omitempty"`
+	// OtherSchemas (postgres, only when Tables is 0) lists the schemas that do
+	// hold tables, so a client can point at the Schema setting.
+	OtherSchemas []string `json:"other_schemas,omitempty"`
 	Tables       int    `json:"tables"`                  // number of tables/collections
 	SizeBytes    int64  `json:"size_bytes,omitempty"`    // total size in bytes (0 if unknown)
 	SizeHuman    string `json:"size_human,omitempty"`    // human-readable size e.g. "1.2 GB"
@@ -219,6 +228,23 @@ type SourceAdapter interface {
 	CheckPermissions(ctx context.Context) (*PermissionCheck, error)
 	// GetInfo returns metadata about the connected database (version, size, etc.).
 	GetInfo(ctx context.Context) (*DatabaseInfo, error)
+}
+
+// DatabaseLister is an optional interface for source adapters on a server
+// that hosts several databases (postgres, mysql). ListDatabases returns the
+// user databases the connected login can see, so a client can offer them as
+// a choice instead of making the user type the name. System databases
+// (templates, information_schema, ...) are left out.
+type DatabaseLister interface {
+	ListDatabases(ctx context.Context) ([]string, error)
+}
+
+// DatabaseCreator is an optional interface for target adapters that can
+// create a database on their server (postgres, mysql), so a project whose
+// target database doesn't exist yet can have it made instead of failing
+// preflight. CreateDatabase succeeds if the database already exists.
+type DatabaseCreator interface {
+	CreateDatabase(ctx context.Context, name string) error
 }
 
 // BulkCopyWriter is an optional interface for target adapters that support a

@@ -8,6 +8,7 @@ import (
 
 	"gitea.homelab.local/nextdevops/XferDB/api/handlers"
 	"gitea.homelab.local/nextdevops/XferDB/engine"
+	"gitea.homelab.local/nextdevops/XferDB/metrics"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/stats"
 )
@@ -25,6 +26,10 @@ type Server struct {
 	// validations is shared by every routes() call so a validation started
 	// through one handler can be found and cancelled through another.
 	validations *handlers.ValidationsHandler
+
+	// metrics is served at GET /metrics; shared by every routes() call, since
+	// a registry accepts each collector only once.
+	metrics *metrics.Metrics
 }
 
 // NewServer creates a Server backed by the given state database.
@@ -39,6 +44,7 @@ func NewServer(db *state.MetaDB, log *slog.Logger) *Server {
 		collectors:  make(map[string]*stats.Collector),
 		cancels:     make(map[string]context.CancelFunc),
 		validations: handlers.NewValidationsHandler(db, log),
+		metrics:     metrics.New(),
 	}
 }
 

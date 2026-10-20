@@ -193,6 +193,9 @@ input:disabled, select:disabled, textarea:disabled { background: var(--hover); c
 fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 14px 0; }
 legend { font-size: 12px; font-weight: 600; padding: 0 6px; color: var(--muted); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.db-picker { display: flex; gap: 8px; align-items: stretch; }
+.db-picker > span { flex: 1; min-width: 0; }
+.db-picker .btn { white-space: nowrap; }
 .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
 .checkbox-row input { width: auto; }
 .checkbox-row label { margin: 0; color: var(--text); font-size: 13px; }

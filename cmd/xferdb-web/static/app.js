@@ -46,7 +46,7 @@ function shortTail(s) {
   return s.length > 16 ? '…' + s.slice(-16) : s;
 }
 
-function subFieldsHTML(prefix, type, cfg) {
+function subFieldsHTML(prefix, type, cfg, isTarget) {
   cfg = cfg || {};
   if (type === 'sqlite') {
     return `
@@ -62,6 +62,8 @@ function subFieldsHTML(prefix, type, cfg) {
       ${hasDSN ? `<div class="hint">Currently ends in "${esc(shortTail(cfg.dsn))}". Leave blank to keep it.</div>` : ''}
     `;
   }
+  // Server and login first, then the database: once those are filled in,
+  // "Load databases" lists the server's databases to pick from.
   const hasPassword = !!cfg.password;
   return `
     <div class="field-row">
@@ -69,40 +71,139 @@ function subFieldsHTML(prefix, type, cfg) {
       <div><label>Port</label><input type="number" id="${prefix}-port" value="${cfg.port || ''}" placeholder="${type === 'mysql' ? '3306' : '5432'}"></div>
     </div>
     <div class="field-row">
-      <div><label>Database</label><input type="text" id="${prefix}-database" value="${esc(cfg.database || '')}"></div>
       <div><label>Username</label><input type="text" id="${prefix}-username" value="${esc(cfg.username || '')}"></div>
-    </div>
-    <div class="field-row">
       <div>
         <label>Password</label>
         <input type="password" id="${prefix}-password" placeholder="${hasPassword ? 'leave blank to keep current password' : ''}">
       </div>
-      ${type === 'postgres' ? `
+    </div>
+    ${type === 'postgres' ? `
+    <div class="field-row">
       <div>
         <label>SSL mode</label>
         <select id="${prefix}-sslmode">
           ${['', 'disable', 'require', 'prefer', 'verify-ca', 'verify-full']
             .map((m) => `<option value="${m}" ${cfg.ssl_mode === m ? 'selected' : ''}>${m || '(default)'}</option>`).join('')}
         </select>
-      </div>` : '<div></div>'}
+      </div>
+      <div></div>
+    </div>` : ''}
+    <label>Database</label>
+    <div class="db-picker">
+      <span id="${prefix}-dbslot"><input type="text" id="${prefix}-database" value="${esc(cfg.database || '')}" placeholder="type a name, or load the list"></span>
+      <button type="button" class="btn" id="${prefix}-loaddbs">Load databases</button>
     </div>
+    <div id="${prefix}-dbstatus"></div>
+    ${type === 'postgres' ? `
+    <div class="field-row">
+      <div>
+        <label>Schema</label>
+        <input type="text" id="${prefix}-schema" value="${esc(cfg.schema || '')}" placeholder="all schemas">
+        <div class="hint">${isTarget
+          ? 'Leave empty to keep each table in its source schema; set one to put tables from the source\'s default schema there'
+          : 'Leave empty to migrate every schema; set one to migrate only that schema'}</div>
+      </div>
+      <div></div>
+    </div>` : ''}
   `;
+}
+
+// Wires the "Load databases" button of a postgres/mysql editor: it sends the
+// fields typed so far to the API, which connects and lists the server's
+// databases, then swaps the Database text box for a dropdown of them. A
+// connection failure is shown under the field so the user can fix the
+// host/port/credentials and retry. `opts.projectId`/`opts.side` let the
+// settings form, which never shows the stored password, use it. On a target
+// whose typed database isn't on the server, it offers to create it.
+function wireDbPicker(container, prefix, readCfg, opts) {
+  const btn = container.querySelector(`#${prefix}-loaddbs`);
+  if (!btn) return;
+  const slot = container.querySelector(`#${prefix}-dbslot`);
+  const status = container.querySelector(`#${prefix}-dbstatus`);
+  const textInput = (value) =>
+    `<input type="text" id="${prefix}-database" value="${esc(value)}" placeholder="type a name, or load the list">`;
+
+  btn.addEventListener('click', async () => {
+    const cfg = readCfg();
+    if (!cfg.host) {
+      status.innerHTML = errorBanner('Enter the host first.');
+      return;
+    }
+    btn.disabled = true;
+    status.innerHTML = '<div class="hint"><span class="spinner"></span> Connecting…</div>';
+    try {
+      const res = await api.listDatabases({ config: cfg, project_id: opts.projectId, side: opts.side });
+      const dbs = res.databases || [];
+      if (!dbs.length) {
+        status.innerHTML = '<div class="hint">Connected, but this login sees no databases. Type the name instead.</div>';
+        return;
+      }
+      const current = cfg.database;
+      const options = current && !dbs.includes(current) ? [current, ...dbs] : dbs;
+      slot.innerHTML = `<select id="${prefix}-database">
+        ${current ? '' : '<option value="">— choose a database —</option>'}
+        ${options.map((d) => `<option value="${esc(d)}" ${d === current ? 'selected' : ''}>${esc(d)}</option>`).join('')}
+      </select>`;
+      status.innerHTML = `<div class="hint">Connected · ${dbs.length} database${dbs.length === 1 ? '' : 's'} found. <a href="#" id="${prefix}-dbmanual">Type a name instead</a></div>`;
+      status.querySelector(`#${prefix}-dbmanual`).addEventListener('click', (e) => {
+        e.preventDefault();
+        slot.innerHTML = textInput(container.querySelector(`#${prefix}-database`).value);
+        status.innerHTML = '';
+      });
+      if (current && !dbs.includes(current)) offerCreate(current);
+    } catch (err) {
+      status.innerHTML = errorBanner('Could not connect: ' + err.message);
+      // Listing falls back to the server's maintenance database, so this
+      // only happens when that is missing too, but the fix is the same.
+      if (cfg.database && /3D000|Error 1049/.test(err.message)) offerCreate(cfg.database);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Appends a "database doesn't exist yet" note with a Create button to the
+  // status line; once created, the list is reloaded so it shows as chosen.
+  function offerCreate(name) {
+    if (!opts.isTarget) {
+      status.insertAdjacentHTML('beforeend',
+        `<div class="hint">"${esc(name)}" is not on this server — pick one from the list.</div>`);
+      return;
+    }
+    status.insertAdjacentHTML('beforeend', `
+      <div class="banner info">
+        <span>"${esc(name)}" does not exist on this server yet.</span>
+        <button type="button" class="btn small primary" id="${prefix}-createdb">Create database</button>
+      </div>`);
+    const createBtn = status.querySelector(`#${prefix}-createdb`);
+    createBtn.addEventListener('click', async () => {
+      createBtn.disabled = true;
+      createBtn.textContent = 'Creating…';
+      try {
+        await api.createDatabase({ config: { ...readCfg(), database: name }, project_id: opts.projectId, side: opts.side });
+        btn.click();
+      } catch (err) {
+        status.innerHTML = errorBanner('Could not create the database: ' + err.message);
+      }
+    });
+  }
 }
 
 // Mounts a connection-config editor into `container`. Attaches a .read()
 // method to the container element that returns the current ConnectionConfig.
-function mountConnEditor(container, prefix, cfg, isTarget) {
+function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
   cfg = cfg || {};
+  opts = { ...opts, isTarget };
   const type = cfg.type || 'postgres';
   container.innerHTML = `
     <label>Type</label>
     <select id="${prefix}-type">${connTypeOptions(isTarget, type)}</select>
-    <div id="${prefix}-sub">${subFieldsHTML(prefix, type, cfg)}</div>
+    <div id="${prefix}-sub">${subFieldsHTML(prefix, type, cfg, isTarget)}</div>
   `;
   const typeSel = container.querySelector(`#${prefix}-type`);
   typeSel.value = type;
   typeSel.addEventListener('change', () => {
-    container.querySelector(`#${prefix}-sub`).innerHTML = subFieldsHTML(prefix, typeSel.value, {});
+    container.querySelector(`#${prefix}-sub`).innerHTML = subFieldsHTML(prefix, typeSel.value, {}, isTarget);
+    wireDbPicker(container, prefix, container.read, opts);
   });
   container.read = () => {
     const t = typeSel.value;
@@ -121,9 +222,11 @@ function mountConnEditor(container, prefix, cfg, isTarget) {
       username: g(`${prefix}-username`).trim(),
       password: g(`${prefix}-password`),
       ssl_mode: g(`${prefix}-sslmode`) || '',
+      schema: t === 'postgres' ? g(`${prefix}-schema`).trim() : '',
       dsn: '',
     };
   };
+  wireDbPicker(container, prefix, container.read, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +458,7 @@ function connSummaryHTML(cfg) {
     if (cfg.username) rows.push(['Username', cfg.username]);
     rows.push(['Password', cfg.password ? '•'.repeat(10) : '(none set)']);
     if (cfg.ssl_mode) rows.push(['SSL mode', cfg.ssl_mode]);
+    if (cfg.type === 'postgres') rows.push(['Schema', cfg.schema || '(all schemas)']);
   }
   return `<table class="kv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`;
 }
@@ -394,8 +498,8 @@ function toggleEditConn(project) {
   `;
   const srcEditor = document.getElementById('e-src');
   const tgtEditor = document.getElementById('e-tgt');
-  mountConnEditor(srcEditor, 'esrc', project.source_config, false);
-  mountConnEditor(tgtEditor, 'etgt', project.target_config, true);
+  mountConnEditor(srcEditor, 'esrc', project.source_config, false, { projectId: project.id, side: 'source' });
+  mountConnEditor(tgtEditor, 'etgt', project.target_config, true, { projectId: project.id, side: 'target' });
 
   document.getElementById('cancelConnBtn').addEventListener('click', () => {
     area.innerHTML = '';
@@ -437,7 +541,7 @@ function toggleEditConn(project) {
   });
 }
 
-function permBlock(label, info, perm) {
+function permBlock(label, info, perm, missingDb) {
   const errs = (perm && perm.errors) || [];
   return `
     <div class="card">
@@ -447,12 +551,21 @@ function permBlock(label, info, perm) {
           <tr><td>Type</td><td>${esc(info.type)} ${esc(info.version)}</td></tr>
           ${info.host ? `<tr><td>Host</td><td>${esc(info.host)}</td></tr>` : ''}
           ${info.database ? `<tr><td>Database</td><td>${esc(info.database)}</td></tr>` : ''}
+          ${info.schema ? `<tr><td>Schema</td><td>${esc(info.schema)}</td></tr>` : ''}
+          ${(info.schemas || []).length ? `<tr><td>Schemas</td><td>${info.schemas.map(esc).join(', ')}</td></tr>` : ''}
           <tr><td>Tables</td><td>${esc(info.tables)}</td></tr>
           ${info.size_human ? `<tr><td>Size</td><td>${esc(info.size_human)}</td></tr>` : ''}
           ${info.ssl ? `<tr><td>SSL</td><td>${esc(info.ssl)}</td></tr>` : ''}
         </table>` : '<div class="hint">No connection info available.</div>'}
+      ${info && !info.tables && (info.other_schemas || []).length ? `
+        <div class="banner info"><span>No tables in schema "${esc(info.schema || 'public')}". Tables were found in: ${info.other_schemas.map(esc).join(', ')}. Clear <strong>Schema</strong> under Edit Connection to migrate every schema, or set it to one of these.</span></div>` : ''}
       ${perm ? `<div class="hint">read: ${perm.can_read ? '✓' : '✗'} · write: ${perm.can_write ? '✓' : '✗'} · create table: ${perm.can_create_table ? '✓' : '✗'}</div>` : ''}
       ${errs.map((e) => `<div class="banner error"><span>${esc(e)}</span></div>`).join('')}
+      ${missingDb ? `
+        <div class="actions-row">
+          <button class="btn primary" id="createTargetDbBtn">Create database "${esc(missingDb)}"</button>
+        </div>
+        <div id="createTargetDbErr"></div>` : ''}
     </div>
   `;
 }
@@ -464,7 +577,7 @@ function renderPreflightResult(result) {
     </div>
     <div class="split">
       ${permBlock('Source', result.source_info, result.source)}
-      ${permBlock('Target', result.target_info, result.target)}
+      ${permBlock('Target', result.target_info, result.target, result.target_missing_database)}
     </div>
   `;
 }
@@ -476,6 +589,21 @@ async function runPreflight(id) {
   try {
     const result = await api.preflight(id);
     area.innerHTML = renderPreflightResult(result);
+    const createBtn = document.getElementById('createTargetDbBtn');
+    if (createBtn) {
+      createBtn.addEventListener('click', async () => {
+        createBtn.disabled = true;
+        createBtn.textContent = 'Creating…';
+        try {
+          await api.createTargetDatabase(id);
+          await runPreflight(id);
+        } catch (err) {
+          createBtn.disabled = false;
+          createBtn.textContent = `Create database "${result.target_missing_database}"`;
+          document.getElementById('createTargetDbErr').innerHTML = errorBanner('Could not create the database: ' + err.message);
+        }
+      });
+    }
   } catch (err) {
     area.innerHTML = errorBanner('Preflight failed: ' + err.message, { retry: () => runPreflight(id) });
   }

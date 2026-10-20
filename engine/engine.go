@@ -484,19 +484,15 @@ func (e *Engine) fail(ctx context.Context, err error) error {
 	return err
 }
 
-// filterTables returns the subset of schemas whose names match the filter list.
-// Entries in filters may be bare table names ("orders") or schema-qualified
-// ("public.orders"); the schema prefix is stripped before comparison.
+// filterTables returns the subset of schemas whose names match the filter list,
+// case-insensitively. A postgres source names a table outside its own schema
+// "schema.table", so such a filter matches only that table. "public.orders"
+// also matches a bare "orders", for filters written before postgres sources
+// named schemas.
 func filterTables(tables []adapters.TableSchema, filters []string) []adapters.TableSchema {
 	want := make(map[string]bool, len(filters))
 	for _, f := range filters {
-		// Normalise: strip schema prefix so "public.orders" → "orders".
-		bare := f
-		if idx := strings.LastIndex(f, "."); idx >= 0 {
-			bare = f[idx+1:]
-		}
-		want[strings.ToLower(bare)] = true
-		want[strings.ToLower(f)] = true // keep full name too for forward compat
+		want[filterKey(f)] = true
 	}
 	out := tables[:0:0] // nil-safe empty slice
 	for _, t := range tables {
@@ -505,6 +501,12 @@ func filterTables(tables []adapters.TableSchema, filters []string) []adapters.Ta
 		}
 	}
 	return out
+}
+
+// filterKey normalises a table filter: lower case, "public." dropped.
+func filterKey(f string) string {
+	f = strings.ToLower(f)
+	return strings.TrimPrefix(f, "public.")
 }
 
 // missingRequestedTables returns the names from the requested filter list that
@@ -516,11 +518,7 @@ func missingRequestedTables(found []adapters.TableSchema, requested []string) []
 	}
 	var missing []string
 	for _, req := range requested {
-		bare := req
-		if idx := strings.LastIndex(req, "."); idx >= 0 {
-			bare = req[idx+1:]
-		}
-		if !foundSet[strings.ToLower(bare)] && !foundSet[strings.ToLower(req)] {
+		if !foundSet[filterKey(req)] {
 			missing = append(missing, req)
 		}
 	}

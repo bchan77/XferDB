@@ -53,6 +53,7 @@ type Collector struct {
 	events      <-chan engine.ProgressEvent
 	log         *slog.Logger
 	saver       StatsSaver // optional; if set, stats are persisted periodically
+	observer    Observer   // optional; sees every event after it is applied
 
 	mu        sync.RWMutex
 	snapshot  StatsSnapshot
@@ -95,6 +96,20 @@ func NewCollector(migrationID, projectID string, events <-chan engine.ProgressEv
 	}
 }
 
+// Observer is told about each event the collector applies, from the
+// collector's own goroutine, and that the stream has ended. Used by the
+// metrics package, which can't be called from here without an import cycle.
+type Observer interface {
+	Observe(ev engine.ProgressEvent)
+	// Done is called once, after the engine closes its events channel.
+	Done()
+}
+
+// SetObserver sets an observer for the event stream. Call before Start.
+func (c *Collector) SetObserver(o Observer) {
+	c.observer = o
+}
+
 // SetSaver sets the stats saver for persisting snapshots. Call before Start.
 func (c *Collector) SetSaver(s StatsSaver) {
 	c.saver = s
@@ -120,6 +135,12 @@ func (c *Collector) Start(ctx context.Context) {
 		// Snapshot() at a stale phase (e.g. "paused") forever.
 		for ev := range c.events {
 			c.apply(ev)
+			if c.observer != nil {
+				c.observer.Observe(ev)
+			}
+		}
+		if c.observer != nil {
+			c.observer.Done()
 		}
 	}()
 
