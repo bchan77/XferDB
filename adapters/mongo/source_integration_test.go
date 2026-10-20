@@ -38,7 +38,7 @@ func TestReadBatch_PagesEveryIDShape(t *testing.T) {
 	// Registered before the drops below, so it runs after them (LIFO); a plain
 	// defer would disconnect before t.Cleanup gets to drop anything.
 	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
-	db := client.Database(databaseFromDSN(dsn))
+	db := client.Database(DatabaseFromURI(dsn))
 
 	uuid := func(i int) bson.Binary {
 		b := make([]byte, 16)
