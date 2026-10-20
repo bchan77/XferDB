@@ -238,6 +238,9 @@ table.kv td:first-child { color: var(--muted); width: 130px; }
 .col-row .edit-grid { display: grid; grid-template-columns: 1.4fr 1fr 0.9fr auto; gap: 6px; align-items: center; }
 .col-row .edit-grid select, .col-row .edit-grid input[type=text] { font-size: 12px; padding: 5px 6px; }
 
+.validation-progress { margin: 4px 0 10px; }
+.validation-progress-row { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.validation-progress-row:last-child { border-bottom: none; }
 .progress-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin-top: 6px; }
 .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
 .progress-bar .fill.done { background: var(--ok); }

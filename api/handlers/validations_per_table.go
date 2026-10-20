@@ -179,6 +179,7 @@ func (r *perTableRun) work() {
 			s, err = validate.Open(r.ctx, validate.Request{
 				Project: r.project, Plan: r.plan, Level: r.level,
 				BatchSize: r.project.TransferConfig.BatchSize, Sample: r.sample,
+				OnProgress: r.h.onProgress(r.v.ID),
 			})
 			if err != nil {
 				r.resultMu.Lock()
@@ -242,6 +243,7 @@ func (r *perTableRun) finish() {
 		r.h.mu.Lock()
 		delete(r.h.cancels, r.v.ID)
 		delete(r.h.byProject, r.project.ID)
+		delete(r.h.progress, r.v.ID)
 		r.h.mu.Unlock()
 	}()
 

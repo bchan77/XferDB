@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -26,6 +27,10 @@ type ValidationsHandler struct {
 	mu        sync.Mutex
 	cancels   map[string]context.CancelFunc // validation ID -> cancel
 	byProject map[string]string             // project ID -> active validation ID
+	// progress holds, per running validation, the latest Progress of each
+	// table being validated now. In memory only: it describes work in this
+	// process, and a table leaves it once its result is saved.
+	progress map[string]map[string]validate.Progress // validation ID -> table -> progress
 }
 
 // errValidationBusy means the project already has a validation running.
@@ -38,6 +43,7 @@ func NewValidationsHandler(db *state.MetaDB, log *slog.Logger) *ValidationsHandl
 		Log:       log,
 		cancels:   make(map[string]context.CancelFunc),
 		byProject: make(map[string]string),
+		progress:  make(map[string]map[string]validate.Progress),
 	}
 }
 
@@ -126,6 +132,7 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 			h.mu.Lock()
 			delete(h.cancels, v.ID)
 			delete(h.byProject, p.ID)
+			delete(h.progress, v.ID)
 			h.mu.Unlock()
 		}()
 		writeCtx := context.WithoutCancel(runCtx)
@@ -134,12 +141,13 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 
 		var failed int
 		err := validate.Run(runCtx, validate.Request{
-			Project:   p,
-			Plan:      plan,
-			Tables:    eligible,
-			Level:     level,
-			BatchSize: p.TransferConfig.BatchSize,
-			Sample:    sample,
+			Project:    p,
+			Plan:       plan,
+			Tables:     eligible,
+			Level:      level,
+			BatchSize:  p.TransferConfig.BatchSize,
+			Sample:     sample,
+			OnProgress: h.onProgress(v.ID),
 		}, func(t state.ValidationTable) {
 			if h.saveTable(writeCtx, v.ID, t, log) {
 				failed++
@@ -187,7 +195,37 @@ func (h *ValidationsHandler) saveTable(ctx context.Context, validationID string,
 			log.Error("validation.save_diffs_failed", "table", t.TableName, "error", err)
 		}
 	}
+	// Only now, with the result readable, so a poll never sees the table in
+	// neither place.
+	h.mu.Lock()
+	delete(h.progress[validationID], t.TableName)
+	h.mu.Unlock()
 	return failed
+}
+
+// onProgress returns the validate.Request.OnProgress that records a running
+// table's progress for GetValidation.
+func (h *ValidationsHandler) onProgress(validationID string) func(validate.Progress) {
+	return func(p validate.Progress) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.progress[validationID] == nil {
+			h.progress[validationID] = make(map[string]validate.Progress)
+		}
+		h.progress[validationID][p.Table] = p
+	}
+}
+
+// inProgress returns the tables of validationID being validated now, by name.
+func (h *ValidationsHandler) inProgress(validationID string) []validate.Progress {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]validate.Progress, 0, len(h.progress[validationID]))
+	for _, p := range h.progress[validationID] {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Table < out[j].Table })
+	return out
 }
 
 // StartValidation handles POST /api/v1/migrations/{id}/validations.
@@ -317,7 +355,10 @@ func (h *ValidationsHandler) GetValidation(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, struct {
 		*state.Validation
 		Tables []validationTableView `json:"tables"`
-	}{v, views})
+		// InProgress lists the tables being validated right now, with how far
+		// each has got; empty once the run is over.
+		InProgress []validate.Progress `json:"in_progress"`
+	}{v, views, h.inProgress(v.ID)})
 }
 
 // GetValidationDiffs handles GET /api/v1/validations/{id}/tables/{table}/diffs:
@@ -399,8 +440,14 @@ func (h *ValidationsHandler) ValidationStatus(w http.ResponseWriter, r *http.Req
 		last := lastMigration[t.TableName]
 		tables = append(tables, tableStatus{TableValidation: t, Stale: last != "" && last != t.MigrationID})
 	}
+	inProgress := []validate.Progress{}
+	if active != nil {
+		inProgress = h.inProgress(active.ID)
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Active *state.Validation `json:"active"`
 		Tables []tableStatus     `json:"tables"`
-	}{active, tables})
+		// InProgress: the active validation's tables being checked now.
+		InProgress []validate.Progress `json:"in_progress"`
+	}{active, tables, inProgress})
 }
