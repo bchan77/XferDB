@@ -53,6 +53,12 @@ type TransferConfig struct {
 	Validation       string `json:"validation,omitempty" yaml:"validation"`
 	ValidationLevel  string `json:"validation_level,omitempty" yaml:"validation_level"`
 	ValidationSample int    `json:"validation_sample,omitempty" yaml:"validation_sample"`
+
+	// RunOptionsSaved is set once the web UI's run form has saved its
+	// choices here as the project's defaults. Until then the form keeps its
+	// own defaults for the fields whose zero value isn't one (async pipeline
+	// on), since an older project's false means "never set", not "off".
+	RunOptionsSaved bool `json:"run_options_saved,omitempty" yaml:"-"`
 }
 
 // Project is a named migration project with a fixed source/target configuration.
