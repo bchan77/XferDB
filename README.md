@@ -1,6 +1,6 @@
 # XferDB
 
-**Universal database transfer tool** — migrate data between any databases with schema, indexes, foreign keys, and parallel table migration.
+**Universal database transfer tool** — migrate data between any databases with schema, indexes, foreign keys, parallel table migration, and built-in validation that the target matches the source.
 
 ---
 
@@ -9,7 +9,7 @@
 | Database | Source | Target | Tested Versions |
 |----------|--------|--------|-----------------|
 | PostgreSQL | ✅ | ✅ | 14, 15, 16, 17 |
-| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified) |
+| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified as source and target) |
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
@@ -19,17 +19,22 @@
 
 ### Tested Migration Paths
 
-Most of these are the pairs covered by the automated compatibility matrix (real
+Most of these are the pairs covered by the automated compatibility matrix (53 cases against real
 Postgres/MySQL/MongoDB instances in Kubernetes, run on every push/PR touching Go code — see
-[`XferDB-jenkins`](https://gitea.homelab.local/nextdevops/XferDB-jenkins)); each includes at
-least one case exercising `--bulk-copy`'s write path, not just the default one. Rows noted
-"manually verified" aren't automated yet.
+[`XferDB-jenkins`](https://gitea.homelab.local/nextdevops/XferDB-jenkins)). Every case also
+validates the result (L2, below), and each target has at least one case exercising
+`--bulk-copy`'s write path, not just the default one. Rows noted "manually verified" aren't
+automated yet.
 
 | Source | Target | Status |
 |--------|--------|--------|
-| MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 21/21 passing |
-| MySQL (8.0, 8.4, 9.7, 26.7) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 17/17 passing |
-| PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 7/7 passing |
+| MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 24 cases (incl. polymorphic/compound `_id` and nested documents) |
+| MySQL (8.0, 8.4, 9.7, 26.7) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 17 cases |
+| PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 7 cases |
+| PostgreSQL 17 | MySQL 8.4 | ✅ Tested — 2 cases |
+| PostgreSQL 17 | SQLite | ✅ Tested — 2 cases |
+| MySQL 26.7 | SQLite | ✅ Tested — 1 case |
+| YugabyteDB 2025.2.5.2 | YugabyteDB 2025.2.5.2 | ✅ Manually verified (incl. a 1.2M-row table validated at L2) |
 | PostgreSQL | YugabyteDB 2025.2.5.2 | ✅ Manually verified. The automated case (pinned to the older 2024.2.11.0-b36) is disabled — it hangs during execution (`config/matrix.yaml`) — so this pairing isn't yet covered by CI |
 | SQLite | PostgreSQL | Implemented; not yet covered by the automated compatibility matrix or an e2e test |
 
@@ -43,7 +48,9 @@ least one case exercising `--bulk-copy`'s write path, not just the default one. 
 - **Parallel table migration** — migrate N tables concurrently with `--table-workers`
 - **Intra-table parallel segments** — split each table into N PK-range segments with `--segment-workers`; falls back to OFFSET for tables without an integer PK
 - **Bulk copy mode** — `--bulk-copy` uses each target's fast bulk-load path for high-throughput writes (postgres: `COPY`, mysql: `LOAD DATA LOCAL INFILE`, sqlite: batched inserts); combine with `--truncate` or `--recreate-schema`
-- **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration
+- **Data validation** — after a migration, compare source and target: row counts (L1), every row's content (L2, the default), or L2 plus a primary-key diff listing the differing rows (L3); for every source, MongoDB included. See [Validation](#validation)
+- **All PostgreSQL schemas** — a PostgreSQL source migrates every non-system schema by default; the optional *Schema* setting narrows it to one
+- **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration; a missing target database can be created from the web UI
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
 - **Live progress display** — per-table status, rows/s, read/write rates, ETA, and live resource usage (goroutines, heap, CPU%)
 - **Detailed table status** — shows "counting rows...", "waiting for schema", "waiting for indexes" so you always know what's happening
@@ -130,7 +137,7 @@ projects:
       batch_size: 2500
 ```
 
-JSON is also supported (`examples/xferdb.json`). TOML is on the v0.6.x roadmap (`examples/xferdb.toml` shows the equivalent structure for reference); for now convert with `yq` or `toml2json`.
+JSON is also supported (`examples/xferdb.json`). TOML isn't parsed yet (`examples/xferdb.toml` shows the equivalent structure for reference); convert it with `yq` or `toml2json`.
 
 Full field-by-field reference: [`docs/CONFIG.md`](docs/CONFIG.md).
 
@@ -225,6 +232,9 @@ Phase: post_schema     Elapsed: 4m 12s  ETA: 0s
   ✓  orders                          1,000,000 rows
   ...
 ```
+
+When the migration completes, `xferdb migrate` waits for its validation and exits non-zero if
+any table's source and target differ.
 
 ---
 
@@ -370,6 +380,22 @@ xferdb migrate --batch-size 50000
 # Migrate specific tables only (comma-separated; schema.table notation supported)
 xferdb migrate --tables orders,customers
 xferdb migrate --tables public.orders,public.customers
+
+# Validation (default: after the migration, at L2)
+xferdb migrate --validation per_table        # validate each table as soon as it is copied
+xferdb migrate --validation-level L3 --validation-sample 10
+xferdb migrate --skip-validation
+```
+
+### Validate command
+
+Re-run validation on a migration that already finished:
+
+```bash
+xferdb validate                              # the current project's latest migration
+xferdb validate --project <name> --migration <id>
+xferdb validate --level L3 [--sample 10]     # list differing rows of failing tables
+xferdb validate --tables orders,customers
 ```
 
 ### Support bundle
@@ -386,6 +412,8 @@ xferdb support-bundle [project-name] --output /tmp/bundle.tar.gz
 ```bash
 xferdb server [--addr :8080] [--log-file <path>] [--log-level <level>]
 xferdb support-bundle [project-name] [--output <path>]
+xferdb validate [--project <name>] [--migration <id>] [--level L1|L2|L3]
+xferdb config init|validate|show|path
 xferdb version
 xferdb list
 ```
@@ -409,6 +437,46 @@ xferdb list
 
 ---
 
+## Validation
+
+A completed migration is validated automatically unless the project's `validation` setting is
+`off` or the run passes `--skip-validation`. Only tables that completed in that migration are
+checked; a result becomes *stale* once a later migration copies the table again.
+
+| Level | Checks | Cost |
+|-------|--------|------|
+| L1 | Row counts | Cheap |
+| L2 (default) | Every row, as an order-independent fingerprint of both sides | Reads both databases in full again |
+| L3 | L2, then for a failing table a primary-key diff: up to 100 example rows (missing, extra, different) | L3 sample % limits the diff |
+
+- **When:** `after` (default) validates once the whole migration completes, one table at a time;
+  `per_table` validates each table as soon as it is copied, with as many workers as the
+  migration's table workers; `off` skips it. *Validate now* in the web UI or `xferdb validate`
+  runs it on demand.
+- **Any pairing:** the source is re-read through its own adapter and schema plan (so MongoDB
+  flattening, renames and `_extra` are reproduced), and values are compared by the column's
+  logical type, so e.g. MySQL `DECIMAL` and PostgreSQL `numeric` match.
+- **Lossy by plan:** if you narrowed a column with a schema-plan override (e.g. a scale
+  reduction), the validator applies the same conversion the target does. A table whose only
+  differences are those conversions is reported as *lossy (plan)*, not failed.
+- **L3 needs a usable key:** integer, text, decimal, uuid, date, MongoDB `_id`, or a composite
+  of those. Other tables keep their L2 result, with the reason shown.
+- **Progress:** each table's step and rows read are shown live on the migration and tables
+  pages.
+
+---
+
+## PostgreSQL schemas
+
+With the project's *Schema* setting empty (the default), a PostgreSQL source migrates every
+non-system schema. Tables in the connection's own schema (`public`, normally) keep their bare
+name; others are named `schema.table`, and a PostgreSQL target creates the schema and writes
+there. Set *Schema* to migrate only that one schema. postgres→postgres native schema transfer
+(`pg_dump`) is used only when both sides' default schema match; otherwise schema is created by
+introspection, which can't recreate custom enum types.
+
+---
+
 ## DSN formats
 
 ```bash
@@ -429,7 +497,9 @@ mongodb://user:pass@host:27017/dbname?authSource=admin
 mongodb+srv://user:pass@cluster.mongodb.net/dbname  # Atlas SRV format
 ```
 
-> **Tip:** If your password contains special characters (`!`, `@`, `#`, etc.), URL-encode them: `!` → `%21`, `@` → `%40`. Use single quotes around the DSN to prevent shell expansion.
+> **Tip:** If your password contains special characters (`!`, `@`, `#`, etc.), URL-encode them: `!` → `%21`, `@` → `%40`. Use single quotes around the DSN to prevent shell expansion — and don't carry shell escapes such as `\!` into the web UI, where they become part of the password.
+>
+> **MongoDB:** when the URI names a database but the user is defined in `admin`, add `?authSource=admin`, or authentication fails.
 
 ---
 
@@ -439,7 +509,7 @@ XferDB detects common connection problems and gives actionable hints:
 
 | Error | Hint |
 |-------|------|
-| `database does not exist` | Create the database first: `CREATE DATABASE name;` |
+| `database does not exist` | Create the database first: `CREATE DATABASE name;` — or, for the target, click *Create database* in the web UI |
 | `SSL off` / `pg_hba.conf` | Add `?sslmode=require` to the DSN |
 | `authentication failed` | Check username and password |
 | `connection refused` | Check host, port, and that the server is running |
@@ -456,13 +526,13 @@ xferdb migrate --cancel     → stop the migration (history kept, checkpoints pr
 xferdb migrate              → restart (resumes from last checkpoint)
 ```
 
-On server restart, any interrupted migrations are automatically marked as failed. The next `xferdb migrate` resumes from the last saved checkpoint.
+On server restart, any interrupted migrations (and validations) are automatically marked as failed. The next `xferdb migrate` resumes from the last saved checkpoint.
 
 ---
 
 ## Native schema transfer (postgres→postgres)
 
-When both source and target are PostgreSQL (or YugabyteDB), XferDB uses `pg_dump` and `psql` instead of introspection-based `CREATE TABLE` statements. This preserves:
+When both source and target are PostgreSQL (or YugabyteDB), and both use the same default schema (see [PostgreSQL schemas](#postgresql-schemas)), XferDB uses `pg_dump` and `psql` instead of introspection-based `CREATE TABLE` statements. This preserves:
 
 - Extensions (`pgvector`, `PostGIS`, `pg_trgm`, etc.)
 - Custom types and enums
@@ -538,6 +608,12 @@ GET    /api/v1/projects/:id/schema-plan     # saved column-type overrides, keyed
 PUT    /api/v1/projects/:id/schema-plan     # body: [{"collection":"orders","field_name":"total","pg_type":"numeric",...}]
 DELETE /api/v1/projects/:id/schema-plan     # wipe overrides for one table (?collection=) or the whole project
 GET    /api/v1/projects/:id/support-bundle  # tar.gz diagnostic archive, credentials redacted
+GET    /api/v1/projects/:id/validation-status  # latest validation result per table
+POST   /api/v1/projects/:id/target-database # create the missing target database
+
+# Connections (unsaved form fields)
+POST   /api/v1/connections/databases        # list databases on a server
+POST   /api/v1/connections/create-database  # create a target database
 
 # Migrations
 POST   /api/v1/projects/:id/migrations      # body: {"table_workers":5,"segment_workers":10,"batch_size":50000,"truncate":true,"bulk_copy":true,"tables":["orders","customers"],...}
@@ -547,6 +623,13 @@ PATCH  /api/v1/migrations/:id               # body: {"action":"pause"|"resume"|"
 DELETE /api/v1/migrations/:id               # cancel + delete record
 GET    /api/v1/migrations/:id/stats
 GET    /api/v1/migrations/:id/stats/history # recorded snapshots (every 5s during migration)
+
+# Validations
+POST   /api/v1/migrations/:id/validations   # body: {"level":"L3","sample":10,"tables":["orders"]} (all optional)
+GET    /api/v1/migrations/:id/validations
+GET    /api/v1/validations/:id              # per-table results, plus live progress while running
+PATCH  /api/v1/validations/:id              # body: {"action":"cancel"}
+GET    /api/v1/validations/:id/tables/:table/diffs  # L3 example rows
 
 GET    /api/v1/health
 GET    /metrics                             # Prometheus metrics (see above)
@@ -571,20 +654,27 @@ xferdb-web --addr :3000 --api-addr http://localhost:8080
 
 - **Projects** (`#/`) — list, create, delete projects with live migration status badges
 - **Tables** (`#/projects/:id`) — a project's default landing page: its tables/collections,
-  live migration status with Run / Pause / Resume / Cancel, and migration history. While a
-  migration is active, tables are locked (not clickable) with a banner explaining why
+  live migration status with Run / Pause / Resume / Cancel, migration history, and each table's
+  validation badge (with live progress while it validates). While a migration is active,
+  tables are locked (not clickable) with a banner explaining why
 - **Table detail** (`#/projects/:id/tables/:table`) — split view: source columns on the left,
   suggested target schema on the right. The target type is an editable dropdown (per-dialect
   choices for Postgres/MySQL/SQLite/Mongo→Postgres) with Save-with-confirmation, backed by the
   `schema-plan` endpoints above — available for every adapter pairing, not just MongoDB→Postgres
 - **Settings** (`#/projects/:id/settings`) — connection config view/edit, preflight/test
-  connection, download support bundle, reset schema plans, delete project
+  connection, project validation defaults, download support bundle, reset schema plans, delete
+  project. The connection editor asks for host, port, credentials and SSL mode first; *Load
+  databases* then lists the server's databases (or shows the connection error), and a missing
+  target database can be created with *Create database*
 - **Migration progress** (`#/migrations/:id`) — full live progress page with real-time stats,
-  per-table breakdown, resource usage, pause/resume/cancel controls, and stats history
+  per-table breakdown, resource usage, pause/resume/cancel controls, stats history, and the
+  validation results card (*Validate now*, per-table progress, *View rows* for L3 diffs)
 
 ### Migration options (Web UI)
 
-The "Run a migration" form exposes all CLI migration options:
+The "Run a migration" form exposes all CLI migration options. It opens with the options of
+the project's last run from the form; schema mode, bulk copy and table selection always start
+from their safe defaults.
 
 | Option | Description |
 |--------|-------------|
@@ -592,6 +682,9 @@ The "Run a migration" form exposes all CLI migration options:
 | **Table workers** | Number of tables to migrate concurrently |
 | **Batch size** | Rows per INSERT batch |
 | **Segment workers** | Parallel workers per table (splits by PK range) |
+| **Validation** | After migration, as each table finishes, or skip |
+| **Validation level** | L1, L2 or L3 (see [Validation](#validation)) |
+| **L3 sample (%)** | Share of a failing table the L3 diff checks; 0 checks every row |
 | **Tables to migrate** | Select/deselect individual tables (appears after analyze) |
 
 **Performance options** (expandable section):
@@ -653,6 +746,8 @@ go build -o xferdb ./cmd/xferdb
 - [x] Database info in preflight (type, version, host, table count, size, SSL)
 - [x] Support bundle (`xferdb support-bundle`)
 - [x] Prometheus metrics (`GET /metrics`)
+- [x] Post-migration data validation (L1 counts, L2 row fingerprint, L3 row diff)
+- [x] All PostgreSQL schemas by default
 - [ ] MongoDB target adapter
 - [x] Web UI (projects, live table browser, migration status/controls, schema editor for every adapter pairing)
 - [ ] WebSocket live progress

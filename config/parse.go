@@ -10,10 +10,10 @@ import (
 
 // parse dispatches to the right decoder based on file extension.
 // JSON is also accepted as a fallback for users who prefer it.
-// (TOML is on the v0.6.x roadmap but excluded from v0.6.0 to keep the
-// dependency surface minimal — see examples/xferdb.yaml for the equivalent
-// YAML structure, or examples/xferdb.toml for the same content in TOML
-// syntax, or convert one to the other with `toml2json`/`yq`.)
+// (TOML isn't supported yet, to keep the dependency surface minimal — see
+// examples/xferdb.yaml for the equivalent YAML structure, or
+// examples/xferdb.toml for the same content in TOML syntax, or convert one to
+// the other with `toml2json`/`yq`.)
 func parse(path string, data []byte) (*File, error) {
 	lower := strings.ToLower(path)
 	switch {
@@ -22,7 +22,7 @@ func parse(path string, data []byte) (*File, error) {
 	case strings.HasSuffix(lower, ".json"):
 		return parseJSON(data)
 	case strings.HasSuffix(lower, ".toml"):
-		return nil, fmt.Errorf("TOML config files are not supported in v0.6.0 — convert to YAML with `toml2json`/`yq` or upgrade to v0.6.1+")
+		return nil, fmt.Errorf("TOML config files are not supported yet — convert to YAML or JSON with `yq` or `toml2json`")
 	default:
 		// Sniff: try YAML first (most permissive), then JSON.
 		var f File
