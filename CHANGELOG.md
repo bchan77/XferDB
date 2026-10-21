@@ -4,7 +4,79 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-21
+
+Post-migration data validation, Prometheus metrics, multi-schema PostgreSQL, and a set of fixes
+for migrations that finished "successfully" while losing or mangling data.
+
+### Behavior changes
+Read these before upgrading from 1.0.0.
+- **Validation runs by default.** A completed migration is now validated at L2 (row count +
+  row fingerprint), and `xferdb migrate` waits for it and **exits non-zero when a table fails**.
+  Scripts that wrap `xferdb migrate` can start failing where they used to pass. Turn it off per
+  run with `--skip-validation` (`"validation": "off"`), or per project with
+  `transfer.validation: off`. The old `validate` bool in transfer config was never read and is
+  replaced by `validation` / `validation_level` / `validation_sample`.
+- **A PostgreSQL source with no `Schema` migrates every non-system schema**, not just `public`.
+  Tables in the connection's own schema keep bare names (so existing projects, checkpoints and
+  plans are unaffected); tables in other schemas are named `schema.table` and land in the same
+  schema on a PostgreSQL target. Set `Schema: public` to keep the 1.0.0 behaviour.
+- **Engine table filter**: `loadtest.orders` now matches only that table; it used to also match
+  a bare `orders`. `public.orders` still matches `orders`.
+- **Async pipeline is on by default** in the web UI's run form.
+
+### Added
+- **Post-migration validation (#103)** — for every source, MongoDB included. The validator
+  re-reads the source through the schema plan (so flattening, skipped fields and `_extra`
+  reproduce themselves) and compares canonicalized values by the intended column type, so
+  `true` vs `1`, `1.50` vs `1.5`, JSON key order and timestamp precision don't read as
+  differences.
+  - **L1** row counts; **L2** order-independent row fingerprint (also covers tables without a
+    primary key); **L3** primary-key row diff that names missing, extra and changed rows (with
+    the changed columns), for integer, text, decimal, uuid, date, Mongo `_id` and composite
+    keys. `--sample N` limits L3 to a percentage. Up to 100 example rows per table are kept.
+  - **Lossy by plan** — when a schema-plan override narrows a column (e.g. `numeric(10,4)` →
+    `numeric(10,2)`, `double` → `integer` on MySQL, `timestamp` → `date`), the validator applies
+    the same conversion the target does. A table whose only differences are those conversions is
+    `expected_lossy`, not a failure.
+  - **`per_table` mode** validates each table as soon as it finishes copying, while the rest
+    are still running, so a bad table shows up early.
+  - Live progress per table (step, rows read, rate, ETA) on the migration page and the tables
+    page.
+  - CLI: `xferdb validate [--level L1|L2|L3] [--sample N]`; `migrate --skip-validation`,
+    `--validation after|per_table|off`, `--validation-level`, `--validation-sample`.
+  - API: `POST/GET /migrations/:id/validations`, `GET/PATCH /validations/:id`,
+    `GET /validations/:id/tables/:table/diffs`, `GET /projects/:id/validation-status`.
+  - Web UI: validation controls on the run form and in project settings, per-table badges, a
+    results card with *Validate now*, and a *View rows* drawer for L3 differences.
+- **Prometheus metrics (#105)** — `xferdb server` serves `GET /metrics` (outside `/api/`, so the
+  web process doesn't proxy it): rows/tables/migrations counters, batch read/write duration
+  histograms, per-active-migration gauges (phase, progress, rows/s, ETA, tables by state), and
+  Go runtime/process collectors.
+- **PostgreSQL schemas** — a `Schema` setting on PostgreSQL connections (empty = all schemas on
+  a source, one schema when set). Targets create the schema as needed (`CREATE SCHEMA IF NOT
+  EXISTS`), COPY included. Preflight lists the schemas it found. Verified against YugabyteDB
+  2025.2.5.2.
+- **Database picker** — the connection editor asks for host, port, credentials and SSL mode
+  first, then *Load databases* turns the Database field into a dropdown of the server's
+  databases (`POST /api/v1/connections/databases`).
+- **Create a missing target database** — when preflight fails only because the target database
+  doesn't exist, the settings page (and the connection editor's target side) offers a
+  *Create database* button. It is never automatic, so a mistyped name doesn't quietly become a
+  new database.
+- **Run form remembers its options per project** — workers, batch size, segment workers,
+  performance options and validation choices are saved back to the project on *Run Migration*.
+  Schema mode, bulk copy and table selection are deliberately not remembered.
+- **Finished migrations list their tables** — `GET /api/v1/migrations/:id` returns per-table
+  outcomes, and the migration page shows them instead of "No tables yet".
+
 ### Fixed
+- **PostgreSQL OFFSET paging could skip and repeat rows** — with segment workers at 0 (the
+  default) pages had no `ORDER BY`, so on large tables consecutive pages overlapped. A 2M-row
+  copy wrote 2,000,000 rows holding only 1,242,222 distinct ids. Pages are now ordered by the
+  primary key.
+- **WriteBatch dropped fields missing from a batch's first record (#96)** — all three targets
+  now take the column list from the table schema; absent fields are written as NULL.
 - **MongoDB `_id` shapes that failed or were silently truncated (#97)** — a polymorphic `_id`
   (e.g. mostly Int64 with a few strings) now widens to `text` (or `bigint` for Int32/Int64)
   instead of taking the majority type; a compound (embedded-document) `_id` uses the `as_jsonb`
@@ -16,6 +88,43 @@ All notable changes to XferDB are documented here.
   of its own type, the migration stopped after the first 1000 rows with no error. Polymorphic
   `_id`s could drop every type after the first. Resume keys checkpointed by older versions
   still decode.
+- **MongoDB nested flattening and long collection names (#98)** — flattening now recurses to
+  every depth (grandchild columns were created but never written), and collection names longer
+  than PostgreSQL's 63-byte identifier limit get a deterministic hashed suffix instead of two
+  collections silently sharing one table.
+- **MongoDB dotted field names (#117)** — a literal `"a.b"` key colliding with a nested
+  `a: {b: …}` path is now reported as a warning in analyze and the CLI instead of merging
+  silently.
+- **MongoDB URIs the driver accepts but `url.Parse` doesn't** (e.g. a backslash in the
+  password) no longer fail with "database name cannot be empty".
+- **MySQL target passed source type names straight into DDL** — a PostgreSQL source failed
+  `CREATE TABLE`. Types are now translated; unqualified `numeric` becomes `decimal(65,30)`
+  (MySQL's bare `DECIMAL` drops every fraction digit) and timestamps become `datetime`
+  (MySQL `TIMESTAMP` stops at 2038). TEXT/BLOB/JSON primary keys get a prefix length.
+- **SQLite target type mapping and BLOB binding (#119)** — source types are mapped to SQLite
+  affinities (wide numerics stay exact as TEXT), `[]byte` values are no longer stored as BLOB in
+  non-BLOB columns (a MySQL → SQLite copy stored even `varchar` as BLOB), and composite primary
+  keys are declared at table level.
+- **SQLite "database is locked" failing tables under parallel writes (#124)** — the state store
+  and the SQLite target each use a single write connection.
+- **`sqlite://` DSNs from a config file** now open instead of failing with "unable to open
+  database file".
+- **PostgreSQL connection strings are quoted (#130)** — an empty password no longer swallows the
+  next setting (which turned `sslmode=disable` into the password).
+- **Schema-plan overrides from `project schema --set` blanked the column name and primary key
+  (#113)** — overrides are now partial updates.
+- **Engine lifecycle events could be dropped (#137)** and **table status write errors were
+  ignored on segment-parallel paths (#138)**, leaving finished tables shown as in progress or
+  not recorded as completed.
+- **Stats snapshot shared its table slice with the collector (#125).**
+- **Web UI**: loading tables no longer wipes values typed into the run form; static assets are
+  sent with `Cache-Control: no-cache` so a browser picks up a new build after an upgrade.
+
+### Changed
+- Release binaries are no longer committed under `releases/`; they are attached to the Gitea
+  release only.
+- CI posts matrix results as PR comments rather than reviews (Gitea refuses self-approval).
+- `github.com/prometheus/client_golang` v1.24.1 added (pinned: v1.25 requires Go 1.26).
 
 ## [1.0.0] - 2026-09-23
 
