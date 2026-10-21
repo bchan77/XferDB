@@ -134,7 +134,7 @@ func TestLoad_TOML_Rejected(t *testing.T) {
 	}
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error: TOML is not supported in v0.6.0")
+		t.Fatal("expected error: TOML is not supported")
 	}
 	if !strings.Contains(err.Error(), "TOML") {
 		t.Errorf("error should mention TOML: %v", err)

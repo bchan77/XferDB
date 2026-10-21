@@ -6,8 +6,7 @@ control instead of on the command line. This document is the field-by-field
 reference; `examples/xferdb.yaml` is the same content as a runnable, annotated
 example.
 
-TOML is documented (`examples/xferdb.toml`) but not yet parseable — tracked
-for v0.6.1. Pointing `--config` at a `.toml` file returns an error explaining
+TOML is documented (`examples/xferdb.toml`) but not yet parseable. Pointing `--config` at a `.toml` file returns an error explaining
 how to convert it in the meantime.
 
 ## Locating the file

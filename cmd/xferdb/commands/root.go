@@ -49,7 +49,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&ServerAddr, "server", "http://localhost:8080",
 		"XferDB API server address")
 	RootCmd.PersistentFlags().StringVar(&ConfigPath, "config", "",
-		"Path to xferdb.{yaml,toml,json} (default: $XFERDB_CONFIG, then ./xferdb.yaml, then ~/.xferdb/config.yaml)")
+		"Path to xferdb.{yaml,yml,json} (default: $XFERDB_CONFIG, then ./xferdb.yaml, then ~/.xferdb/config.yaml)")
 
 	RootCmd.AddCommand(serverCmd)
 	RootCmd.AddCommand(projectCmd)
