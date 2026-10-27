@@ -47,7 +47,8 @@ export const api = {
   createDatabase: (body) => req('POST', '/api/v1/connections/create-database', body),
 
   createTargetDatabase: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/target-database`),
-  preflight: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/preflight`),
+  // mode 'live' adds the live-migration checks (#102).
+  preflight: (id, mode) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/preflight`, mode ? { mode } : undefined),
   analyze: (id, body) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/analyze`, body || {}),
   getTableSchema: (id, table) =>
     req('GET', `/api/v1/projects/${encodeURIComponent(id)}/tables/${encodeURIComponent(table)}`),
