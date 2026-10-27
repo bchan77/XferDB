@@ -18,6 +18,8 @@ type migrationRow struct {
 	CompletedAt sql.NullTime `db:"completed_at"`
 	Error       string       `db:"error"`
 	SchemaPlan  string       `db:"schema_plan"`
+	Mode        string       `db:"mode"`
+	Phase       string       `db:"phase"`
 }
 
 func (r *migrationRow) toMigration() *adapters.Migration {
@@ -27,6 +29,8 @@ func (r *migrationRow) toMigration() *adapters.Migration {
 		Status:    adapters.MigrationStatus(r.Status),
 		CreatedAt: r.CreatedAt,
 		Error:     r.Error,
+		Mode:      r.Mode,
+		Phase:     r.Phase,
 	}
 	if r.StartedAt.Valid {
 		t := r.StartedAt.Time
@@ -69,10 +73,14 @@ func (r *tableProgressRow) toTableProgress() adapters.TableProgress {
 
 // CreateMigration inserts a new migration record.
 func (m *MetaDB) CreateMigration(ctx context.Context, mg *adapters.Migration) error {
+	mode := mg.Mode
+	if mode == "" {
+		mode = adapters.MigrationModeSnapshot
+	}
 	_, err := m.db.ExecContext(ctx, `
-		INSERT INTO migrations (id, project_id, status, created_at)
-		VALUES (?, ?, ?, ?)`,
-		mg.ID, mg.ProjectID, string(mg.Status), mg.CreatedAt,
+		INSERT INTO migrations (id, project_id, status, created_at, mode, phase)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		mg.ID, mg.ProjectID, string(mg.Status), mg.CreatedAt, mode, mg.Phase,
 	)
 	if err != nil {
 		return fmt.Errorf("create migration: %w", err)
@@ -225,6 +233,9 @@ func (m *MetaDB) DeleteMigration(ctx context.Context, id string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM validations WHERE migration_id = ?`, id); err != nil {
 		return fmt.Errorf("delete validations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cdc_streams WHERE migration_id = ?`, id); err != nil {
+		return fmt.Errorf("delete cdc_streams: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM migrations WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("delete migration: %w", err)

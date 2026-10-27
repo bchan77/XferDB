@@ -100,6 +100,15 @@ func Run(t *testing.T, target adapters.TargetAdapter, read func(table string) ma
 		if err := tx.Delete(ctx, table, []map[string]interface{}{key(2, "a"), key(98, "z")}); err != nil {
 			return err
 		}
+		for k, want := range map[int64]bool{1: true, 2: false, 4: true} {
+			tenant := "a"
+			if k == 4 {
+				tenant = "b"
+			}
+			if got, err := tx.Exists(ctx, table, key(k, tenant)); err != nil || got != want {
+				return fmt.Errorf("Exists(%d) = %v, %v; want %v", k, got, err, want)
+			}
+		}
 		return tx.SetApplied(ctx, stream, table, 7)
 	})
 	want("update and delete", map[string]string{"1/a": "uno", "4/b": "four"})

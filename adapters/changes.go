@@ -35,6 +35,8 @@ type ChangeTx interface {
 	// Update sets some columns of existing rows. It returns how many rows
 	// it found; a row that isn't there is skipped, not an error.
 	Update(ctx context.Context, table string, updates []RowUpdate) (int64, error)
+	// Exists reports whether a row with this key is there.
+	Exists(ctx context.Context, table string, key map[string]interface{}) (bool, error)
 	// Truncate empties a table inside the transaction.
 	Truncate(ctx context.Context, table string) error
 	// SetApplied records seq as a table's last applied change.
@@ -176,6 +178,30 @@ func (s *SQLChangeTx) Update(ctx context.Context, table string, updates []RowUpd
 	return found, nil
 }
 
+func (s *SQLChangeTx) Exists(ctx context.Context, table string, key map[string]interface{}) (bool, error) {
+	keyCols := sortedKeys(key)
+	if len(keyCols) == 0 {
+		return false, fmt.Errorf("look up %s: no key columns", table)
+	}
+	var args []interface{}
+	conds := make([]string, len(keyCols))
+	for i, c := range keyCols {
+		v, err := s.bind(ctx, table, c, key[c])
+		if err != nil {
+			return false, err
+		}
+		args = append(args, v)
+		conds[i] = s.QuoteColumn(c) + " = " + s.Placeholder(len(args))
+	}
+	rows, err := s.Tx.QueryContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE %s LIMIT 1", s.QuoteTable(table), strings.Join(conds, " AND ")), args...)
+	if err != nil {
+		return false, fmt.Errorf("look up %s: %w", table, err)
+	}
+	defer rows.Close()
+	found := rows.Next()
+	return found, rows.Err()
+}
+
 func (s *SQLChangeTx) Truncate(ctx context.Context, table string) error {
 	if _, err := s.Tx.ExecContext(ctx, fmt.Sprintf(s.TruncateSQL, s.QuoteTable(table))); err != nil {
 		return fmt.Errorf("truncate %s: %w", table, err)
@@ -220,4 +246,24 @@ func sortedKeys(m map[string]interface{}) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// LiveCheck is one item of a live migration's preflight: something the
+// source (or target) needs before changes can be streamed from it.
+type LiveCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+	// Fix says what to change when the check fails.
+	Fix string `json:"fix,omitempty"`
+	// Warning marks a check that doesn't block a live migration but is
+	// worth knowing about, such as unlimited WAL retention.
+	Warning bool `json:"warning,omitempty"`
+}
+
+// LivePreflighter is implemented by source adapters a live migration can
+// stream from. LiveChecks checks what streaming tables needs; no tables
+// means every table the source would migrate.
+type LivePreflighter interface {
+	LiveChecks(ctx context.Context, tables []string) ([]LiveCheck, error)
 }
