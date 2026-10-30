@@ -15,6 +15,9 @@ const defaultBatchSize = 1000
 
 // transferTable is the dispatcher: sequential for SegmentWorkers<=1, parallel otherwise.
 func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableSchema) error {
+	if e.live != nil {
+		return e.transferTableKeyset(ctx, sourceSchema)
+	}
 	cfg := e.project.TransferConfig
 	bw := cfg.SegmentWorkers
 	if bw <= 1 {

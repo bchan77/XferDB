@@ -2,6 +2,8 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -193,6 +195,15 @@ type BatchOptions struct {
 	PKMin      int64  // inclusive lower bound for the segment range
 	PKMax      int64  // upper bound for the segment range
 	PKMaxIncl  bool   // when true use <= for PKMax (last segment); otherwise use <
+	// Keyset paging by the whole primary key, for a live migration's
+	// snapshot (#102), where rows change while they are read and OFFSET
+	// would skip or repeat some: rows after KeyAfter (nil: from the first)
+	// up to and including KeyUpTo, in key order. Keys are the key columns'
+	// text forms, in KeysetSource.KeyColumns order. The batch's LastKey is
+	// the last row's key, as EncodeKey makes it.
+	Keyset   bool
+	KeyAfter []string
+	KeyUpTo  []string
 }
 
 // Batch holds a set of records read from a source table.
@@ -201,6 +212,34 @@ type Batch struct {
 	Size    int
 	LastPK  int64  // set by ReadBatch when PKCol is used; last PK value in this batch (integer PK-range workers)
 	LastKey string // opaque resume token for keyset adapters (e.g. MongoDB _id as hex); empty for SQL adapters
+}
+
+// KeysetSource is implemented by sources that can page a table by its
+// primary key (BatchOptions.Keyset).
+type KeysetSource interface {
+	// KeyColumns returns a table's primary key columns, in paging order;
+	// none means the table has no primary key.
+	KeyColumns(ctx context.Context, table string) ([]string, error)
+	// MaxKey returns the largest key in a table now, nil when it is empty.
+	MaxKey(ctx context.Context, table string) ([]string, error)
+}
+
+// EncodeKey and DecodeKey turn a keyset key into Batch.LastKey's form and
+// back, so it can be saved in a checkpoint.
+func EncodeKey(key []string) string {
+	b, _ := json.Marshal(key)
+	return string(b)
+}
+
+func DecodeKey(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var key []string
+	if err := json.Unmarshal([]byte(s), &key); err != nil {
+		return nil, fmt.Errorf("checkpoint key %q: %w", s, err)
+	}
+	return key, nil
 }
 
 // PermissionCheck reports what the connected credential is allowed to do.

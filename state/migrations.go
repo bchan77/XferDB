@@ -20,6 +20,7 @@ type migrationRow struct {
 	SchemaPlan  string       `db:"schema_plan"`
 	Mode        string       `db:"mode"`
 	Phase       string       `db:"phase"`
+	RunConfig   string       `db:"run_config"`
 }
 
 func (r *migrationRow) toMigration() *adapters.Migration {
@@ -113,13 +114,15 @@ func (m *MetaDB) ListMigrations(ctx context.Context, projectID string) ([]adapte
 
 // MarkInterruptedMigrations marks any pending or in_progress migrations as failed.
 // Called on server startup to clean up migrations that were running when the server last stopped.
+// Live migrations are left alone: the server resumes them (ActiveLiveMigrations).
 func (m *MetaDB) MarkInterruptedMigrations(ctx context.Context) (int, error) {
 	res, err := m.db.ExecContext(ctx,
 		`UPDATE migrations SET status = ?, completed_at = ?, error = ?
-		 WHERE status IN (?, ?)`,
+		 WHERE status IN (?, ?) AND mode != ?`,
 		string(adapters.StatusFailed), time.Now(),
 		"interrupted by server restart",
 		string(adapters.StatusPending), string(adapters.StatusInProgress),
+		adapters.MigrationModeLive,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("mark interrupted migrations: %w", err)

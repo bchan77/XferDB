@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"gitea.homelab.local/nextdevops/XferDB/api/handlers"
+	"gitea.homelab.local/nextdevops/XferDB/cdc/live"
 	"gitea.homelab.local/nextdevops/XferDB/engine"
 	"gitea.homelab.local/nextdevops/XferDB/metrics"
 	"gitea.homelab.local/nextdevops/XferDB/state"
@@ -30,6 +31,55 @@ type Server struct {
 	// metrics is served at GET /metrics; shared by every routes() call, since
 	// a registry accepts each collector only once.
 	metrics *metrics.Metrics
+
+	// live runs live migrations (#102); nil until EnableLive.
+	live *live.Manager
+}
+
+// EnableLive lets the server run live migrations, with each one's worker
+// directory under dir and its workers started by launcher.
+func (s *Server) EnableLive(dir string, launcher live.Launcher) {
+	s.live = &live.Manager{DB: s.db, Dir: dir, Launcher: launcher, Log: s.log}
+	s.metrics.SetLive(func() map[string]metrics.LiveStream {
+		out := map[string]metrics.LiveStream{}
+		for id, st := range s.live.Statuses() {
+			ls := metrics.LiveStream{
+				Phase: st.Phase, LagBytes: st.LagBytes, LagChanges: st.LagChanges,
+				LagSeconds: st.LagSeconds, QueueBytes: st.QueueBytes,
+			}
+			if st.Capture != nil {
+				ls.ChangesQueued = st.Capture.ChangesQueued
+			}
+			if st.Apply != nil {
+				ls.ChangesApplied = st.Apply.ChangesApplied
+			}
+			out[id] = ls
+		}
+		return out
+	})
+}
+
+// Live returns the server's live migration manager, nil when not enabled.
+func (s *Server) Live() *live.Manager { return s.live }
+
+func (s *Server) migrationsHandler() *handlers.MigrationsHandler {
+	return &handlers.MigrationsHandler{
+		DB:          s.db,
+		Mu:          &s.mu,
+		Engines:     s.engines,
+		Collectors:  s.collectors,
+		Cancels:     s.cancels,
+		Log:         s.log,
+		Validations: s.validations,
+		Metrics:     s.metrics,
+		Live:        s.live,
+	}
+}
+
+// ResumeLive resumes the live migrations a restart interrupted. Call once,
+// at startup, after MarkInterruptedMigrations.
+func (s *Server) ResumeLive(ctx context.Context) {
+	s.migrationsHandler().ResumeLive(ctx)
 }
 
 // NewServer creates a Server backed by the given state database.
@@ -65,6 +115,8 @@ func (s *Server) ListenAndServe(addr string) error {
 	} else if n > 0 {
 		s.log.Warn("marked interrupted validations as failed", "count", n)
 	}
+
+	s.ResumeLive(context.Background())
 
 	s.log.Info("server.started", "addr", addr)
 	mux := s.routes()

@@ -22,6 +22,7 @@ type ChangeApplier interface {
 	// stream (a live migration's id); a table missing from it has none.
 	AppliedSeqs(ctx context.Context, stream string) (map[string]uint64, error)
 	// ClearChangeState removes a stream's positions, once it is finished.
+	// A target never prepared has none, which is not an error.
 	ClearChangeState(ctx context.Context, stream string) error
 	BeginChanges(ctx context.Context) (ChangeTx, error)
 }

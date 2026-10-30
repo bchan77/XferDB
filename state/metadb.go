@@ -198,6 +198,9 @@ func (m *MetaDB) migrate() error {
 	for _, col := range []string{
 		"mode TEXT NOT NULL DEFAULT 'snapshot'",
 		"phase TEXT NOT NULL DEFAULT ''",
+		// A live run's effective transfer config (JSON), to resume it
+		// after a server restart.
+		"run_config TEXT NOT NULL DEFAULT ''",
 	} {
 		if err := m.addColumnIfMissing("migrations", col); err != nil {
 			return err

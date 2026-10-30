@@ -31,6 +31,27 @@ type Metrics struct {
 
 	mu   sync.Mutex
 	runs map[string]*Run // active migrations, by migration ID
+	// live reports the live migrations' streams at scrape time (#102).
+	live func() map[string]LiveStream
+}
+
+// LiveStream is one live migration's stream, as its gauges report it.
+type LiveStream struct {
+	Phase          string
+	LagBytes       int64
+	LagChanges     uint64
+	LagSeconds     *float64
+	ChangesQueued  int64
+	ChangesApplied int64
+	QueueBytes     int64
+}
+
+// SetLive makes the live migrations' streams, read by streams at scrape
+// time, part of the metrics, labelled by migration.
+func (m *Metrics) SetLive(streams func() map[string]LiveStream) {
+	m.mu.Lock()
+	m.live = streams
+	m.mu.Unlock()
 }
 
 // New creates a Metrics with its own registry, including the standard Go
@@ -172,13 +193,29 @@ var (
 		"Estimated seconds until the active migration finishes (0 when unknown).", []string{"project", "migration"}, nil)
 	descTables = prometheus.NewDesc("xferdb_migration_tables",
 		"Tables of the active migration, by state.", []string{"project", "migration", "state"}, nil)
+
+	descLivePhase = prometheus.NewDesc("xferdb_cdc_phase",
+		"1 for a live migration's current phase (snapshot, catch_up, streaming).", []string{"migration", "phase"}, nil)
+	descLagBytes = prometheus.NewDesc("xferdb_cdc_lag_bytes",
+		"How far a live migration's capture is behind the source's log (PostgreSQL: WAL bytes).", []string{"migration"}, nil)
+	descLagChanges = prometheus.NewDesc("xferdb_cdc_lag_changes",
+		"Changes a live migration has queued but not yet applied to the target.", []string{"migration"}, nil)
+	descLagSeconds = prometheus.NewDesc("xferdb_cdc_lag_seconds",
+		"Age of the oldest change not yet applied to the target (absent when unknown).", []string{"migration"}, nil)
+	descQueued = prometheus.NewDesc("xferdb_cdc_changes_queued_total",
+		"Changes a live migration's capture worker has queued since it started.", []string{"migration"}, nil)
+	descApplied = prometheus.NewDesc("xferdb_cdc_changes_applied_total",
+		"Changes a live migration's apply worker has applied since it started.", []string{"migration"}, nil)
+	descQueueBytes = prometheus.NewDesc("xferdb_cdc_queue_bytes",
+		"Size of a live migration's change queue on the server's disk.", []string{"migration"}, nil)
 )
 
 // gaugeCollector reads the active migrations' snapshots at scrape time.
 type gaugeCollector struct{ m *Metrics }
 
 func (g gaugeCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{descActive, descPhase, descProgress, descRowsExpected, descRowsDone, descRate, descETA, descTables} {
+	for _, d := range []*prometheus.Desc{descActive, descPhase, descProgress, descRowsExpected, descRowsDone, descRate, descETA, descTables,
+		descLivePhase, descLagBytes, descLagChanges, descLagSeconds, descQueued, descApplied, descQueueBytes} {
 		ch <- d
 	}
 }
@@ -189,7 +226,27 @@ func (g gaugeCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, r := range g.m.runs {
 		runs = append(runs, r)
 	}
+	liveStreams := g.m.live
 	g.m.mu.Unlock()
+
+	if liveStreams != nil {
+		for id, st := range liveStreams() {
+			gauge := func(d *prometheus.Desc, t prometheus.ValueType, v float64, extra ...string) {
+				ch <- prometheus.MustNewConstMetric(d, t, v, append([]string{id}, extra...)...)
+			}
+			if st.Phase != "" {
+				gauge(descLivePhase, prometheus.GaugeValue, 1, st.Phase)
+			}
+			gauge(descLagBytes, prometheus.GaugeValue, float64(st.LagBytes))
+			gauge(descLagChanges, prometheus.GaugeValue, float64(st.LagChanges))
+			if st.LagSeconds != nil {
+				gauge(descLagSeconds, prometheus.GaugeValue, *st.LagSeconds)
+			}
+			gauge(descQueued, prometheus.CounterValue, float64(st.ChangesQueued))
+			gauge(descApplied, prometheus.CounterValue, float64(st.ChangesApplied))
+			gauge(descQueueBytes, prometheus.GaugeValue, float64(st.QueueBytes))
+		}
+	}
 
 	active := make(map[string]int, len(activePhases))
 	for _, p := range activePhases {

@@ -12,16 +12,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	ph := &handlers.ProjectsHandler{DB: s.db, Log: s.log}
-	mh := &handlers.MigrationsHandler{
-		DB:          s.db,
-		Mu:          &s.mu,
-		Engines:     s.engines,
-		Collectors:  s.collectors,
-		Cancels:     s.cancels,
-		Log:         s.log,
-		Validations: s.validations,
-		Metrics:     s.metrics,
-	}
+	mh := s.migrationsHandler()
 
 	// Health
 	mux.HandleFunc("GET /api/v1/health", handlers.Health)

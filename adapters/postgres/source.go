@@ -17,7 +17,8 @@ type Source struct {
 	config adapters.ConnectionConfig
 
 	orderMu sync.Mutex
-	orderBy map[string]string // table -> "ORDER BY pk" for OFFSET paging, "" without a PK
+	orderBy map[string]string   // table -> "ORDER BY pk" for OFFSET paging, "" without a PK
+	keyCols map[string][]string // table -> primary key columns, for keyset paging
 }
 
 func NewSource() adapters.SourceAdapter {
@@ -120,6 +121,9 @@ func (s *Source) offsetOrder(ctx context.Context, table string) (string, error) 
 }
 
 func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.BatchOptions) (*adapters.Batch, error) {
+	if opts.Keyset {
+		return s.readKeyset(ctx, table, opts)
+	}
 	var query string
 	if opts.PKCol != "" {
 		op := "<"

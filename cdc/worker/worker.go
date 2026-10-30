@@ -10,6 +10,7 @@
 //	queue/             the disk queue between capture and apply
 //	<role>.addr        the status endpoint: "127.0.0.1:port token"
 //	<role>.error       why the last run stopped, if it failed
+//	<role>.lock        held while a worker of that role runs
 //
 // Workers never write the server's metadb. The status endpoint is plain
 // HTTP on loopback with a random token rather than a Unix socket, whose path
@@ -98,6 +99,15 @@ type Status struct {
 // failure is also written to <role>.error, for the server to show after the
 // process has gone.
 func Run(ctx context.Context, dir, role string) (err error) {
+	if role != RoleCapture && role != RoleApply {
+		return fmt.Errorf("unknown worker role %q", role)
+	}
+	release, err := lockRole(dir, role)
+	if err != nil {
+		// Not this run's failure: leave the running worker's files alone.
+		return err
+	}
+	defer release()
 	defer func() {
 		if err != nil && ctx.Err() == nil {
 			_ = writeFileAtomic(filepath.Join(dir, role+".error"), []byte(err.Error()))
@@ -250,6 +260,10 @@ func serveStatus(dir, role string, status func() Status) (func(), error) {
 		srv.Close()
 	}, nil
 }
+
+// ErrAlreadyRunning means another worker of the same role holds the
+// directory.
+var ErrAlreadyRunning = errors.New("worker already running")
 
 // ErrNotRunning means a worker has no status endpoint: it isn't running.
 var ErrNotRunning = errors.New("worker not running")

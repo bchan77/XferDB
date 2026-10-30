@@ -89,7 +89,17 @@ type ChangeSource interface {
 	Sequences(ctx context.Context) (map[string]int64, error)
 	// Teardown removes what Prepare created.
 	Teardown(ctx context.Context) error
-	// FormatPosition renders a position for people and the metadb.
+	// Confirmed is how far the stream has been confirmed to the source:
+	// every change up to it is queued. It moves past the last acked change
+	// when the source's log goes on without any change to our tables, so an
+	// idle source still reaches a position recorded later.
+	Confirmed() Position
+	// Behind reports how far pos is behind target, in the source's own
+	// unit (PostgreSQL: WAL bytes); 0 when pos has reached target.
+	Behind(pos, target Position) int64
+	// FormatPosition renders a position for people and the metadb, and
+	// ParsePosition reads it back.
 	FormatPosition(p Position) string
+	ParsePosition(s string) (Position, error)
 	Close() error
 }

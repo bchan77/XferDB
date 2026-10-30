@@ -14,6 +14,10 @@ type CaptureStatus struct {
 	QueuedCommit  time.Time `json:"queued_commit_at,omitempty"`
 	ChangesQueued int64     `json:"changes_queued"`
 	LastSyncAt    time.Time `json:"last_sync_at,omitempty"`
+	// Confirmed is the source's confirmed position (ChangeSource.Confirmed):
+	// every change up to it is at or below QueuedSeq.
+	Confirmed    Position `json:"confirmed,omitempty"`
+	ConfirmedPos string   `json:"confirmed_pos,omitempty"`
 }
 
 // Capturer streams a source's changes into a queue.
@@ -35,7 +39,13 @@ type Capturer struct {
 func (c *Capturer) Status() CaptureStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.status
+	st := c.status
+	// Read under mu: sync acks and raises QueuedSeq together under it, so
+	// a change below Confirmed is never above the QueuedSeq reported.
+	if p := c.Source.Confirmed(); len(p) > 0 {
+		st.Confirmed, st.ConfirmedPos = p, c.Source.FormatPosition(p)
+	}
+	return st
 }
 
 // Run captures until ctx is done or the stream fails. It resumes after the
@@ -77,10 +87,11 @@ func (c *Capturer) Run(ctx context.Context) error {
 			return err
 		}
 		// Only now, with the changes on disk, may the source free them.
+		c.mu.Lock()
 		if err := c.Source.Ack(ctx, unsynced); err != nil {
+			c.mu.Unlock()
 			return err
 		}
-		c.mu.Lock()
 		c.status.QueuedSeq = seq
 		c.status.QueuedPos = c.Source.FormatPosition(unsynced)
 		if !at.IsZero() {

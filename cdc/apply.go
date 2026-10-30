@@ -2,6 +2,7 @@ package cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -157,7 +158,7 @@ func (a *Applier) applyBatch(ctx context.Context, batch []Change, applied map[st
 	var (
 		wg      sync.WaitGroup
 		mu      sync.Mutex
-		errs    []string
+		errs    []error
 		sem     = make(chan struct{}, a.Opts.Workers)
 		results = map[string]uint64{}
 	)
@@ -171,7 +172,7 @@ func (a *Applier) applyBatch(ctx context.Context, batch []Change, applied map[st
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				errs = append(errs, err.Error())
+				errs = append(errs, err)
 				return
 			}
 			results[table] = changes[len(changes)-1].Seq
@@ -182,7 +183,9 @@ func (a *Applier) applyBatch(ctx context.Context, batch []Change, applied map[st
 		applied[t] = seq
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("apply: %s", strings.Join(errs, "; "))
+		// Joined, not flattened to text: a stop mid-write must still read
+		// as context.Canceled.
+		return fmt.Errorf("apply: %w", errors.Join(errs...))
 	}
 
 	last := batch[len(batch)-1]
