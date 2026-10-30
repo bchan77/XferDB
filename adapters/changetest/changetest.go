@@ -33,6 +33,11 @@ func Run(t *testing.T, target adapters.TargetAdapter, read func(table string) ma
 		t.Fatalf("create table: %v", err)
 	}
 	defer target.DropTable(ctx, table) //nolint:errcheck
+	// Clearing a target that may never have been prepared (a live migration
+	// cancelled before its first apply) is fine.
+	if err := ap.ClearChangeState(ctx, "never-prepared"); err != nil {
+		t.Fatalf("ClearChangeState before PrepareChangeState: %v", err)
+	}
 	if err := ap.PrepareChangeState(ctx); err != nil {
 		t.Fatalf("PrepareChangeState: %v", err)
 	}

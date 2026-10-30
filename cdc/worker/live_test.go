@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	mrand "math/rand"
 	"os"
@@ -87,7 +88,8 @@ func TestLiveMigrationConverges(t *testing.T) {
 		go func() { done <- Run(ctx, dir, role) }()
 		return func() {
 			cancel()
-			if err := <-done; err != nil && err != context.Canceled {
+			// Stopped mid-write, the error wraps the cancellation.
+			if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 				t.Errorf("%s: %v", role, err)
 			}
 		}

@@ -35,6 +35,11 @@ func (t *Target) AppliedSeqs(ctx context.Context, stream string) (map[string]uin
 
 // ClearChangeState implements adapters.ChangeApplier.
 func (t *Target) ClearChangeState(ctx context.Context, stream string) error {
+	var n int
+	if err := t.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?`, changeStateTable).Scan(&n); err != nil || n == 0 {
+		return err // never prepared: nothing to clear
+	}
 	_, err := t.db.ExecContext(ctx, `DELETE FROM `+changeStateTable+` WHERE stream = ?`, stream)
 	return err
 }

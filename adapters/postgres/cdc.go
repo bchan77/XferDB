@@ -74,6 +74,9 @@ func SlotName(stream string) string {
 	return s
 }
 
+// SlotName returns this stream's slot (and publication) name.
+func (s *ChangeSource) SlotName() string { return s.slot }
+
 // NewChangeSource connects to the source for the live migration stream.
 func NewChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (*ChangeSource, error) {
 	db, err := sql.Open("postgres", buildDSN(cfg))
@@ -450,11 +453,25 @@ func (s *ChangeSource) Sequences(ctx context.Context) (map[string]int64, error) 
 	return out, rows.Err()
 }
 
-// Teardown implements cdc.ChangeSource. The slot must not be streaming.
+// Teardown implements cdc.ChangeSource. The slot must not be streaming:
+// once its stream has stopped, the server may still hold it as active for
+// a moment, which is waited out, up to 10s.
 func (s *ChangeSource) Teardown(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx,
-		`SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`, s.slot); err != nil {
-		return fmt.Errorf("drop replication slot %s: %w", s.slot, err)
+	for wait := 0; ; wait++ {
+		_, err := s.db.ExecContext(ctx,
+			`SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`, s.slot)
+		if err == nil {
+			break
+		}
+		var pqErr *pq.Error
+		if !errors.As(err, &pqErr) || pqErr.Code != "55006" || wait >= 50 { // object_in_use
+			return fmt.Errorf("drop replication slot %s: %w", s.slot, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 	if _, err := s.db.ExecContext(ctx, `DROP PUBLICATION IF EXISTS `+quote(s.pub)); err != nil {
 		return fmt.Errorf("drop publication %s: %w", s.pub, err)
@@ -469,6 +486,31 @@ func (s *ChangeSource) FormatPosition(p cdc.Position) string {
 		return fmt.Sprintf("invalid(%x)", []byte(p))
 	}
 	return lsn.String()
+}
+
+// ParsePosition implements cdc.ChangeSource.
+func (s *ChangeSource) ParsePosition(text string) (cdc.Position, error) {
+	lsn, err := pglogrepl.ParseLSN(text)
+	if err != nil {
+		return nil, err
+	}
+	return encodeLSN(lsn), nil
+}
+
+// Confirmed implements cdc.ChangeSource: the position Stream reports to the
+// server as flushed.
+func (s *ChangeSource) Confirmed() cdc.Position {
+	return encodeLSN(s.flushLSN())
+}
+
+// Behind implements cdc.ChangeSource, in WAL bytes.
+func (s *ChangeSource) Behind(pos, target cdc.Position) int64 {
+	p, err1 := decodeLSN(pos)
+	t, err2 := decodeLSN(target)
+	if err1 != nil || err2 != nil || p >= t {
+		return 0
+	}
+	return int64(t - p)
 }
 
 func encodeLSN(l pglogrepl.LSN) cdc.Position {

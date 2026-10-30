@@ -37,6 +37,10 @@ func (t *Target) AppliedSeqs(ctx context.Context, stream string) (map[string]uin
 
 // ClearChangeState implements adapters.ChangeApplier.
 func (t *Target) ClearChangeState(ctx context.Context, stream string) error {
+	var exists bool
+	if err := t.db.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, changeStateSchema+".applied").Scan(&exists); err != nil || !exists {
+		return err // never prepared: nothing to clear
+	}
 	_, err := t.db.ExecContext(ctx, `DELETE FROM `+changeStateSchema+`.applied WHERE stream = $1`, stream)
 	return err
 }
