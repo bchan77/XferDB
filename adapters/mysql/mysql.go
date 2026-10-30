@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -183,7 +184,7 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 // getSchema introspects a table using information_schema.
 func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSchema, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT column_name, column_type, is_nullable, column_default, column_key
+		SELECT column_name, column_type, is_nullable, column_default, column_key, extra
 		FROM information_schema.columns
 		WHERE table_schema = DATABASE() AND table_name = ?
 		ORDER BY ordinal_position`, table)
@@ -200,8 +201,9 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 			nullable  string
 			dfltVal   sql.NullString
 			columnKey string
+			extra     string
 		)
-		if err := rows.Scan(&name, &colType, &nullable, &dfltVal, &columnKey); err != nil {
+		if err := rows.Scan(&name, &colType, &nullable, &dfltVal, &columnKey, &extra); err != nil {
 			return nil, err
 		}
 		col := adapters.ColumnDef{
@@ -211,7 +213,10 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 			PrimaryKey: columnKey == "PRI",
 		}
 		if dfltVal.Valid {
-			col.DefaultValue = &dfltVal.String
+			if expr, ok := mysqlDefaultSQL(dfltVal.String, extra, colType); ok {
+				col.DefaultValue = &expr
+				col.DefaultDialect = adapters.DialectMySQL
+			}
 		}
 		schema.Columns = append(schema.Columns, col)
 	}
@@ -348,4 +353,60 @@ func humanSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// mysqlDefaultSQL turns information_schema's column_default into SQL that
+// can follow DEFAULT. MySQL reports a literal default unquoted (a string
+// column defaulting to new reads `new`), and an expression default as its
+// text with DEFAULT_GENERATED in extra; MariaDB quotes literals itself and
+// reports a NULL default as the text NULL. Used raw, `DEFAULT new` failed
+// CREATE TABLE even on a MySQL target.
+func mysqlDefaultSQL(def, extra, colType string) (string, bool) {
+	upper := strings.ToUpper(strings.TrimSpace(def))
+	switch {
+	case strings.Contains(strings.ToUpper(extra), "DEFAULT_GENERATED"):
+		if strings.HasPrefix(upper, "CURRENT_TIMESTAMP") {
+			return def, true
+		}
+		// The expression's quotes and backslashes come escaped once more
+		// than in SQL: ('it''s') reads _utf8mb4\'it\\\'s\'.
+		return "(" + mysqlUnescapeExpr(def) + ")", true
+	case upper == "NULL":
+		return "", false
+	case strings.HasPrefix(def, "'") && strings.HasSuffix(def, "'") && len(def) >= 2:
+		return def, true // MariaDB: already a literal
+	case strings.HasPrefix(upper, "CURRENT_TIMESTAMP"):
+		return def, true // MySQL 5.7 doesn't mark it DEFAULT_GENERATED
+	case mysqlNumericType(colType) && mysqlNumberRe.MatchString(def):
+		return def, true
+	}
+	if strings.HasPrefix(strings.ToLower(colType), "bit") {
+		return def, true // b'1', as MySQL reports it
+	}
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(def, `\`, `\\`), "'", "''") + "'", true
+}
+
+var mysqlNumberRe = regexp.MustCompile(`^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$`)
+
+func mysqlNumericType(colType string) bool {
+	t := strings.ToLower(colType)
+	for _, p := range []string{"tinyint", "smallint", "mediumint", "int", "bigint", "decimal", "numeric", "float", "double", "real"} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// mysqlUnescapeExpr undoes the extra escaping information_schema applies
+// to an expression default's text: \' is a quote and \\ a backslash.
+func mysqlUnescapeExpr(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && (s[i+1] == '\'' || s[i+1] == '\\') {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }

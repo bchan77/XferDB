@@ -12,6 +12,17 @@ All notable changes to XferDB are documented here.
   can apply them. Starting a live migration comes in a later release; the change capture, disk
   queue and apply workers it will run on are in this one, not yet reachable from the API.
 
+### Fixed
+- **Column defaults across databases.** A source column's default went into the target's
+  `CREATE TABLE` exactly as the source wrote it, so the migration failed before copying a row
+  whenever the target spoke another SQL dialect: PostgreSQL `now()`, `'x'::text` or
+  `nextval(...)` on SQLite or MySQL. MySQL→MySQL failed as well, because MySQL reports string
+  defaults unquoted (`DEFAULT new`). Defaults are now translated between dialects: literals,
+  booleans, the current timestamp and date, and UUID generators. A default with no
+  equivalent on the target (a sequence, a UUID function on SQLite, an arbitrary expression)
+  is left off. The data copied is the same either way; this only affects rows inserted later
+  that leave the column out. MySQL `datetime(p)` now maps to `timestamp(p)` on PostgreSQL.
+
 ## [1.1.0] - 2026-10-21
 
 Post-migration data validation, Prometheus metrics, multi-schema PostgreSQL, and a set of fixes

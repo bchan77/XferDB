@@ -131,8 +131,8 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 		if !c.Nullable && !c.PrimaryKey {
 			def += " NOT NULL"
 		}
-		if c.DefaultValue != nil {
-			def += fmt.Sprintf(" DEFAULT %s", *c.DefaultValue)
+		if d, ok := adapters.TranslateDefault(c, adapters.DialectSQLite, mapTypeToSQLite(c.Type)); ok {
+			def += " DEFAULT " + d
 		}
 		defs = append(defs, def)
 	}
@@ -209,8 +209,8 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 		switch change.Type {
 		case adapters.ChangeAddColumn:
 			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), mapTypeToSQLite(change.Column.Type))
-			if change.Column.DefaultValue != nil {
-				def += fmt.Sprintf(" DEFAULT %s", *change.Column.DefaultValue)
+			if d, ok := adapters.TranslateDefault(change.Column, adapters.DialectSQLite, mapTypeToSQLite(change.Column.Type)); ok {
+				def += " DEFAULT " + d
 			}
 			// SQLite ADD COLUMN cannot be NOT NULL without a default value.
 			query := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, quote(table), def)
