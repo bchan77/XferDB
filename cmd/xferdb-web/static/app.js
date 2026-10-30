@@ -1832,7 +1832,7 @@ async function renderTableDetail(id, tableName) {
 // mountMigActions renders Pause/Resume/Cancel buttons for the given phase
 // into actionsEl and wires them up. onDone fires after a successful action
 // so the caller can refresh its own view; errors render into errorArea.
-function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
+function mountMigActions(actionsEl, migId, phase, { onDone, errorArea, live = false } = {}) {
   const buttons = [];
   if (['in_progress', 'schema', 'post_schema'].includes(phase)) buttons.push('<button class="btn" id="pauseBtn">Pause</button>');
   if (phase === 'paused') buttons.push('<button class="btn primary" id="resumeBtn">Resume</button>');
@@ -1855,14 +1855,83 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea } = {}) {
   const cancelBtn = actionsEl.querySelector('#cancelBtn');
   if (cancelBtn) cancelBtn.addEventListener('click', async () => {
     const ok = await confirmModal({
-      title: 'Cancel migration?',
-      body: 'This stops the migration. Rows already written are kept, but the run is marked cancelled and cannot be resumed.',
+      title: live ? 'Cancel live migration?' : 'Cancel migration?',
+      body: live
+        ? 'This stops streaming changes and drops the replication slot on the source. Rows already written to the target are kept, but the run is marked cancelled and cannot be resumed.'
+        : 'This stops the migration. Rows already written are kept, but the run is marked cancelled and cannot be resumed.',
       confirmLabel: 'Cancel Migration',
       danger: true,
     });
     if (!ok) return;
     await doAction('cancel');
   });
+}
+
+// ---------------------------------------------------------------------------
+// Live migration (#102)
+// ---------------------------------------------------------------------------
+
+const LIVE_PHASES = [
+  ['setup', 'Setup'],
+  ['snapshot', 'Snapshot'],
+  ['catch_up', 'Catch-up'],
+  ['streaming', 'Streaming'],
+  ['cutover', 'Cutover'],
+];
+
+function fmtBytes(n) {
+  n = n || 0;
+  if (n < 1024) return `${n} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
+// livePhaseStrip shows where a live migration is: the phases it passed,
+// the current one, and those still to come.
+function livePhaseStrip(phase) {
+  const at = LIVE_PHASES.findIndex(([key]) => key === phase);
+  return `<ol class="phase-strip" data-phase="${esc(phase || '')}">${LIVE_PHASES.map(([key, label], i) => {
+    const cls = i < at ? 'done' : i === at ? 'current' : 'todo';
+    return `<li class="${cls}" data-phase="${key}">${esc(label)}</li>`;
+  }).join('')}</ol>`;
+}
+
+// liveStatusHTML is a live migration's stream: phase strip, lag and the
+// workers' state, from GET /migrations/:id.
+function liveStatusHTML(mig) {
+  const l = mig.live;
+  const phase = mig.phase || 'setup';
+  let body = livePhaseStrip(phase);
+  if (mig.status === 'paused' && ['catch_up', 'streaming'].includes(phase)) {
+    body += `<div class="banner info"><span>Paused: changes are still captured from the source and queued here; the target catches up when you resume.</span></div>`;
+  }
+  if (!l) {
+    if (['setup', 'snapshot'].includes(phase)) {
+      body += `<div class="hint">The change stream starts before the copy: every change made while the tables are copied is replayed once the copy is done.</div>`;
+    }
+    return body;
+  }
+  const secs = l.lag_seconds == null ? '—' : (l.lag_seconds < 1 ? '< 1s' : fmtDuration(l.lag_seconds));
+  const applied = l.apply ? fmtInt(l.apply.changes_applied) : '—';
+  body += `
+    <div class="stat-grid live-lag">
+      <div class="stat-box" data-stat="lag-changes"><div class="label">Changes to apply</div><div class="value">${fmtInt(l.lag_changes)}</div></div>
+      <div class="stat-box" data-stat="lag-seconds"><div class="label">Apply lag</div><div class="value">${esc(secs)}</div></div>
+      <div class="stat-box" data-stat="lag-bytes"><div class="label">Behind source</div><div class="value">${esc(fmtBytes(l.lag_bytes))}</div></div>
+      <div class="stat-box" data-stat="applied"><div class="label">Applied</div><div class="value">${applied}</div></div>
+      <div class="stat-box" data-stat="queue"><div class="label">Queue on disk</div><div class="value">${esc(fmtBytes(l.queue_bytes))}</div></div>
+    </div>`;
+  if (phase === 'catch_up') {
+    body += `<div class="hint">Catching up: replaying what was written during the copy, up to ${esc(l.catch_up_pos || 'the position recorded when it ended')}. Unique indexes are added once it is done.</div>`;
+  } else if (phase === 'streaming') {
+    body += `<div class="hint">The target follows the source. Cutover, which stops the stream and finishes the target's schema, comes in a later release of live migration.</div>`;
+  }
+  if (l.capture_error) body += errorBanner('Capture worker: ' + l.capture_error + ' (restarting)');
+  if (l.apply_error) body += errorBanner('Apply worker: ' + l.apply_error + ' (restarting)');
+  return body;
 }
 
 // mountMigSection renders the migration status/controls card on a project's
@@ -1898,11 +1967,52 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     updateTableSelect = null;
     if (active) {
       onLockChange(true, active.status);
-      mountActiveCard(active.id, active.status);
+      if (active.mode === 'live') mountLiveCard(active.id);
+      else mountActiveCard(active.id, active.status);
     } else {
       onLockChange(false, '');
       mountStartForm(migs, sourceType, targetType);
     }
+  }
+
+  // mountLiveCard is the active card of a live migration: its phase, lag
+  // and controls, polled from the migration record, which, unlike the
+  // stats collector, survives a server restart.
+  function mountLiveCard(migId) {
+    container.innerHTML = `
+      <div class="page-header">
+        <h2>Live migration</h2>
+        <div class="actions-row" id="migActions"></div>
+      </div>
+      <div id="migCardBody"></div>
+      <div class="actions-row"><a class="btn small" href="#/migrations/${encodeURIComponent(migId)}">View full progress</a></div>
+    `;
+    async function tick() {
+      if (stopped) return;
+      try {
+        const mig = await api.getMigration(migId);
+        if (stopped) return;
+        const body = document.getElementById('migCardBody');
+        const actionsEl = document.getElementById('migActions');
+        if (!body || !actionsEl) return;
+        if (!ACTIVE_STATUSES.includes(mig.status)) {
+          clearTimer();
+          render();
+          return;
+        }
+        body.innerHTML = liveStatusHTML(mig);
+        mountMigActions(actionsEl, migId, mig.status === 'paused' ? 'paused' : 'in_progress', {
+          onDone: () => { clearTimer(); tick(); },
+          errorArea: body,
+          live: true,
+        });
+      } catch (err) {
+        const body = document.getElementById('migCardBody');
+        if (body) body.innerHTML = errorBanner('Could not load the live migration: ' + err.message);
+      }
+      if (!stopped) timer = setTimeout(tick, 1500);
+    }
+    tick();
   }
 
   function mountActiveCard(migId, initialStatus) {
@@ -1976,7 +2086,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
             <div class="stat-box"><div class="label">Rows</div><div class="value">${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</div></div>
             <div class="stat-box"><div class="label">ETA</div><div class="value">${snap.ETASeconds ? fmtDuration(snap.ETASeconds) : '—'}</div></div>
           </div>
-          <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
+          <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' || snap.Phase === 'snapshot_done' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
           ${snap.Phase === 'cancelled' ? `<div class="banner info"><span>Migration cancelled.</span></div>` : ''}
         `;
         mountMigActions(actionsEl, migId, snap.Phase, {
@@ -2069,6 +2179,8 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeNone" value="none" checked><label for="modeNone">Keep existing target schema/data</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
+        ${sourceType === 'postgres' ? `
+        <div class="checkbox-row" id="m-live-row"><input type="checkbox" id="m-live"><label for="m-live">Live migration</label><span class="hint" style="margin-left:8px;">Copy the tables, then keep streaming the source's changes to the target. Run the live readiness check in Settings first.</span></div>` : ''}
         <div class="field-row">
           <div><label>Table workers</label><input type="number" id="m-workers" value="${esc(tc.table_workers > 0 ? tc.table_workers : 1)}"><div class="hint">Parallel tables to migrate</div></div>
           <div><label>Batch size</label><input type="number" id="m-batch" value="${esc(tc.batch_size > 0 ? tc.batch_size : 1000)}"><div class="hint">Rows per INSERT batch</div></div>
@@ -2095,6 +2207,21 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     `;
 
     wireValidationOptions('m');
+
+    // A live migration creates the target schema itself (to hold back the
+    // constraints replay could break), so it can't truncate an existing one.
+    const liveInput = document.getElementById('m-live');
+    if (liveInput) {
+      liveInput.addEventListener('change', () => {
+        const truncate = document.getElementById('modeTruncate');
+        truncate.disabled = liveInput.checked;
+        if (liveInput.checked && truncate.checked) {
+          document.getElementById('modeNone').checked = true;
+          truncate.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        document.getElementById('startMigBtn').textContent = liveInput.checked ? 'Start Live Migration' : 'Run Migration';
+      });
+    }
 
     // Show offset option when segment workers > 0
     const segmentInput = document.getElementById('m-segment');
@@ -2187,6 +2314,8 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         offset_fallback: document.getElementById('m-offset')?.checked || false,
         ...readValidationOptions('m'),
       };
+      const isLive = !!document.getElementById('m-live')?.checked;
+      if (isLive) body.mode = 'live';
       // Add selected tables if not all are selected
       const tableBoxes = container.querySelectorAll('.table-cb');
       if (tableBoxes.length > 0) {
@@ -2209,7 +2338,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
       } catch (err) {
         document.getElementById('startErr').innerHTML = errorBanner('Could not start migration: ' + err.message);
         btn.disabled = false;
-        btn.textContent = 'Run Migration';
+        btn.textContent = isLive ? 'Start Live Migration' : 'Run Migration';
       }
     });
 
@@ -2220,7 +2349,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
       histEl.innerHTML = migs.map((m) => `
         <div class="list-row" data-id="${esc(m.id)}">
           <div>
-            <div class="name mono">${esc(m.id.slice(0, 8))}</div>
+            <div class="name mono">${esc(m.id.slice(0, 8))}${m.mode === 'live' ? ' <span class="badge info">live</span>' : ''}</div>
             <div class="meta">created ${esc(fmtDate(m.created_at))}${m.error ? ' · ' + esc(m.error) : ''}</div>
           </div>
           <span class="badge ${esc(m.status)}">${esc(m.status)}</span>
@@ -2276,9 +2405,11 @@ async function renderMigrationProgress(migId) {
       <div><h1 class="mono">${esc(migId.slice(0, 8))}</h1><div class="sub">Migration progress</div></div>
       <div class="actions-row" id="migActions"></div>
     </div>
+    ${mig.mode === 'live' ? '<div class="card" id="liveArea"></div>' : ''}
     <div id="progressArea"></div>
     <div id="validationArea"></div>
   `;
+  const isLive = mig.mode === 'live';
 
   let stopped = false;
   let timer = null;
@@ -2308,7 +2439,9 @@ async function renderMigrationProgress(migId) {
     }
     const rows = snap.Rows || {};
     const pct = rows.Total > 0 ? Math.round((rows.Transferred * 100) / rows.Total) : 0;
-    const phaseBadge = snap.Phase === 'complete' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'cancelled' ? 'cancelled' : snap.Phase === 'paused' ? 'warn' : 'progress';
+    const phaseBadge = snap.Phase === 'complete' || snap.Phase === 'snapshot_done' ? 'ok' : snap.Phase === 'failed' ? 'fail' : snap.Phase === 'cancelled' ? 'cancelled' : snap.Phase === 'paused' ? 'warn' : 'progress';
+    // A live migration's copy ends in snapshot_done; the stream goes on.
+    const phaseLabel = snap.Phase === 'snapshot_done' ? 'copy done' : snap.Phase;
     const area = document.getElementById('progressArea');
     if (!area) return;
     area.innerHTML = `
@@ -2316,7 +2449,7 @@ async function renderMigrationProgress(migId) {
       ${snap.Phase === 'failed' ? `<div class="banner error"><span>Migration failed.${snap.Errors && snap.Errors.length ? ' ' + esc(snap.Errors.join('; ')) : ''}</span></div>` : ''}
       ${snap.Phase === 'cancelled' ? '<div class="banner info"><span>Migration cancelled.</span></div>' : ''}
       <div class="stat-grid">
-        <div class="stat-box"><div class="label">Phase</div><div class="value"><span class="badge ${phaseBadge}">${esc(snap.Phase)}</span></div></div>
+        <div class="stat-box"><div class="label">${isLive ? 'Copy' : 'Phase'}</div><div class="value"><span class="badge ${phaseBadge}">${esc(phaseLabel)}</span></div></div>
         <div class="stat-box"><div class="label">Elapsed</div><div class="value">${fmtDuration(snap.ElapsedSeconds)}</div></div>
         <div class="stat-box"><div class="label">ETA</div><div class="value">${snap.ETASeconds ? fmtDuration(snap.ETASeconds) : '—'}</div></div>
         <div class="stat-box"><div class="label">Rate</div><div class="value">${Math.round(rows.RatePerSecond || 0)}/s</div></div>
@@ -2332,7 +2465,7 @@ async function renderMigrationProgress(migId) {
       </div>
       <div class="card">
         <strong>Rows: ${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</strong>
-        <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
+        <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' || snap.Phase === 'snapshot_done' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
       </div>
       <div class="card">
         <strong>Tables</strong>
@@ -2411,8 +2544,48 @@ async function renderMigrationProgress(migId) {
     } catch (err) { /* secondary; the card mounts when the migration ends */ }
   }
 
+  // A live migration's stream, refreshed on every tick. Once the copy is
+  // done its controls act on the stream, so they replace the copy's.
+  let liveMig = mig;
+  function renderLive() {
+    const el = document.getElementById('liveArea');
+    if (el) el.innerHTML = `<strong>Live migration</strong>${liveStatusHTML(liveMig)}`;
+    const actionsEl = document.getElementById('migActions');
+    if (!actionsEl || ['setup', 'snapshot'].includes(liveMig.phase)) return;
+    if (!ACTIVE_STATUSES.includes(liveMig.status)) {
+      actionsEl.innerHTML = '';
+      return;
+    }
+    mountMigActions(actionsEl, migId, liveMig.status === 'paused' ? 'paused' : 'in_progress', {
+      onDone: () => { clearTimer(); tick(); },
+      errorArea: el,
+      live: true,
+    });
+  }
+
   async function tick() {
     if (stopped) return;
+    if (isLive) {
+      try {
+        liveMig = await api.getMigration(migId);
+      } catch (err) { /* keep the last state; the next tick retries */ }
+      if (stopped) return;
+      // Past its snapshot, the copy's stats are history (gone after a
+      // server restart); the stream is what moves.
+      if (!['setup', 'snapshot'].includes(liveMig.phase) || !ACTIVE_STATUSES.includes(liveMig.status)) {
+        try {
+          renderProgress(await api.getStats(migId));
+        } catch (err) { /* no copy stats after a restart */ }
+        renderLive();
+        if (!ACTIVE_STATUSES.includes(liveMig.status)) {
+          clearTimer();
+          return;
+        }
+        if (!stopped) timer = setTimeout(tick, 1500);
+        return;
+      }
+      renderLive();
+    }
     try {
       const snap = await api.getStats(migId);
       renderProgress(snap);
@@ -2448,6 +2621,7 @@ async function renderMigrationProgress(migId) {
   const finishedStatuses = ['completed', 'failed', 'cancelled'];
   if (finishedStatuses.includes(mig.status)) {
     showValidation(false);
+    if (isLive) renderLive();
     // Load last stats from history
     try {
       const records = await api.getStatsHistory(migId);
