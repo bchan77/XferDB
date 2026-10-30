@@ -88,6 +88,12 @@ func (t *Target) GetSchema(ctx context.Context, table string) (*adapters.TableSc
 
 // cachedSchema returns the schema for a table, fetching and caching it if needed.
 func (t *Target) cachedSchema(ctx context.Context, table string) (*adapters.TableSchema, error) {
+	return t.cachedSchemaQ(ctx, t.db, table)
+}
+
+// cachedSchemaQ is cachedSchema fetching through q, which inside a
+// transaction must be the tx: it holds the target's one connection.
+func (t *Target) cachedSchemaQ(ctx context.Context, q queryer, table string) (*adapters.TableSchema, error) {
 	t.mu.RLock()
 	schema, ok := t.schemas[table]
 	t.mu.RUnlock()
@@ -95,7 +101,7 @@ func (t *Target) cachedSchema(ctx context.Context, table string) (*adapters.Tabl
 		return schema, nil
 	}
 
-	schema, err := getSchema(ctx, t.db, table)
+	schema, err := getSchema(ctx, q, table)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +232,22 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		return t.writeBatchFast(ctx, table, batch)
 	}
 
-	cols, keepBytes, err := t.writeColumns(ctx, table)
+	tx, err := t.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	if err := t.upsertTx(ctx, tx, table, batch.Records); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// upsertTx writes records to table in tx with WriteBatch's INSERT OR
+// REPLACE; a live migration's apply (ChangeTx.Upsert) runs it in its own
+// transaction.
+func (t *Target) upsertTx(ctx context.Context, tx *sql.Tx, table string, records []map[string]interface{}) error {
+	cols, keepBytes, err := t.writeColumnsQ(ctx, tx, table)
 	if err != nil {
 		return err
 	}
@@ -245,19 +266,13 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		strings.Join(placeholders, ", "),
 	)
 
-	tx, err := t.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("prepare insert: %w", err)
 	}
 	defer stmt.Close()
 
-	for _, rec := range batch.Records {
+	for _, rec := range records {
 		vals := make([]interface{}, len(cols))
 		for i, col := range cols {
 			vals[i] = bindValue(rec[col], keepBytes[i])
@@ -266,8 +281,7 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 			return fmt.Errorf("insert record into %s: %w", table, err)
 		}
 	}
-
-	return tx.Commit()
+	return nil
 }
 
 // writeColumns returns the columns WriteBatch binds, derived from the schema
@@ -275,7 +289,13 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 // writes every column (the missing ones as NULL). keepBytes[i] reports whether
 // cols[i] has BLOB affinity; see bindValue.
 func (t *Target) writeColumns(ctx context.Context, table string) (cols []string, keepBytes []bool, err error) {
-	schema, err := t.cachedSchema(ctx, table)
+	return t.writeColumnsQ(ctx, t.db, table)
+}
+
+// writeColumnsQ is writeColumns looking the schema up through q (see
+// cachedSchemaQ).
+func (t *Target) writeColumnsQ(ctx context.Context, q queryer, table string) (cols []string, keepBytes []bool, err error) {
+	schema, err := t.cachedSchemaQ(ctx, q, table)
 	if err != nil {
 		return nil, nil, err
 	}

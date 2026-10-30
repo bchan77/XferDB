@@ -5,6 +5,7 @@
 package registry
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/adapters/mysql"
 	"gitea.homelab.local/nextdevops/XferDB/adapters/postgres"
 	"gitea.homelab.local/nextdevops/XferDB/adapters/sqlite"
+	"gitea.homelab.local/nextdevops/XferDB/cdc"
 )
 
 var sourceFactories = map[string]func() adapters.SourceAdapter{
@@ -29,6 +31,29 @@ var targetFactories = map[string]func() adapters.TargetAdapter{
 	"mysql":    mysql.NewTarget,
 	"sqlite":   sqlite.NewTarget,
 	// MongoDB is source-only for this feature; no mongo target adapter planned
+}
+
+// changeSourceFactories are the source types a live migration (#102) can
+// stream changes from.
+var changeSourceFactories = map[string]func(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error){
+	"postgres": func(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
+		return postgres.NewChangeSource(ctx, cfg, stream)
+	},
+}
+
+// SupportsLive reports whether a source type can be live-migrated.
+func SupportsLive(sourceType string) bool {
+	_, ok := changeSourceFactories[sourceType]
+	return ok
+}
+
+// NewChangeSource connects a live migration's change stream to cfg.
+func NewChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
+	factory, ok := changeSourceFactories[cfg.Type]
+	if !ok {
+		return nil, fmt.Errorf("live migration from %s isn't supported yet (supported: postgres)", cfg.Type)
+	}
+	return factory(ctx, cfg, stream)
 }
 
 // NewSource returns a SourceAdapter for the given adapter type string.

@@ -203,9 +203,25 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		// failed only because it doesn't exist, which POST
 		// /projects/{id}/target-database can fix.
 		TargetMissingDatabase string `json:"target_missing_database,omitempty"`
+		// Live is set when the request asks for {"mode": "live"}: whether
+		// this project can be live-migrated (#102), check by check.
+		Live *liveResult `json:"live,omitempty"`
+	}
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if r.Body != nil {
+		// An empty body is the plain preflight.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	if req.Mode != "" && req.Mode != adapters.MigrationModeSnapshot && req.Mode != adapters.MigrationModeLive {
+		writeError(w, http.StatusBadRequest, "mode must be snapshot or live")
+		return
 	}
 
 	result := checkResult{Status: "ready"}
+	var srcAdapter adapters.SourceAdapter
+	var tgtAdapter adapters.TargetAdapter
 
 	// Source — capture connection errors as structured errors instead of aborting.
 	if src, err := registry.NewSource(p.SourceConfig.Type); err != nil {
@@ -216,6 +232,7 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		result.Status = "failed"
 	} else {
 		defer src.Close()
+		srcAdapter = src
 		result.Source, _ = src.CheckPermissions(ctx)
 		if result.Source != nil && len(result.Source.Errors) > 0 {
 			result.Status = "failed"
@@ -236,12 +253,20 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		defer tgt.Close()
+		tgtAdapter = tgt
 		result.Target, _ = tgt.CheckPermissions(ctx)
 		if result.Target != nil && len(result.Target.Errors) > 0 {
 			result.Status = "failed"
 		}
 		// Collect database info.
 		result.TargetInfo, _ = tgt.GetInfo(ctx)
+	}
+
+	if req.Mode == adapters.MigrationModeLive {
+		result.Live = liveChecks(ctx, p, srcAdapter, tgtAdapter)
+		if !result.Live.Ready {
+			result.Status = "failed"
+		}
 	}
 
 	h.Log.Info("project.preflight",
@@ -392,4 +417,49 @@ func connectSource(ctx context.Context, cfg adapters.ConnectionConfig) (adapters
 		return nil, err
 	}
 	return src, src.Connect(ctx, cfg)
+}
+
+type liveResult struct {
+	Ready  bool                 `json:"ready"`
+	Checks []adapters.LiveCheck `json:"checks"`
+}
+
+// liveChecks runs the live-migration checks on the connected adapters (nil
+// for a side that failed to connect, which the plain preflight reports).
+func liveChecks(ctx context.Context, p *adapters.Project, src adapters.SourceAdapter, tgt adapters.TargetAdapter) *liveResult {
+	res := &liveResult{}
+	add := func(c adapters.LiveCheck) { res.Checks = append(res.Checks, c) }
+	if !registry.SupportsLive(p.SourceConfig.Type) {
+		add(adapters.LiveCheck{
+			Name:   "a source live migration supports",
+			Detail: "source is " + p.SourceConfig.Type,
+			Fix:    "live migration streams changes from PostgreSQL sources only, for now",
+		})
+	} else if lp, ok := src.(adapters.LivePreflighter); ok {
+		checks, err := lp.LiveChecks(ctx, p.TransferConfig.Tables)
+		if err != nil {
+			add(adapters.LiveCheck{Name: "source checks", Detail: err.Error()})
+		}
+		res.Checks = append(res.Checks, checks...)
+	} else if src == nil {
+		add(adapters.LiveCheck{Name: "source checks", Detail: "the source didn't connect"})
+	}
+	if _, ok := tgt.(adapters.ChangeApplier); ok {
+		add(adapters.LiveCheck{Name: "a target that can apply changes", OK: true, Detail: "target is " + p.TargetConfig.Type})
+	} else if tgt != nil {
+		add(adapters.LiveCheck{
+			Name:   "a target that can apply changes",
+			Detail: "target is " + p.TargetConfig.Type,
+			Fix:    "live migration writes to PostgreSQL, MySQL and SQLite targets",
+		})
+	} else {
+		add(adapters.LiveCheck{Name: "target checks", Detail: "the target didn't connect"})
+	}
+	res.Ready = true
+	for _, c := range res.Checks {
+		if !c.OK && !c.Warning {
+			res.Ready = false
+		}
+	}
+	return res
 }

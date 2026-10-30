@@ -648,6 +648,12 @@ async function renderProjectSettings(id) {
       <div id="preflightArea"></div>
     </div>
     <div class="section">
+      <h2>Live Migration</h2>
+      <p>A live migration copies the data and then keeps streaming the source's changes to the target until you cut over, so the application keeps running during the copy. This checks whether this project's source and target can support one; starting a live migration comes in a later release.</p>
+      <button class="btn" id="liveCheckBtn">Check live migration readiness</button>
+      <div id="liveCheckArea"></div>
+    </div>
+    <div class="section">
       <h2>Validation</h2>
       <p>After a migration completes, XferDB compares the source and target. These are the project's defaults; each migration run can override them.</p>
       ${validationOptionsHTML('s', project.transfer_config)}
@@ -754,8 +760,49 @@ async function renderProjectSettings(id) {
   renderConnView(project);
   document.getElementById('editConnBtn').addEventListener('click', () => toggleEditConn(project));
   document.getElementById('retryPreflightBtn').addEventListener('click', () => runPreflight(id));
+  document.getElementById('liveCheckBtn').addEventListener('click', () => runLiveCheck(id));
 
   await runPreflight(id);
+}
+
+// renderLiveChecks shows a live preflight's checks (#102): what passed,
+// what fails and how to fix it, and what is only worth knowing.
+function renderLiveChecks(live) {
+  const checks = live.checks || [];
+  const failing = checks.filter((c) => !c.ok && !c.warning).length;
+  const rows = checks.map((c) => {
+    const cls = c.ok ? (c.warning ? 'warn' : 'ok') : (c.warning ? 'warn' : 'fail');
+    const mark = c.ok && !c.warning ? '✓' : (c.warning ? '!' : '✗');
+    const fix = c.fix && (!c.ok || c.warning) ? `<div class="hint">${esc(c.fix)}</div>` : '';
+    return `<tr data-check="${esc(c.name)}">
+      <td><span class="badge ${cls}">${mark}</span></td>
+      <td><strong>${esc(c.name)}</strong>${c.detail ? `<div class="hint">${esc(c.detail)}</div>` : ''}${fix}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="banner ${live.ready ? 'ok' : 'error'}" id="liveCheckSummary">
+      <span>${live.ready
+        ? 'Ready for live migration.'
+        : `Not ready for live migration: ${failing} check${failing === 1 ? '' : 's'} failing.`}</span>
+    </div>
+    <div class="card"><table class="kv live-checks">${rows}</table></div>
+  `;
+}
+
+async function runLiveCheck(id) {
+  const area = document.getElementById('liveCheckArea');
+  const btn = document.getElementById('liveCheckBtn');
+  btn.disabled = true;
+  area.innerHTML = `<div class="loading-block"><span class="spinner"></span> Checking…</div>`;
+  try {
+    const result = await api.preflight(id, 'live');
+    area.innerHTML = result.live
+      ? renderLiveChecks(result.live)
+      : errorBanner('The server did not return live migration checks; it may be older than this page.');
+  } catch (err) {
+    area.innerHTML = errorBanner('Live migration check failed: ' + err.message, { retry: () => runLiveCheck(id) });
+  }
+  btn.disabled = false;
 }
 
 // ---------------------------------------------------------------------------

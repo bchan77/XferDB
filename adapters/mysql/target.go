@@ -253,6 +253,20 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		return t.writeBatchLoadData(ctx, table, batch)
 	}
 
+	tx, err := t.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	if err := t.upsertTx(ctx, tx, table, batch.Records); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// upsertTx writes records to table in tx with the upsert WriteBatch uses; a
+// live migration's apply (ChangeTx.Upsert) runs it in its own transaction.
+func (t *Target) upsertTx(ctx context.Context, tx *sql.Tx, table string, records []map[string]interface{}) error {
 	schema, err := t.cachedSchema(ctx, table)
 	if err != nil {
 		return err
@@ -298,18 +312,12 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 	// 1000 rows per INSERT is a safe default regardless of column count.
 	const chunkSize = 1000
 
-	tx, err := t.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	for start := 0; start < len(batch.Records); start += chunkSize {
+	for start := 0; start < len(records); start += chunkSize {
 		end := start + chunkSize
-		if end > len(batch.Records) {
-			end = len(batch.Records)
+		if end > len(records) {
+			end = len(records)
 		}
-		chunk := batch.Records[start:end]
+		chunk := records[start:end]
 
 		rowPlaceholders := make([]string, len(chunk))
 		allVals := make([]interface{}, 0, len(chunk)*len(cols))
@@ -332,7 +340,7 @@ func (t *Target) WriteBatch(ctx context.Context, table string, batch *adapters.B
 		}
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 // loadDataHandlerSeq gives each writeBatchLoadData call a unique reader-handler

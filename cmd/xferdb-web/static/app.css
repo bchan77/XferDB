@@ -207,6 +207,8 @@ details.advanced summary { cursor: pointer; font-size: 13px; color: var(--muted)
 table.kv { width: 100%; border-collapse: collapse; }
 table.kv td { padding: 5px 0; font-size: 13px; vertical-align: top; }
 table.kv td:first-child { color: var(--muted); width: 130px; }
+table.live-checks td:first-child { width: 36px; }
+table.live-checks td { padding: 7px 0; }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 640px) { .split { grid-template-columns: 1fr; } }

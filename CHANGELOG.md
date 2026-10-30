@@ -4,6 +4,14 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Live migration readiness check (#102, phase 1).** The project settings page has a *Live
+  Migration* section, and `POST /projects/:id/preflight` takes `{"mode": "live"}`, checking
+  whether a PostgreSQL source can stream changes (wal_level, replication privilege, free slot
+  and WAL sender, primary keys, publication permissions, WAL retention) and whether the target
+  can apply them. Starting a live migration comes in a later release; the change capture, disk
+  queue and apply workers it will run on are in this one, not yet reachable from the API.
+
 ## [1.1.0] - 2026-10-21
 
 Post-migration data validation, Prometheus metrics, multi-schema PostgreSQL, and a set of fixes

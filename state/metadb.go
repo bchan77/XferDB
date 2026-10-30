@@ -163,6 +163,16 @@ func (m *MetaDB) migrate() error {
 			PRIMARY KEY (validation_id, table_name)
 		);
 
+		CREATE TABLE IF NOT EXISTS cdc_streams (
+			migration_id TEXT PRIMARY KEY REFERENCES migrations(id),
+			slot_name    TEXT NOT NULL,
+			publication  TEXT NOT NULL DEFAULT '',
+			start_pos    TEXT NOT NULL,
+			catchup_pos  TEXT NOT NULL DEFAULT '',
+			cutover_pos  TEXT NOT NULL DEFAULT '',
+			updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
 		CREATE TABLE IF NOT EXISTS validation_diffs (
 			validation_id TEXT NOT NULL REFERENCES validations(id) ON DELETE CASCADE,
 			table_name    TEXT NOT NULL,
@@ -183,6 +193,15 @@ func (m *MetaDB) migrate() error {
 	// "duplicate column name" when the column already exists.
 	if err := m.addColumnIfMissing("migrations", "schema_plan TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	// Live migration (#102): snapshot or live, and a live run's phase.
+	for _, col := range []string{
+		"mode TEXT NOT NULL DEFAULT 'snapshot'",
+		"phase TEXT NOT NULL DEFAULT ''",
+	} {
+		if err := m.addColumnIfMissing("migrations", col); err != nil {
+			return err
+		}
 	}
 	// L3 row-diff totals (#103 phase 2) on a validation_tables created before them.
 	for _, col := range []string{

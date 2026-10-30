@@ -155,7 +155,13 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 }
 
 // getSchema introspects a table using PRAGMA table_info, index_list, and foreign_key_list.
-func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSchema, error) {
+// queryer is a *sql.DB or a *sql.Tx: a target's single connection may be
+// held by an open transaction, so lookups made inside it must use the tx.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func getSchema(ctx context.Context, db queryer, table string) (*adapters.TableSchema, error) {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, quote(table)))
 	if err != nil {
 		return nil, fmt.Errorf("pragma table_info(%s): %w", table, err)
@@ -206,7 +212,7 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 }
 
 // getIndexes returns non-primary-key indexes for a table.
-func getIndexes(ctx context.Context, db *sql.DB, table string) ([]adapters.IndexDef, error) {
+func getIndexes(ctx context.Context, db queryer, table string) ([]adapters.IndexDef, error) {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA index_list(%s)`, quote(table)))
 	if err != nil {
 		return nil, fmt.Errorf("pragma index_list(%s): %w", table, err)
@@ -291,7 +297,7 @@ func humanSize(bytes int64) string {
 }
 
 // getForeignKeys returns foreign key constraints for a table.
-func getForeignKeys(ctx context.Context, db *sql.DB, table string) ([]adapters.ForeignKey, error) {
+func getForeignKeys(ctx context.Context, db queryer, table string) ([]adapters.ForeignKey, error) {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA foreign_key_list(%s)`, quote(table)))
 	if err != nil {
 		return nil, fmt.Errorf("pragma foreign_key_list(%s): %w", table, err)

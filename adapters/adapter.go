@@ -93,7 +93,18 @@ type Migration struct {
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
 	Error       string          `json:"error,omitempty"`
+	// Mode is MigrationModeSnapshot (a one-time copy) or MigrationModeLive
+	// (a copy, then streaming changes until cutover, #102). Phase is where a
+	// live migration is: setup, snapshot, catch_up, streaming, cutover.
+	Mode  string `json:"mode"`
+	Phase string `json:"phase,omitempty"`
 }
+
+// Migration modes.
+const (
+	MigrationModeSnapshot = "snapshot"
+	MigrationModeLive     = "live"
+)
 
 // TableProgress tracks per-table progress within a migration.
 type TableProgress struct {

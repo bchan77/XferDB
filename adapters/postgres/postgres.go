@@ -102,7 +102,9 @@ func schemaExpr(n int) string {
 func listTables(ctx context.Context, db *sql.DB, all bool) ([]string, error) {
 	filter := "table_schema = current_schema()"
 	if all {
-		filter = `table_schema NOT IN ('pg_catalog', 'information_schema')
+		// xferdb_cdc holds a live migration's applied positions
+		// (changes.go), never data to migrate.
+		filter = `table_schema NOT IN ('pg_catalog', 'information_schema', '` + changeStateSchema + `')
 		  AND table_schema NOT LIKE 'pg\_%'`
 	}
 	rows, err := db.QueryContext(ctx, `
@@ -152,7 +154,7 @@ func schemasWithTables(ctx context.Context, db *sql.DB) ([]string, error) {
 		SELECT DISTINCT table_schema
 		FROM information_schema.tables
 		WHERE table_type = 'BASE TABLE'
-		  AND table_schema NOT IN ('pg_catalog', 'information_schema')
+		  AND table_schema NOT IN ('pg_catalog', 'information_schema', '`+changeStateSchema+`')
 		  AND table_schema IS DISTINCT FROM current_schema()
 		ORDER BY table_schema`)
 	if err != nil {
