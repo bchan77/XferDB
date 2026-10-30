@@ -20,6 +20,9 @@ const (
 	EventTableFailed     EventKind = "table_failed"    // table failed; migration continues
 	EventTableCancelled  EventKind = "table_cancelled" // table's transfer stopped because the migration was cancelled
 	EventComplete        EventKind = "complete"
+	// EventSnapshotDone ends a live migration's snapshot run (#102): the
+	// rows are copied and the stream carries the migration on.
+	EventSnapshotDone EventKind = "snapshot_done"
 	EventError           EventKind = "error"
 	EventCancelled       EventKind = "cancelled" // migration stopped by explicit user cancel/delete, not a real failure
 	EventPaused          EventKind = "paused"

@@ -489,6 +489,18 @@ func (c *Collector) apply(ev engine.ProgressEvent) {
 			"tables_failed", s.Tables.Failed,
 		)
 
+	case engine.EventSnapshotDone:
+		// A live migration's copy is done; its stream is reported by the
+		// live manager, not here.
+		s.Phase = "snapshot_done"
+		s.CurrentTable = ""
+		s.ETASeconds = 0
+		c.log.Info("migration.snapshot_done",
+			"rows_transferred", s.Rows.Transferred,
+			"elapsed", fmt.Sprintf("%.1fs", time.Since(c.startedAt).Seconds()),
+			"tables_completed", s.Tables.Completed,
+		)
+
 	case engine.EventError:
 		s.Phase = "failed"
 		if ev.Err != nil {

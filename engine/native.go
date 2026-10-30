@@ -5,13 +5,14 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
@@ -73,7 +74,12 @@ func pgDumpSchemaArgs(src, tgt adapters.ConnectionConfig) (args []string, ok boo
 // version conflicts YugabyteDB raises when concurrent DDL modifies catalog state.
 // Each object emits an EventPostSchemaItem before execution so the CLI shows
 // what is running instead of appearing to hang.
-func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.ConnectionConfig, _ int) (bool, error) {
+//
+// keep, when set, runs only the statements it returns true for, and an
+// object that already exists is then skipped rather than failed: a live
+// migration runs post-data in stages (stageOfBlock), each of which may run
+// again after a restart.
+func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.ConnectionConfig, keep func(ddlBlock) bool) (bool, error) {
 	if !hasPgTools() {
 		return false, nil
 	}
@@ -112,6 +118,9 @@ func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.Connectio
 	// Parse the dump into named DDL blocks and execute each one individually.
 	var execErr error
 	for _, stmt := range parsePgDumpBlocks(dumpOut.Bytes()) {
+		if keep != nil && !keep(stmt) {
+			continue
+		}
 		e.emit(ProgressEvent{
 			Kind:          EventPostSchemaItem,
 			PostSchemaMsg: fmt.Sprintf("%-16s %s", strings.ToLower(stmt.Type)+":", stmt.Name),
@@ -126,6 +135,21 @@ func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.Connectio
 		}
 	}
 	return true, execErr
+}
+
+// alreadyExists reports a PostgreSQL error for creating an object that is
+// already there: a relation or index (42P07), a constraint or trigger
+// (42710), or a second primary key (42P16).
+func alreadyExists(err error) bool {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	switch pqErr.Code {
+	case "42P07", "42710", "42P16":
+		return true
+	}
+	return false
 }
 
 // ddlBlock is a parsed DDL statement from a pg_dump plain-SQL output.

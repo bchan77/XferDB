@@ -37,6 +37,9 @@ type Engine struct {
 	// its completed status is saved. Unlike EventTableDone it doesn't depend
 	// on an Events() subscriber, so per-table validation can rely on it.
 	onTableDone func(table string)
+
+	// live, when set, makes this run a live migration's snapshot.
+	live *Live
 }
 
 // OnTableDone registers fn to be called, from the engine's worker goroutine,
@@ -101,6 +104,11 @@ func (e *Engine) Resume() {
 func (e *Engine) Run(ctx context.Context) error {
 	defer close(e.events)
 
+	if e.live != nil {
+		if err := CheckLive(e.project.TransferConfig); err != nil {
+			return e.fail(ctx, err)
+		}
+	}
 	if err := e.connect(ctx); err != nil {
 		return e.fail(ctx, err)
 	}
@@ -203,6 +211,14 @@ func (e *Engine) Run(ctx context.Context) error {
 					return e.fail(ctx, fmt.Errorf("create table %s: %w", schema.Name, err))
 				}
 			}
+		}
+	}
+
+	if e.live != nil {
+		// The stream starts before any row is copied: every change from here
+		// on is captured, whatever the copy reads.
+		if err := e.live.Setup(ctx, tables); err != nil {
+			return e.fail(ctx, fmt.Errorf("live migration setup: %w", err))
 		}
 	}
 
@@ -333,72 +349,27 @@ func (e *Engine) Run(ctx context.Context) error {
 			postWorkers = 1
 		}
 
+		// A live migration creates only what replay can't break now; the
+		// rest follows at catch-up and cutover (DeferredSchema).
+		var keep func(ddlBlock) bool
+		post := tables
+		if e.live != nil {
+			keep = func(b ddlBlock) bool { return stageOfBlock(b) == StageSnapshot }
+			post = stageSchema(tables, StageSnapshot)
+		}
 		if nativeSchema {
-			if _, err := e.pgDumpPostData(ctx, e.project.SourceConfig, e.project.TargetConfig, postWorkers); err != nil {
+			if _, err := e.pgDumpPostData(ctx, e.project.SourceConfig, e.project.TargetConfig, keep); err != nil {
 				return e.fail(ctx, fmt.Errorf("pg_dump post-data: %w", err))
 			}
-		} else {
-			// Run index and constraint creation in parallel across tables,
-			// using the same worker count as the data-transfer phase.
-			type postWork struct {
-				schema adapters.TableSchema
-			}
-			work := make(chan postWork, len(tables))
-			for _, schema := range tables {
-				if len(schema.Indexes) > 0 || len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
-					work <- postWork{schema}
-				}
-			}
-			close(work)
-
-			var postWg sync.WaitGroup
-			var postMu sync.Mutex
-			var postErr error
-
-			for i := 0; i < postWorkers; i++ {
-				postWg.Add(1)
-				go func() {
-					defer postWg.Done()
-					for w := range work {
-						schema := w.schema
-						if len(schema.Indexes) > 0 {
-							e.emit(ProgressEvent{
-								Kind:          EventPostSchemaItem,
-								PostSchemaMsg: fmt.Sprintf("%-16s %s (%d)", "indexes:", schema.Name, len(schema.Indexes)),
-								Timestamp:     time.Now(),
-							})
-							if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
-								postMu.Lock()
-								if postErr == nil {
-									postErr = fmt.Errorf("create indexes for %s: %w", schema.Name, err)
-								}
-								postMu.Unlock()
-								return
-							}
-						}
-						if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
-							e.emit(ProgressEvent{
-								Kind:          EventPostSchemaItem,
-								PostSchemaMsg: fmt.Sprintf("%-16s %s (%d fk, %d check)", "constraints:", schema.Name, len(schema.ForeignKeys), len(schema.Checks)),
-								Timestamp:     time.Now(),
-							})
-							if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
-								postMu.Lock()
-								if postErr == nil {
-									postErr = fmt.Errorf("create constraints for %s: %w", schema.Name, err)
-								}
-								postMu.Unlock()
-								return
-							}
-						}
-					}
-				}()
-			}
-			postWg.Wait()
-			if postErr != nil {
-				return e.fail(ctx, postErr)
-			}
+		} else if err := e.createPostSchema(ctx, post, postWorkers); err != nil {
+			return e.fail(ctx, err)
 		}
+	}
+
+	if e.live != nil {
+		// The snapshot is done; the stream carries the migration on.
+		e.emit(ProgressEvent{Kind: EventSnapshotDone, Timestamp: time.Now()})
+		return nil
 	}
 
 	if err := e.db.SetMigrationStatus(ctx, e.migrationID, adapters.StatusCompleted); err != nil {
@@ -406,6 +377,62 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.emit(ProgressEvent{Kind: EventComplete, Timestamp: time.Now()})
 	return nil
+}
+
+// createPostSchema creates tables' indexes and constraints, tables in
+// parallel across workers.
+func (e *Engine) createPostSchema(ctx context.Context, tables []adapters.TableSchema, workers int) error {
+	work := make(chan adapters.TableSchema, len(tables))
+	for _, schema := range tables {
+		if len(schema.Indexes) > 0 || len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
+			work <- schema
+		}
+	}
+	close(work)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var postErr error
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for schema := range work {
+				if len(schema.Indexes) > 0 {
+					e.emit(ProgressEvent{
+						Kind:          EventPostSchemaItem,
+						PostSchemaMsg: fmt.Sprintf("%-16s %s (%d)", "indexes:", schema.Name, len(schema.Indexes)),
+						Timestamp:     time.Now(),
+					})
+					if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
+						mu.Lock()
+						if postErr == nil {
+							postErr = fmt.Errorf("create indexes for %s: %w", schema.Name, err)
+						}
+						mu.Unlock()
+						return
+					}
+				}
+				if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
+					e.emit(ProgressEvent{
+						Kind:          EventPostSchemaItem,
+						PostSchemaMsg: fmt.Sprintf("%-16s %s (%d fk, %d check)", "constraints:", schema.Name, len(schema.ForeignKeys), len(schema.Checks)),
+						Timestamp:     time.Now(),
+					})
+					if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
+						mu.Lock()
+						if postErr == nil {
+							postErr = fmt.Errorf("create constraints for %s: %w", schema.Name, err)
+						}
+						mu.Unlock()
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return postErr
 }
 
 // connect instantiates and connects source and target adapters using the project config.
