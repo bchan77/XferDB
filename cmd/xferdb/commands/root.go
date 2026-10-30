@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"gitea.homelab.local/nextdevops/XferDB/api"
+	"gitea.homelab.local/nextdevops/XferDB/cdc/live"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/version"
 )
@@ -100,7 +101,11 @@ var serverCmd = &cobra.Command{
 		defer db.Close()
 
 		log.Info("server.init", "state", dbPath, "log_file", logFile, "log_level", logLevel)
-		return api.NewServer(db, log).ListenAndServe(addr)
+		srv := api.NewServer(db, log)
+		// Live migrations keep their worker directories (spec, queue,
+		// status) next to the state database.
+		srv.EnableLive(filepath.Join(filepath.Dir(dbPath), "cdc"), live.ExecLauncher{})
+		return srv.ListenAndServe(addr)
 	},
 }
 

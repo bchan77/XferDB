@@ -50,6 +50,7 @@ tables that did complete are still validated.`,
 		validationLevel, _ := cmd.Flags().GetString("validation-level")
 		validationSample, _ := cmd.Flags().GetInt("validation-sample")
 		skipValidation, _ := cmd.Flags().GetBool("skip-validation")
+		liveMode, _ := cmd.Flags().GetBool("live")
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
@@ -148,7 +149,14 @@ tables that did complete are still validated.`,
 				return err
 			}
 			fmt.Printf("Attaching to migration %s...\n", migrationID)
-			return pollStats(migrationID)
+			// A live migration past its snapshot is followed by its lag.
+			if m, err := getMigration(migrationID); err == nil && m.Mode == "live" && m.Phase != "setup" && m.Phase != "snapshot" {
+				return followLive(migrationID)
+			}
+			if err := pollStats(migrationID); err != nil || !isLive(migrationID) {
+				return err
+			}
+			return followLive(migrationID)
 		}
 
 		if cancelOnly {
@@ -167,12 +175,24 @@ tables that did complete are still validated.`,
 			return showStatsHistory(migrationID)
 		}
 
+		if liveMode {
+			if extra == nil {
+				extra = map[string]any{}
+			}
+			extra["mode"] = "live"
+		}
 		migrationID, effectiveValidation, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, accurateCounts, asyncPipeline, tables, extra)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("Migration started: %s\n", migrationID)
 		fmt.Println("Tracking progress (Ctrl+C to detach)...")
+		if liveMode {
+			if err := pollStats(migrationID); err != nil {
+				return err
+			}
+			return followLive(migrationID)
+		}
 
 		if err := pollStats(migrationID); err != nil {
 			if effectiveValidation == validate.ModePerTable {
@@ -210,6 +230,7 @@ func init() {
 	migrateCmd.Flags().String("validation-level", validate.DefaultLevel, "Validation check to run: L1 (row counts), L2 (compare every row) or L3 (L2, then list the differing rows of a failing table) (overrides the project setting)")
 	migrateCmd.Flags().Int("validation-sample", 0, "Percentage of a failing table the L3 row diff checks; 0 checks every row (overrides the project setting)")
 	migrateCmd.Flags().Bool("skip-validation", false, "Do not validate this migration (same as --validation off)")
+	migrateCmd.Flags().Bool("live", false, "Live migration (PostgreSQL sources): copy the tables, then keep streaming the source's changes to the target until cutover")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -486,6 +507,10 @@ func pollStats(migrationID string) error {
 		lastLines = len(lines)
 
 		switch snap.Phase {
+		case "snapshot_done":
+			fmt.Printf("\nSnapshot copied: %s rows in %.1fs. Streaming changes from the source.\n",
+				fmtInt(snap.Rows.Transferred), snap.ElapsedSeconds)
+			return nil
 		case "complete":
 			fmt.Printf("\nMigration complete. Transferred %s rows in %.1fs.\n",
 				fmtInt(snap.Rows.Transferred), snap.ElapsedSeconds)
@@ -713,3 +738,110 @@ func maxRate(records []struct {
 	return max
 }
 
+
+// liveMigration is the part of GET /migrations/:id a live migration adds.
+type liveMigration struct {
+	Status string `json:"status"`
+	Mode   string `json:"mode"`
+	Phase  string `json:"phase"`
+	Error  string `json:"error"`
+	Live   *struct {
+		LagBytes   int64    `json:"lag_bytes"`
+		LagChanges uint64   `json:"lag_changes"`
+		LagSeconds *float64 `json:"lag_seconds"`
+		QueueBytes int64    `json:"queue_bytes"`
+		Apply      *struct {
+			ChangesApplied int64 `json:"changes_applied"`
+		} `json:"apply"`
+		CaptureError string `json:"capture_error"`
+		ApplyError   string `json:"apply_error"`
+	} `json:"live"`
+}
+
+func getMigration(id string) (*liveMigration, error) {
+	resp, err := http.Get(ServerAddr + "/api/v1/migrations/" + id)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get migration: %s", resp.Status)
+	}
+	var m liveMigration
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func isLive(id string) bool {
+	m, err := getMigration(id)
+	return err == nil && m.Mode == "live"
+}
+
+// followLive shows a live migration's phase and lag on one line, refreshed
+// every second, until it ends. Ctrl+C only stops following: the stream runs
+// on in the server.
+func followLive(id string) error {
+	for {
+		m, err := getMigration(id)
+		if err != nil {
+			fmt.Printf("\n  [warn] %v\n", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		switch m.Status {
+		case "failed":
+			fmt.Println()
+			return fmt.Errorf("live migration failed: %s", m.Error)
+		case "cancelled":
+			fmt.Println()
+			return fmt.Errorf("live migration cancelled")
+		case "completed":
+			fmt.Println("\nLive migration completed.")
+			return nil
+		}
+		fmt.Printf("\r\033[2K%s", liveLine(m))
+		time.Sleep(time.Second)
+	}
+}
+
+func liveLine(m *liveMigration) string {
+	line := fmt.Sprintf("Phase: %-10s", m.Phase)
+	if m.Status == "paused" {
+		line += " (paused)"
+	}
+	l := m.Live
+	if l == nil {
+		return line + "  waiting for the stream..."
+	}
+	secs := "?"
+	if l.LagSeconds != nil {
+		secs = fmt.Sprintf("%.1fs", *l.LagSeconds)
+	}
+	line += fmt.Sprintf("  Lag: %s changes, %s, %s behind the source", fmtInt(int64(l.LagChanges)), secs, fmtBytes(l.LagBytes))
+	if l.Apply != nil {
+		line += fmt.Sprintf("  Applied: %s", fmtInt(l.Apply.ChangesApplied))
+	}
+	if l.CaptureError != "" {
+		line += "  capture: " + l.CaptureError
+	}
+	if l.ApplyError != "" {
+		line += "  apply: " + l.ApplyError
+	}
+	return line
+}
+
+// fmtBytes renders a byte count with a binary unit, e.g. 1.5 MiB.
+func fmtBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}

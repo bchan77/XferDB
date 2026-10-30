@@ -12,8 +12,10 @@ import (
 
 	"github.com/google/uuid"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/cdc/live"
 	"gitea.homelab.local/nextdevops/XferDB/engine"
 	"gitea.homelab.local/nextdevops/XferDB/metrics"
+	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/stats"
 	"gitea.homelab.local/nextdevops/XferDB/validate"
@@ -32,6 +34,8 @@ type MigrationsHandler struct {
 	Validations *ValidationsHandler
 	// Metrics, when set, records each migration for GET /metrics.
 	Metrics *metrics.Metrics
+	// Live runs live migrations (#102); nil refuses them.
+	Live *live.Manager
 }
 
 // statsSaverAdapter wraps MetaDB to implement stats.StatsSaver.
@@ -101,6 +105,8 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		Validation      *string `json:"validation"`
 		ValidationLevel  *string `json:"validation_level"`
 		ValidationSample *int    `json:"validation_sample"`
+		// Mode is "snapshot" (the default) or "live" (#102).
+		Mode *string `json:"mode"`
 	}
 	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — body is optional
 	if overrides.RecreateSchema != nil {
@@ -152,6 +158,20 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	mode := adapters.MigrationModeSnapshot
+	if overrides.Mode != nil && *overrides.Mode != "" {
+		mode = *overrides.Mode
+	}
+	switch mode {
+	case adapters.MigrationModeSnapshot:
+	case adapters.MigrationModeLive:
+		if !h.checkLiveStart(w, r.Context(), p) {
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, `mode must be "snapshot" or "live"`)
+		return
+	}
 	validationMode := p.TransferConfig.Validation
 	if validationMode == "" {
 		validationMode = validate.DefaultMode
@@ -167,12 +187,41 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		ProjectID: projectID,
 		Status:    adapters.StatusPending,
 		CreatedAt: time.Now(),
+		Mode:      mode,
+	}
+	if mode == adapters.MigrationModeLive {
+		mig.Phase = live.PhaseSetup
 	}
 	if err := h.DB.CreateMigration(r.Context(), mig); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if mode == adapters.MigrationModeLive {
+		// Kept so a server restart can resume the run as it was started.
+		if err := h.DB.SetRunConfig(r.Context(), migrationID, p.TransferConfig); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// A live migration is validated at cutover, against a quiet source:
+		// while it streams, differences would only be lag.
+		validationMode = validate.ModeOff
+	}
+	h.launch(mig, p, validationMode, validationLevel)
 
+	// The effective validation settings tell the client whether to wait for
+	// a validation once the migration completes.
+	writeJSON(w, http.StatusCreated, struct {
+		*adapters.Migration
+		Validation      string `json:"validation"`
+		ValidationLevel string `json:"validation_level"`
+	}{mig, validationMode, validationLevel})
+}
+
+// launch runs a migration's engine in the background, with its stats
+// collector, metrics and validation; for a live migration, the snapshot,
+// after which the stream carries on under h.Live.
+func (h *MigrationsHandler) launch(mig *adapters.Migration, p *adapters.Project, validationMode, validationLevel string) {
+	migrationID, projectID := mig.ID, p.ID
 	eng := engine.New(migrationID, p, h.DB)
 
 	// Normalise effective config values so the display reflects what the engine will use.
@@ -209,6 +258,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		tables = []string{"(all)"}
 	}
 	migLog.Info("migration.started",
+		"mode", mig.Mode,
 		"tables", tables,
 		"table_workers", effectiveTableWorkers,
 		"segment_workers", effectiveSegmentWorkers,
@@ -227,6 +277,13 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 	}
 	col.Start(ctx)
 
+	isLive := mig.Mode == adapters.MigrationModeLive
+	if isLive {
+		eng.SetLive(&engine.Live{Setup: func(ctx context.Context, tables []adapters.TableSchema) error {
+			return h.Live.Setup(ctx, migrationID, p, tables)
+		}})
+	}
+
 	// In per_table mode each table is validated as soon as the engine
 	// records it completed, while the rest are still copying.
 	var perTable *perTableRun
@@ -242,7 +299,11 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 			delete(h.Cancels, migrationID)
 			h.Mu.Unlock()
 		}()
-		eng.Run(ctx) //nolint:errcheck
+		err := eng.Run(ctx)
+		if isLive {
+			h.afterLiveSnapshot(migrationID, p, err, migLog)
+			return
+		}
 		switch {
 		case perTable != nil:
 			perTable.finish()
@@ -250,14 +311,92 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 			h.Validations.startAfterMigration(migrationID, p, validationMode, validationLevel, p.TransferConfig.ValidationSample, migLog)
 		}
 	}()
+}
 
-	// The effective validation settings tell the client whether to wait for
-	// a validation once the migration completes.
-	writeJSON(w, http.StatusCreated, struct {
-		*adapters.Migration
-		Validation      string `json:"validation"`
-		ValidationLevel string `json:"validation_level"`
-	}{mig, validationMode, validationLevel})
+// afterLiveSnapshot moves a live migration on once its snapshot run ends:
+// to catch-up when it succeeded, or, when it failed or was cancelled, it
+// ends the stream so the source doesn't keep WAL for it.
+func (h *MigrationsHandler) afterLiveSnapshot(id string, p *adapters.Project, runErr error, log *slog.Logger) {
+	ctx := context.Background()
+	if runErr == nil {
+		if err := h.Live.SnapshotDone(ctx, id); err != nil {
+			log.Error("live.snapshot_done", "error", err)
+			h.DB.SetMigrationError(ctx, id, fmt.Errorf("start catch-up: %w", err)) //nolint:errcheck
+		} else {
+			log.Info("live.catch_up")
+			return
+		}
+	}
+	if err := h.Live.Stop(ctx, id, p); err != nil {
+		log.Warn("live.stop", "error", err)
+	}
+}
+
+// checkLiveStart answers false, having written the response, when a live
+// migration of p can't start: live mode unsupported here, settings it can't
+// run with, or failing readiness checks.
+func (h *MigrationsHandler) checkLiveStart(w http.ResponseWriter, ctx context.Context, p *adapters.Project) bool {
+	if h.Live == nil {
+		writeError(w, http.StatusBadRequest, "live migration isn't enabled on this server")
+		return false
+	}
+	if err := engine.CheckLive(p.TransferConfig); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	var src adapters.SourceAdapter
+	s, srcErr := connectSource(ctx, p.SourceConfig)
+	if srcErr == nil {
+		defer s.Close()
+		src = s
+	}
+	var tgt adapters.TargetAdapter
+	t, tgtErr := registry.NewTarget(p.TargetConfig.Type)
+	if tgtErr == nil {
+		if tgtErr = t.Connect(ctx, p.TargetConfig); tgtErr == nil {
+			defer t.Close()
+			tgt = t
+		}
+	}
+	res := liveChecks(ctx, p, src, tgt)
+	if srcErr != nil || tgtErr != nil || !res.Ready {
+		writeJSON(w, http.StatusBadRequest, struct {
+			Error string      `json:"error"`
+			Live  *liveResult `json:"live"`
+		}{"the project isn't ready for a live migration: run the live readiness check", res})
+		return false
+	}
+	return true
+}
+
+// ResumeLive picks up the live migrations a server restart interrupted:
+// one still in setup or snapshot reruns its snapshot, which resumes each
+// table from its checkpoint while capture keeps queueing; a later one is
+// supervised again, its workers reattached or restarted.
+func (h *MigrationsHandler) ResumeLive(ctx context.Context) {
+	if h.Live == nil {
+		return
+	}
+	migs, err := h.DB.ActiveLiveMigrations(ctx)
+	if err != nil {
+		h.Log.Warn("live.resume", "error", err)
+		return
+	}
+	for _, mig := range migs {
+		p, err := live.ProjectFor(ctx, h.DB, mig)
+		if err != nil {
+			h.Log.Warn("live.resume", "migration_id", mig.ID, "error", err)
+			continue
+		}
+		switch mig.Phase {
+		case live.PhaseCatchUp, live.PhaseStreaming:
+			h.Live.Supervise(mig.ID, p)
+		default:
+			mode, level := validate.ModeOff, p.TransferConfig.ValidationLevel
+			h.launch(mig, p, mode, level)
+		}
+		h.Log.Info("live.resumed", "migration_id", mig.ID, "phase", mig.Phase)
+	}
 }
 
 // ListMigrations handles GET /api/v1/projects/{id}/migrations.
@@ -289,10 +428,18 @@ func (h *MigrationsHandler) GetMigration(w http.ResponseWriter, r *http.Request)
 	if tables == nil {
 		tables = []adapters.TableProgress{}
 	}
+	// A live migration's stream, while the server supervises it.
+	var liveStatus *live.Status
+	if h.Live != nil && mig.Mode == adapters.MigrationModeLive {
+		if st, ok := h.Live.Status(id); ok {
+			liveStatus = &st
+		}
+	}
 	writeJSON(w, http.StatusOK, struct {
 		*adapters.Migration
 		Tables []adapters.TableProgress `json:"tables"`
-	}{mig, tables})
+		Live   *live.Status             `json:"live,omitempty"`
+	}{mig, tables, liveStatus})
 }
 
 // PatchMigration handles PATCH /api/v1/migrations/{id} for pause/resume.
@@ -311,6 +458,12 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 	eng, ok := h.Engines[id]
 	h.Mu.Unlock()
 
+	// Once a live migration's snapshot is done, its stream is paused,
+	// resumed and cancelled through h.Live; until then, through its engine.
+	if !ok && h.Live != nil && h.Live.Active(id) {
+		h.patchLive(w, r.Context(), id, body.Action)
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "no active engine for migration")
 		return
@@ -344,6 +497,31 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// patchLive pauses, resumes or cancels a live migration's stream.
+func (h *MigrationsHandler) patchLive(w http.ResponseWriter, ctx context.Context, id, action string) {
+	var err error
+	switch action {
+	case "pause":
+		err = h.Live.Pause(ctx, id)
+	case "resume":
+		err = h.Live.Resume(ctx, id)
+	case "cancel":
+		if err = h.Live.Stop(ctx, id, nil); err == nil {
+			err = h.DB.SetMigrationCancelled(ctx, id)
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "action must be 'pause', 'resume', or 'cancel'")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	event := map[string]string{"pause": "migration.paused", "resume": "migration.resumed", "cancel": "migration.cancelled"}[action]
+	h.Log.Info(event, "migration_id", id, "mode", adapters.MigrationModeLive)
+	w.WriteHeader(http.StatusAccepted)
+}
+
 // DeleteMigration handles DELETE /api/v1/migrations/{id}.
 func (h *MigrationsHandler) DeleteMigration(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -354,6 +532,15 @@ func (h *MigrationsHandler) DeleteMigration(w http.ResponseWriter, r *http.Reque
 
 	if hasCancel {
 		cancel()
+	}
+	// A live migration's stream goes with it: the source must not keep
+	// WAL for a migration nobody can see any more.
+	if mig, err := h.DB.GetMigration(r.Context(), id); err == nil && mig.Mode == adapters.MigrationModeLive && h.Live != nil {
+		if p, err := live.ProjectFor(r.Context(), h.DB, mig); err == nil {
+			if err := h.Live.Stop(r.Context(), id, p); err != nil {
+				h.Log.Warn("live.stop", "migration_id", id, "error", err)
+			}
+		}
 	}
 
 	if err := h.DB.DeleteMigration(r.Context(), id); err != nil {

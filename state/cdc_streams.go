@@ -3,8 +3,11 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
+
+	"gitea.homelab.local/nextdevops/XferDB/adapters"
 )
 
 // CDCStream is a live migration's change stream (#102): what was created on
@@ -62,4 +65,48 @@ func (m *MetaDB) SetMigrationPhase(ctx context.Context, id, phase string) error 
 		return fmt.Errorf("set migration phase: %w", err)
 	}
 	return nil
+}
+
+// SetRunConfig saves a live run's effective transfer config.
+func (m *MetaDB) SetRunConfig(ctx context.Context, id string, cfg adapters.TransferConfig) error {
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := m.db.ExecContext(ctx, `UPDATE migrations SET run_config = ? WHERE id = ?`, string(b), id); err != nil {
+		return fmt.Errorf("save run config: %w", err)
+	}
+	return nil
+}
+
+// GetRunConfig returns the transfer config SetRunConfig saved, false if none.
+func (m *MetaDB) GetRunConfig(ctx context.Context, id string) (adapters.TransferConfig, bool, error) {
+	var cfg adapters.TransferConfig
+	var text string
+	if err := m.db.GetContext(ctx, &text, `SELECT run_config FROM migrations WHERE id = ?`, id); err != nil {
+		return cfg, false, fmt.Errorf("get run config: %w", err)
+	}
+	if text == "" {
+		return cfg, false, nil
+	}
+	if err := json.Unmarshal([]byte(text), &cfg); err != nil {
+		return cfg, false, fmt.Errorf("run config of %s: %w", id, err)
+	}
+	return cfg, true, nil
+}
+
+// ActiveLiveMigrations returns the live migrations still running or paused,
+// for the server to resume at startup.
+func (m *MetaDB) ActiveLiveMigrations(ctx context.Context) ([]*adapters.Migration, error) {
+	var rows []migrationRow
+	if err := m.db.SelectContext(ctx, &rows,
+		`SELECT * FROM migrations WHERE mode = ? AND status IN (?, ?, ?) ORDER BY created_at`,
+		adapters.MigrationModeLive, string(adapters.StatusPending), string(adapters.StatusInProgress), string(adapters.StatusPaused)); err != nil {
+		return nil, fmt.Errorf("list live migrations: %w", err)
+	}
+	out := make([]*adapters.Migration, len(rows))
+	for i := range rows {
+		out[i] = rows[i].toMigration()
+	}
+	return out, nil
 }
