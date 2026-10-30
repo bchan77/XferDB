@@ -91,8 +91,8 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 		if !c.Nullable {
 			def += " NOT NULL"
 		}
-		if c.DefaultValue != nil {
-			def += fmt.Sprintf(" DEFAULT %s", *c.DefaultValue)
+		if d, ok := adapters.TranslateDefault(c, adapters.DialectMySQL, colType); ok {
+			def += " DEFAULT " + d
 		}
 		defs = append(defs, def)
 		if c.PrimaryKey {
@@ -221,8 +221,8 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 			if !change.Column.Nullable {
 				def += " NOT NULL"
 			}
-			if change.Column.DefaultValue != nil {
-				def += fmt.Sprintf(" DEFAULT %s", *change.Column.DefaultValue)
+			if d, ok := adapters.TranslateDefault(change.Column, adapters.DialectMySQL, mapTypeToMySQL(change.Column.Type)); ok {
+				def += " DEFAULT " + d
 			}
 			query = fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, quote(table), def)
 		case adapters.ChangeDropColumn:

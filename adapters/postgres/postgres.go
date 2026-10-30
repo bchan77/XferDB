@@ -243,6 +243,7 @@ func getSchema(ctx context.Context, db *sql.DB, name string) (*adapters.TableSch
 		}
 		if dfltVal.Valid {
 			col.DefaultValue = &dfltVal.String
+			col.DefaultDialect = adapters.DialectPostgres
 		}
 		schema.Columns = append(schema.Columns, col)
 	}
@@ -454,6 +455,11 @@ func mapTypeToPostgres(srcType string) string {
 	// smallint(n) → smallint
 	if strings.HasPrefix(lower, "smallint(") {
 		return "smallint"
+	}
+	// datetime(p) → timestamp(p): fractional-second precision, which MySQL
+	// reports on any DATETIME declared with it.
+	if rest, ok := strings.CutPrefix(lower, "datetime("); ok {
+		return "timestamp(" + rest
 	}
 	// tinyint(n) where n != 1 → smallint
 	if strings.HasPrefix(lower, "tinyint(") {

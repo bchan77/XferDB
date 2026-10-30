@@ -136,6 +136,10 @@ type ColumnDef struct {
 	Nullable     bool    `json:"nullable"`
 	PrimaryKey   bool    `json:"primary_key"`
 	DefaultValue *string `json:"default_value,omitempty"`
+	// DefaultDialect is the SQL dialect DefaultValue is written in (a
+	// Dialect* constant), set by the source that read it, so a target of
+	// another dialect can translate it (TranslateDefault).
+	DefaultDialect string `json:"-"`
 }
 
 // IndexDef describes an index on a table (excluding the primary key index).

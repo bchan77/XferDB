@@ -189,6 +189,7 @@ func getSchema(ctx context.Context, db queryer, table string) (*adapters.TableSc
 		}
 		if dfltVal.Valid {
 			col.DefaultValue = &dfltVal.String
+			col.DefaultDialect = adapters.DialectSQLite
 		}
 		schema.Columns = append(schema.Columns, col)
 	}
