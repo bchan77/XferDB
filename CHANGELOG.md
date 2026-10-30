@@ -9,8 +9,22 @@ All notable changes to XferDB are documented here.
   Migration* section, and `POST /projects/:id/preflight` takes `{"mode": "live"}`, checking
   whether a PostgreSQL source can stream changes (wal_level, replication privilege, free slot
   and WAL sender, primary keys, publication permissions, WAL retention) and whether the target
-  can apply them. Starting a live migration comes in a later release; the change capture, disk
-  queue and apply workers it will run on are in this one, not yet reachable from the API.
+  can apply them.
+- **Live migration, streaming (#102, phase 2).** A PostgreSQL source can now be migrated live:
+  `POST /projects/:id/migrations` with `{"mode": "live"}`, `xferdb migrate --live`, or the run
+  form's *Live migration* checkbox. XferDB creates a replication slot and publication, copies
+  the tables while capturing every change made meanwhile, replays those changes (catch-up), and
+  then keeps the target following the source (streaming). The server runs one capture and one
+  apply process per live migration; they outlive a server restart, which reattaches to them, and
+  are restarted when they fail. Pause stops applying while capture keeps queueing, so the source
+  still frees its WAL. `GET /migrations/:id` reports `phase` and a `live` object (lag in changes,
+  seconds and WAL bytes, queue size, worker errors); the migration page shows a phase strip and
+  the lag, and `/metrics` has `xferdb_cdc_*` gauges. The live copy pages each table by its
+  primary key up to the largest key at its start, so rows changing under it are never skipped.
+  Unique indexes are added once catch-up is done; foreign keys, checks and triggers are left for
+  cutover, which comes with phase 3 (until then a live migration streams until cancelled).
+  Starting one runs the live readiness check first and refuses `data_only`, `truncate` and
+  `schema_only`; cancelling or deleting it drops the slot and publication.
 
 ## [1.1.0] - 2026-10-21
 
