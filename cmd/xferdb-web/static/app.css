@@ -216,6 +216,12 @@ table.live-checks td { padding: 7px 0; }
 .phase-strip li.done { color: var(--ok); border-color: var(--ok); }
 .phase-strip li.current { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 600; }
 .badge.info { background: #eff6ff; color: var(--accent); }
+.cutover { margin-top: 12px; }
+.cutover-steps { list-style: none; padding: 0; margin: 8px 0; }
+.cutover-steps li { padding: 4px 0; }
+.cutover-steps li.pending { color: var(--muted); }
+.cutover-steps li.failed { color: var(--danger); }
+.cutover-steps li.done .status-icon { color: var(--ok); }
 @media (prefers-color-scheme: dark) { .badge.info { background: #17233a; } }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }

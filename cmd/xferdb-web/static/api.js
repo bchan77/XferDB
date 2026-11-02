@@ -69,6 +69,8 @@ export const api = {
   getMigration: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}`),
   patchMigration: (id, action) =>
     req('PATCH', `/api/v1/migrations/${encodeURIComponent(id)}`, { action }),
+  cutover: (id, ignoreWrites) =>
+    req('POST', `/api/v1/migrations/${encodeURIComponent(id)}/cutover`, { ignore_writes: !!ignoreWrites }),
   deleteMigration: (id) => req('DELETE', `/api/v1/migrations/${encodeURIComponent(id)}`),
   getStats: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}/stats`),
   getStatsHistory: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}/stats/history`),
