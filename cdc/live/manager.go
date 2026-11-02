@@ -61,9 +61,11 @@ type Status struct {
 	StartPos   string `json:"start_pos,omitempty"`
 	CatchUpPos string `json:"catch_up_pos,omitempty"`
 	// QueueBytes is the size of the queue on the server's disk.
-	QueueBytes int64     `json:"queue_bytes"`
-	Paused     bool      `json:"paused,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	QueueBytes int64 `json:"queue_bytes"`
+	Paused     bool  `json:"paused,omitempty"`
+	// Cutover is the latest cutover's progress, or why it stopped.
+	Cutover   *CutoverStatus `json:"cutover,omitempty"`
+	UpdatedAt time.Time      `json:"updated_at"`
 }
 
 // Manager runs the server's live migrations.
@@ -75,9 +77,17 @@ type Manager struct {
 	Log      *slog.Logger
 	// Interval is how often a migration's workers are checked; 0 means 1s.
 	Interval time.Duration
+	// QuietWait is how long a cutover waits, once drained, for changes
+	// still arriving; 0 means 3s.
+	QuietWait time.Duration
+	// OnCompleted is called once a cutover has completed a migration,
+	// with the project it ran with, to validate it.
+	OnCompleted func(id string, project *adapters.Project)
 
 	mu   sync.Mutex
 	runs map[string]*run
+	// done keeps the last status of migrations cut over since startup.
+	done map[string]Status
 }
 
 // run is one supervised live migration.
@@ -98,6 +108,9 @@ type run struct {
 	// lastApply is apply's last report, for the lag while it is paused or
 	// restarting: what it had applied then is still applied.
 	lastApply *cdc.ApplyStatus
+	// cutover is the latest cutover's progress; cutoverCancel stops it.
+	cutover       *CutoverStatus
+	cutoverCancel context.CancelFunc
 }
 
 type backoff struct {
@@ -224,15 +237,30 @@ func (m *Manager) get(id string) *run {
 // Active reports whether a live migration is supervised here.
 func (m *Manager) Active(id string) bool { return m.get(id) != nil }
 
-// Status returns a supervised live migration's latest status.
+// Status returns a live migration's latest status: supervised, or cut
+// over since the server started.
 func (m *Manager) Status(id string) (Status, bool) {
 	r := m.get(id)
 	if r == nil {
-		return Status{}, false
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		st, ok := m.done[id]
+		return st, ok
 	}
+	return r.snapshot(), true
+}
+
+// snapshot is the run's status with a copy of its cutover progress.
+func (r *run) snapshot() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.status, true
+	st := r.status
+	if r.cutover != nil {
+		c := *r.cutover
+		c.Steps = append([]CutoverStep(nil), r.cutover.Steps...)
+		st.Cutover = &c
+	}
+	return st
 }
 
 // Statuses returns every supervised live migration's latest status, by id.
@@ -245,9 +273,7 @@ func (m *Manager) Statuses() map[string]Status {
 	m.mu.Unlock()
 	out := make(map[string]Status, len(runs))
 	for _, r := range runs {
-		r.mu.Lock()
-		out[r.id] = r.status
-		r.mu.Unlock()
+		out[r.id] = r.snapshot()
 	}
 	return out
 }
@@ -258,6 +284,9 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 	r := m.get(id)
 	if r == nil {
 		return fmt.Errorf("live migration %s isn't running", id)
+	}
+	if r.cuttingOver() {
+		return errors.New("a cutover is running: it can't be paused")
 	}
 	if err := m.DB.SetMigrationStatus(ctx, id, adapters.StatusPaused); err != nil {
 		return err
@@ -280,18 +309,42 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 // status is the caller's to set. project is used when the migration isn't
 // supervised (nil: only what is supervised is stopped).
 func (m *Manager) Stop(ctx context.Context, id string, project *adapters.Project) error {
-	m.mu.Lock()
-	r := m.runs[id]
-	delete(m.runs, id)
-	m.mu.Unlock()
-	if r != nil {
-		r.cancel()
-		<-r.done
+	if r := m.get(id); r != nil {
+		r.mu.Lock()
+		if r.cutoverCancel != nil {
+			r.cutoverCancel()
+		}
+		r.mu.Unlock()
+		m.forget(r)
 		project = r.project
 	}
 	if project == nil {
 		return nil
 	}
+	return m.teardown(ctx, id, project)
+}
+
+// cuttingOver reports whether a cutover is running.
+func (r *run) cuttingOver() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cutover != nil && r.cutover.Running
+}
+
+// forget stops supervising r, leaving its workers running.
+func (m *Manager) forget(r *run) {
+	m.mu.Lock()
+	if m.runs[r.id] == r {
+		delete(m.runs, r.id)
+	}
+	m.mu.Unlock()
+	r.cancel()
+	<-r.done
+}
+
+// teardown stops a migration's workers, drops its slot and publication,
+// clears its applied positions on the target and removes its directory.
+func (m *Manager) teardown(ctx context.Context, id string, project *adapters.Project) error {
 	dir := m.WorkerDir(id)
 	var errs []error
 	for _, role := range []string{worker.RoleApply, worker.RoleCapture} {
@@ -408,7 +461,7 @@ func (m *Manager) check(ctx context.Context, r *run, src cdc.ChangeSource, log *
 		return err
 	}
 	paused := mig.Status == adapters.StatusPaused
-	applying := mig.Phase == PhaseCatchUp || mig.Phase == PhaseStreaming
+	applying := mig.Phase == PhaseCatchUp || mig.Phase == PhaseStreaming || mig.Phase == PhaseCutover
 	st := Status{Phase: mig.Phase, Paused: paused, UpdatedAt: time.Now()}
 	if stream != nil {
 		st.StartPos, st.CatchUpPos = stream.StartPos, stream.CatchupPos

@@ -58,7 +58,7 @@ func TestLiveMigration(t *testing.T) {
 			var n int
 			db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&n)
 			return n == 1
-		})
+		}, nil, nil)
 	})
 	t.Run("postgres", func(t *testing.T) {
 		name := fmt.Sprintf("xferdb_live_tgt_%d", time.Now().UnixNano())
@@ -75,11 +75,26 @@ func TestLiveMigration(t *testing.T) {
 			var n int
 			db.QueryRow(`SELECT count(*) FROM pg_indexes WHERE indexname = $1`, index).Scan(&n)
 			return n == 1
+		}, func(db *sql.DB, table string) bool {
+			var n int
+			db.QueryRow(`SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND conrelid = to_regclass($1)`, table).Scan(&n)
+			return n == 1
+		}, func(db *sql.DB, table string) int64 {
+			var v int64
+			if err := db.QueryRow(`SELECT nextval(pg_get_serial_sequence($1, 'id'))`, table).Scan(&v); err != nil {
+				t.Fatalf("nextval on the target: %v", err)
+			}
+			return v
 		})
 	})
 }
 
-func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, openTarget func(*testing.T) *sql.DB, hasIndex func(*sql.DB, string) bool) {
+// hasFK, when set, reports whether a table has a foreign key on the
+// target; nextval, when set, draws the next value of a table's id sequence
+// there. A SQLite target has neither: its foreign keys are declared, not
+// enforced, from the start, and it keeps no sequences.
+func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, openTarget func(*testing.T) *sql.DB,
+	hasIndex func(*sql.DB, string) bool, hasFK func(*sql.DB, string) bool, nextval func(*sql.DB, string) int64) {
 	ctx := context.Background()
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	items, notes := "live_items_"+suffix, "live_notes_"+suffix
@@ -87,9 +102,14 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 	mustExecDB(t, src, `CREATE UNIQUE INDEX `+items+`_email ON `+items+` (email)`)
 	mustExecDB(t, src, `CREATE INDEX `+items+`_name ON `+items+` (name)`)
 	mustExecDB(t, src, `CREATE TABLE `+notes+` (id bigint PRIMARY KEY, body text)`)
-	t.Cleanup(func() { src.Exec(`DROP TABLE IF EXISTS ` + items + `, ` + notes) })
+	// kids has a foreign key, held back until cutover, and a serial id,
+	// whose sequence cutover sets on a PostgreSQL target.
+	kids := "live_kids_" + suffix
+	mustExecDB(t, src, `CREATE TABLE `+kids+` (id serial PRIMARY KEY, note_id bigint REFERENCES `+notes+` (id) ON DELETE CASCADE, label text)`)
+	t.Cleanup(func() { src.Exec(`DROP TABLE IF EXISTS ` + kids + `, ` + items + `, ` + notes) })
 	mustExecDB(t, src, `INSERT INTO `+items+` SELECT (ARRAY['a','b','c'])[i % 3 + 1], i, 'row' || i, NULL, 'e' || i FROM generate_series(0, 2999) i`)
 	mustExecDB(t, src, `INSERT INTO `+notes+` SELECT i, 'note' || i FROM generate_series(0, 2999) i`)
+	mustExecDB(t, src, `INSERT INTO `+kids+` (note_id, label) SELECT i, 'kid' || i FROM generate_series(0, 2999, 3) i`)
 
 	dir := t.TempDir()
 	db, err := state.Open(filepath.Join(dir, "state.db"))
@@ -103,6 +123,7 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 		s := NewServer(db, slog.New(slog.DiscardHandler))
 		s.EnableLive(filepath.Join(dir, "cdc"), launcher)
 		s.live.Interval = 200 * time.Millisecond
+		s.live.QuietWait = 500 * time.Millisecond
 		return s, httptest.NewServer(s.Handler())
 	}
 	srv, hs := newServer()
@@ -116,13 +137,13 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 		"target_config": target,
 	}, http.StatusCreated, &p)
 
-	stopWriter, writerDone, txns := liveWriter(t, src, items, notes)
+	stopWriter, writerDone, txns := liveWriter(t, src, items, notes, kids)
 	var m struct {
 		ID   string `json:"id"`
 		Mode string `json:"mode"`
 	}
 	post(t, hs.URL+"/api/v1/projects/"+p.ID+"/migrations", map[string]any{
-		"mode": "live", "tables": []string{items, notes}, "batch_size": 50, "table_workers": 2,
+		"mode": "live", "tables": []string{items, notes, kids}, "batch_size": 50, "table_workers": 2,
 	}, http.StatusCreated, &m)
 	if m.Mode != "live" {
 		t.Fatalf("mode = %q", m.Mode)
@@ -151,6 +172,17 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 
 	waitLive(t, hs, m.ID, "streaming", func(l liveMig) bool { return l.Phase == "streaming" })
 	time.Sleep(time.Second) // keep writing while streaming
+
+	// Cutting over while the source is still written to stops at the
+	// quiet check, and the migration goes on streaming.
+	post(t, hs.URL+"/api/v1/migrations/"+m.ID+"/cutover", map[string]any{}, http.StatusAccepted, nil)
+	cut := waitLive(t, hs, m.ID, "the busy cutover to stop", func(l liveMig) bool {
+		return l.Live.Cutover != nil && !l.Live.Cutover.Running
+	})
+	if !strings.Contains(cut.Live.Cutover.Error, "writes are still happening") || cut.Live.Cutover.WritesAfter == 0 || cut.Phase != "streaming" {
+		t.Fatalf("cutover under writes: phase %s, %d writes after, error %q", cut.Phase, cut.Live.Cutover.WritesAfter, cut.Live.Cutover.Error)
+	}
+
 	close(stopWriter)
 	<-writerDone
 	t.Logf("writer stopped after %d transactions", txns.Load())
@@ -163,6 +195,13 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 		return n == 1 && l.Live.LagChanges == 0
 	})
 
+	compare := func(table, q string) {
+		t.Helper()
+		want, got := liveRows(t, src, q, false), liveRows(t, tgt, q, false)
+		if strings.Join(want, ",") != strings.Join(got, ",") {
+			t.Fatalf("%s: source has %d rows, target %d, or they differ", table, len(want), len(got))
+		}
+	}
 	for _, q := range []struct{ src, tgt string }{
 		{`SELECT grp || '|' || id || '|' || name || '|' || COALESCE(md5(big), '-') || '|' || email FROM ` + items,
 			`SELECT grp || '|' || id || '|' || name || '|' || COALESCE(big, '-') || '|' || email FROM ` + items},
@@ -184,21 +223,44 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 	if !hasIndex(tgt, items+"_name") {
 		t.Errorf("the plain index wasn't created after the snapshot")
 	}
-
-	req, _ := http.NewRequest(http.MethodDelete, hs.URL+"/api/v1/migrations/"+m.ID, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	if hasFK != nil && hasFK(tgt, kids) {
+		t.Errorf("the foreign key was created before cutover")
 	}
-	resp.Body.Close()
+
+	// Cutover: drain, quiet check, sequences, foreign keys, slot dropped,
+	// completed, validated.
+	post(t, hs.URL+"/api/v1/migrations/"+m.ID+"/cutover", map[string]any{}, http.StatusAccepted, nil)
+	waitMigration(t, hs, m.ID, "completed")
+	compare(kids, `SELECT id || '|' || note_id || '|' || label FROM `+kids)
+	if hasFK != nil && !hasFK(tgt, kids) {
+		t.Errorf("the foreign key wasn't created at cutover")
+	}
+	if nextval != nil {
+		var maxID int64
+		src.QueryRow(`SELECT max(id) FROM ` + kids).Scan(&maxID)
+		if v := nextval(tgt, kids); v <= maxID {
+			t.Errorf("target sequence gives %d after cutover; the source has handed out up to %d", v, maxID)
+		}
+	}
 	var slots int
 	src.QueryRow(`SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1`, postgres.SlotName(m.ID)).Scan(&slots)
 	if slots != 0 {
-		t.Errorf("the replication slot is still there after delete")
+		t.Errorf("the replication slot is still there after cutover")
 	}
 	if _, err := os.Stat(wdir); !os.IsNotExist(err) {
-		t.Errorf("worker directory still there after delete: %v", err)
+		t.Errorf("worker directory still there after cutover: %v", err)
 	}
+	var vs []validationResult
+	waitFor(t, "the validation after cutover", func() bool {
+		vs = listValidations(t, hs, m.ID)
+		return len(vs) == 1 && vs[0].Status == "completed"
+	})
+	for _, vt := range vs[0].Tables {
+		if vt.Result != "pass" {
+			t.Errorf("validation after cutover: %s %s", vt.TableName, vt.Result)
+		}
+	}
+
 }
 
 type liveMig struct {
@@ -209,10 +271,15 @@ type liveMig struct {
 		LagChanges   uint64 `json:"lag_changes"`
 		CaptureError string `json:"capture_error"`
 		ApplyError   string `json:"apply_error"`
+		Cutover      *struct {
+			Running     bool   `json:"running"`
+			Error       string `json:"error"`
+			WritesAfter uint64 `json:"writes_after"`
+		} `json:"cutover"`
 	} `json:"live"`
 }
 
-func waitLive(t *testing.T, hs *httptest.Server, id, what string, cond func(liveMig) bool) {
+func waitLive(t *testing.T, hs *httptest.Server, id, what string, cond func(liveMig) bool) liveMig {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
 	var l liveMig
@@ -223,11 +290,31 @@ func waitLive(t *testing.T, hs *httptest.Server, id, what string, cond func(live
 			t.Fatalf("migration %s: %s", l.Status, l.Error)
 		}
 		if cond(l) {
-			return
+			return l
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s: %+v", what, l)
+	return l
+}
+
+// waitMigration waits for a migration to reach status.
+func waitMigration(t *testing.T, hs *httptest.Server, id, status string) {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	var l liveMig
+	for time.Now().Before(deadline) {
+		l = liveMig{}
+		get(t, hs.URL+"/api/v1/migrations/"+id, &l)
+		if l.Status == status {
+			return
+		}
+		if l.Status == "failed" || l.Status == "cancelled" {
+			t.Fatalf("migration %s: %s", l.Status, l.Error)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s: %+v", status, l)
 }
 
 func liveGrp(i int) string { return []string{"a", "b", "c"}[i%3] }
@@ -235,7 +322,7 @@ func liveGrp(i int) string { return []string{"a", "b", "c"}[i%3] }
 // liveWriter changes the source until stop is closed: inserts, updates of
 // plain and TOASTed columns, key changes, deletes, and unique values moved
 // between rows, several per transaction.
-func liveWriter(t *testing.T, db *sql.DB, items, notes string) (chan struct{}, chan struct{}, *atomic.Int64) {
+func liveWriter(t *testing.T, db *sql.DB, items, notes, kids string) (chan struct{}, chan struct{}, *atomic.Int64) {
 	stop, done := make(chan struct{}), make(chan struct{})
 	var txns atomic.Int64
 	rnd := mrand.New(mrand.NewSource(7))
@@ -258,7 +345,7 @@ func liveWriter(t *testing.T, db *sql.DB, items, notes string) (chan struct{}, c
 				next++
 				var q string
 				var args []interface{}
-				switch rnd.Intn(8) {
+				switch rnd.Intn(9) {
 				case 0:
 					q, args = `INSERT INTO `+items+` VALUES ($1, $2, 'new', NULL, $3) ON CONFLICT DO NOTHING`, []interface{}{liveGrp(next), next, fmt.Sprint("n", next)}
 				case 1:
@@ -282,6 +369,8 @@ func liveWriter(t *testing.T, db *sql.DB, items, notes string) (chan struct{}, c
 					q, args = `INSERT INTO `+notes+` VALUES ($1, 'new') ON CONFLICT (id) DO UPDATE SET body = 'again'`, []interface{}{i}
 				case 7:
 					q, args = `DELETE FROM `+notes+` WHERE id = $1`, []interface{}{i}
+				case 8:
+					q, args = `INSERT INTO `+kids+` (note_id, label) SELECT id, 'k' || $1::text FROM `+notes+` ORDER BY random() LIMIT 1`, []interface{}{next}
 				}
 				if _, err := tx.Exec(q, args...); err != nil {
 					tx.Rollback()

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -391,6 +392,12 @@ func (h *MigrationsHandler) ResumeLive(ctx context.Context) {
 		switch mig.Phase {
 		case live.PhaseCatchUp, live.PhaseStreaming:
 			h.Live.Supervise(mig.ID, p)
+		case live.PhaseCutover:
+			// Every step of a cutover can run again: start it over.
+			h.Live.Supervise(mig.ID, p)
+			if err := h.Live.Cutover(ctx, mig.ID, live.CutoverOptions{}); err != nil {
+				h.Log.Warn("live.resume_cutover", "migration_id", mig.ID, "error", err)
+			}
 		default:
 			mode, level := validate.ModeOff, p.TransferConfig.ValidationLevel
 			h.launch(mig, p, mode, level)
@@ -495,6 +502,49 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// Cutover handles POST /api/v1/migrations/{id}/cutover: it starts a live
+// migration's cutover and answers 202 with the stream's status; progress
+// is in GET /migrations/{id} live.cutover. The body may set ignore_writes.
+func (h *MigrationsHandler) Cutover(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mig, err := h.DB.GetMigration(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "migration not found")
+		return
+	}
+	if mig.Mode != adapters.MigrationModeLive || h.Live == nil {
+		writeError(w, http.StatusBadRequest, "only a live migration can be cut over")
+		return
+	}
+	var opts live.CutoverOptions
+	json.NewDecoder(r.Body).Decode(&opts) //nolint:errcheck // the body is optional
+	if err := h.Live.Cutover(r.Context(), id, opts); err != nil {
+		switch {
+		case errors.Is(err, live.ErrNotRunning), errors.Is(err, live.ErrNotStreaming),
+			errors.Is(err, live.ErrPaused), errors.Is(err, live.ErrCutoverRunning):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	h.Log.Info("migration.cutover_started", "migration_id", id, "ignore_writes", opts.IgnoreWrites)
+	st, _ := h.Live.Status(id)
+	// The validation that follows a completed cutover, so a client knows
+	// whether to wait for one.
+	validation := validate.DefaultMode
+	if p, err := live.ProjectFor(r.Context(), h.DB, mig); err == nil && p.TransferConfig.Validation != "" {
+		validation = p.TransferConfig.Validation
+	}
+	if validation == validate.ModePerTable {
+		validation = validate.ModeAfter
+	}
+	writeJSON(w, http.StatusAccepted, struct {
+		live.Status
+		Validation string `json:"validation"`
+	}{st, validation})
 }
 
 // patchLive pauses, resumes or cancels a live migration's stream.

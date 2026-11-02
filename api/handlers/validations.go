@@ -305,6 +305,17 @@ func (h *ValidationsHandler) startAfterMigration(migrationID string, p *adapters
 	}
 }
 
+// AfterCutover validates a live migration its cutover has just completed,
+// by the project's settings for this run; per_table, which has no meaning
+// for a cutover, validates the whole migration as after does.
+func (h *ValidationsHandler) AfterCutover(migrationID string, p *adapters.Project, log *slog.Logger) {
+	mode := p.TransferConfig.Validation
+	if mode == validate.ModePerTable {
+		mode = validate.ModeAfter
+	}
+	h.startAfterMigration(migrationID, p, mode, p.TransferConfig.ValidationLevel, p.TransferConfig.ValidationSample, log)
+}
+
 // ListValidations handles GET /api/v1/migrations/{id}/validations.
 func (h *ValidationsHandler) ListValidations(w http.ResponseWriter, r *http.Request) {
 	vs, err := h.DB.ListValidations(r.Context(), r.PathValue("id"))
