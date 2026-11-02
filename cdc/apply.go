@@ -228,14 +228,21 @@ func (a *Applier) applyTable(ctx context.Context, table string, changes []Change
 	defer tx.Rollback()
 
 	var upserts []map[string]interface{}
-	upsertAt := map[string]int{} // key -> index in upserts, so a key appears once per statement
+	// Keys in upserts: a statement may touch a row only once, and a key
+	// that comes back starts a new statement rather than replacing its
+	// earlier version. Merged, two rows swapping a unique value in three
+	// steps become two rows each taking the other's value while it still
+	// holds it, which PostgreSQL and MySQL refuse: they check a unique
+	// index row by row within a statement. In source order every step is a
+	// state the source itself had.
+	upsertAt := map[string]bool{}
 	var deletes []map[string]interface{}
 	flush := func() error {
 		if len(upserts) > 0 {
 			if err := tx.Upsert(ctx, table, upserts); err != nil {
 				return err
 			}
-			upserts, upsertAt = nil, map[string]int{}
+			upserts, upsertAt = nil, map[string]bool{}
 		}
 		if len(deletes) > 0 {
 			if err := tx.Delete(ctx, table, deletes); err != nil {
@@ -252,11 +259,12 @@ func (a *Applier) applyTable(ctx context.Context, table string, changes []Change
 			}
 		}
 		k := keyString(key)
-		if i, ok := upsertAt[k]; ok {
-			upserts[i] = row
-			return nil
+		if upsertAt[k] {
+			if err := flush(); err != nil {
+				return err
+			}
 		}
-		upsertAt[k] = len(upserts)
+		upsertAt[k] = true
 		upserts = append(upserts, row)
 		return nil
 	}

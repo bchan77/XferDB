@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
+	"gitea.homelab.local/nextdevops/XferDB/adapters/postgres"
 	"gitea.homelab.local/nextdevops/XferDB/adapters/sqlite"
 	"gitea.homelab.local/nextdevops/XferDB/cdc"
 	_ "github.com/mattn/go-sqlite3"
@@ -145,6 +147,86 @@ func TestApplyReplaysEveryKindOfChange(t *testing.T) {
 	if st, _ := cdc.QueueStats(dir); st.Segments > 2 {
 		t.Fatalf("applied segments not removed: %+v", st)
 	}
+}
+
+// TestApplySwapsUniqueValuesInOrder replays two rows swapping a unique
+// value through a third, as one transaction does on the source. Merging
+// each key's updates into one statement used to give each row the other's
+// value while it still held it, which a PostgreSQL target refuses (SQLite's
+// INSERT OR REPLACE happens to cope). The PostgreSQL run needs
+// XFERDB_TEST_CDC_PG.
+func TestApplySwapsUniqueValuesInOrder(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		tgt, path := sqliteTarget(t)
+		applySwap(t, tgt, "a")
+		if got, want := dump(t, path, "a"), "1:blue: 2:red:"; got != want {
+			t.Fatalf("table a = %q, want %q", got, want)
+		}
+	})
+	t.Run("postgres", func(t *testing.T) {
+		dsn := os.Getenv("XFERDB_TEST_CDC_PG")
+		if dsn == "" {
+			t.Skip("XFERDB_TEST_CDC_PG not set")
+		}
+		tgt := postgres.NewTarget()
+		if err := tgt.Connect(context.Background(), adapters.ConnectionConfig{Type: "postgres", DSN: dsn}); err != nil {
+			t.Fatal(err)
+		}
+		defer tgt.Close()
+		table := fmt.Sprintf("xferdb_swap_%d", time.Now().UnixNano())
+		if err := tgt.CreateTable(context.Background(), &adapters.TableSchema{Name: table, Columns: []adapters.ColumnDef{
+			{Name: "id", Type: "integer", PrimaryKey: true},
+			{Name: "v", Type: "text", Nullable: true},
+			{Name: "big", Type: "text", Nullable: true},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		defer tgt.DropTable(context.Background(), table) //nolint:errcheck
+		applySwap(t, tgt, table)
+		db, _ := sql.Open("postgres", dsn)
+		defer db.Close()
+		var got string
+		db.QueryRow(`SELECT string_agg(id || ':' || v, ' ' ORDER BY id) FROM ` + table).Scan(&got)
+		if want := "1:blue 2:red"; got != want {
+			t.Fatalf("table = %q, want %q", got, want)
+		}
+	})
+}
+
+func applySwap(t *testing.T, tgt adapters.TargetAdapter, table string) {
+	t.Helper()
+	if err := tgt.CreateIndexes(context.Background(), table, []adapters.IndexDef{{Name: table + "_v", Columns: []string{"v"}, Unique: true}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	w, err := cdc.OpenWriter(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	upd := func(id int64, v string) cdc.Change {
+		return cdc.Change{Table: table, Op: cdc.OpUpdate, Key: key(id), After: row(id, v, "")}
+	}
+	ap, ok := tgt.(adapters.ChangeApplier)
+	if !ok {
+		t.Fatal("target can't apply changes")
+	}
+	if err := ap.PrepareChangeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stream := fmt.Sprintf("swap-%d", time.Now().UnixNano())
+	defer ap.ClearChangeState(context.Background(), stream) //nolint:errcheck
+	a := &cdc.Applier{Stream: stream, Dir: dir, Target: ap,
+		Opts: cdc.ApplyOptions{MaxBatch: 100, MaxWait: 50 * time.Millisecond}}
+	// The rows are on the target before the swap arrives, as they would be
+	// after the snapshot.
+	appendTxn(t, w, cdc.Change{Table: table, Op: cdc.OpInsert, Key: key(1), After: row(1, "red", "")},
+		cdc.Change{Table: table, Op: cdc.OpInsert, Key: key(2), After: row(2, "blue", "")})
+	seq, _ := w.Last()
+	runUntil(t, a, seq)
+	appendTxn(t, w, upd(1, "swap"), upd(2, "red"), upd(1, "blue"))
+	seq, _ = w.Last()
+	runUntil(t, a, seq)
 }
 
 func TestApplyRestartsWhereTheTargetIs(t *testing.T) {
