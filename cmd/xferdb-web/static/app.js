@@ -1892,7 +1892,8 @@ function fmtBytes(n) {
 // livePhaseStrip shows where a live migration is: the phases it passed,
 // the current one, and those still to come.
 function livePhaseStrip(phase) {
-  const at = LIVE_PHASES.findIndex(([key]) => key === phase);
+  // Completed: every phase, cutover included, is behind it.
+  const at = phase === 'completed' ? LIVE_PHASES.length : LIVE_PHASES.findIndex(([key]) => key === phase);
   return `<ol class="phase-strip" data-phase="${esc(phase || '')}">${LIVE_PHASES.map(([key, label], i) => {
     const cls = i < at ? 'done' : i === at ? 'current' : 'todo';
     return `<li class="${cls}" data-phase="${key}">${esc(label)}</li>`;
@@ -1926,12 +1927,73 @@ function liveStatusHTML(mig) {
     </div>`;
   if (phase === 'catch_up') {
     body += `<div class="hint">Catching up: replaying what was written during the copy, up to ${esc(l.catch_up_pos || 'the position recorded when it ended')}. Unique indexes are added once it is done.</div>`;
-  } else if (phase === 'streaming') {
-    body += `<div class="hint">The target follows the source. Cutover, which stops the stream and finishes the target's schema, comes in a later release of live migration.</div>`;
+  } else if (phase === 'streaming' && !(l.cutover && l.cutover.running)) {
+    body += `<div class="hint">The target follows the source. To switch over, stop every application writing to the source, then cut over: the rest of the changes are applied, sequences set, foreign keys and checks added, and the replication slot dropped.</div>`;
   }
+  if (l.cutover) body += cutoverHTML(l.cutover);
   if (l.capture_error) body += errorBanner('Capture worker: ' + l.capture_error + ' (restarting)');
   if (l.apply_error) body += errorBanner('Apply worker: ' + l.apply_error + ' (restarting)');
   return body;
+}
+
+// cutoverHTML shows a cutover's steps, and why it stopped if it did.
+function cutoverHTML(c) {
+  const icons = { done: '✓', skipped: '–', failed: '✗', running: '●', pending: '·' };
+  let html = `<div class="cutover" data-running="${c.running ? 'true' : 'false'}">
+    <strong>${c.running ? 'Cutting over' : c.error ? 'Cutover stopped' : 'Cutover'}</strong>
+    <ol class="cutover-steps">${(c.steps || []).map((s) => `
+      <li class="${esc(s.state)}" data-step="${esc(s.name)}"><span class="status-icon">${icons[s.state] || '·'}</span>${esc(s.label)}${s.detail ? `<div class="hint">${esc(s.detail)}</div>` : ''}</li>`).join('')}
+    </ol>`;
+  if (!c.running && c.error) {
+    // The failed step shows the reason; repeat it only if no step does.
+    if (!(c.steps || []).some((s) => s.state === 'failed' && s.detail)) html += errorBanner(c.error);
+    if (c.writes_after > 0) {
+      html += `<div class="actions-row"><button class="btn" id="cutoverRetryBtn">Cut over again</button><button class="btn danger" id="cutoverAnywayBtn">Cut over anyway</button></div>`;
+    }
+  }
+  return html + '</div>';
+}
+
+// mountLiveActions puts a live migration's controls in actionsEl: pause,
+// resume and cancel as for any migration, plus Cut over once it streams,
+// and wires the cutover card's retry buttons in area.
+function mountLiveActions(actionsEl, area, migId, mig, onDone) {
+  const phase = mig.phase || '';
+  const cutting = phase === 'cutover' || !!(mig.live && mig.live.cutover && mig.live.cutover.running);
+  // A running cutover can be cancelled but not paused.
+  const state = mig.status === 'paused' ? 'paused' : cutting ? 'cutting_over' : 'in_progress';
+  mountMigActions(actionsEl, migId, state, { onDone, errorArea: area, live: true });
+  const doCutover = async (ignoreWrites) => {
+    try {
+      await api.cutover(migId, ignoreWrites);
+      onDone();
+    } catch (err) {
+      area.insertAdjacentHTML('afterbegin', errorBanner('Cutover failed to start: ' + err.message));
+    }
+  };
+  if (phase === 'streaming' && mig.status === 'in_progress' && !cutting) {
+    actionsEl.insertAdjacentHTML('afterbegin', '<button class="btn primary" id="cutoverBtn">Cut over</button>');
+    actionsEl.querySelector('#cutoverBtn').addEventListener('click', async () => {
+      const ok = await confirmModal({
+        title: 'Cut over to the target?',
+        body: 'Stop every application writing to the source first. The cutover applies the remaining changes, checks for a few seconds that no more arrive, sets the target\'s sequences, adds foreign keys and checks, drops the replication slot and completes the migration, which is then validated.',
+        confirmLabel: 'Cut over',
+      });
+      if (ok) doCutover(false);
+    });
+  }
+  const retry = area && area.querySelector('#cutoverRetryBtn');
+  if (retry) retry.addEventListener('click', () => doCutover(false));
+  const anyway = area && area.querySelector('#cutoverAnywayBtn');
+  if (anyway) anyway.addEventListener('click', async () => {
+    const ok = await confirmModal({
+      title: 'Cut over while writes continue?',
+      body: 'Changes still arriving are applied once more, then the stream stops: anything written to the source after that is not migrated.',
+      confirmLabel: 'Cut over anyway',
+      danger: true,
+    });
+    if (ok) doCutover(true);
+  });
 }
 
 // mountMigSection renders the migration status/controls card on a project's
@@ -2001,11 +2063,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
           return;
         }
         body.innerHTML = liveStatusHTML(mig);
-        mountMigActions(actionsEl, migId, mig.status === 'paused' ? 'paused' : 'in_progress', {
-          onDone: () => { clearTimer(); tick(); },
-          errorArea: body,
-          live: true,
-        });
+        mountLiveActions(actionsEl, body, migId, mig, () => { clearTimer(); tick(); });
       } catch (err) {
         const body = document.getElementById('migCardBody');
         if (body) body.innerHTML = errorBanner('Could not load the live migration: ' + err.message);
@@ -2556,11 +2614,7 @@ async function renderMigrationProgress(migId) {
       actionsEl.innerHTML = '';
       return;
     }
-    mountMigActions(actionsEl, migId, liveMig.status === 'paused' ? 'paused' : 'in_progress', {
-      onDone: () => { clearTimer(); tick(); },
-      errorArea: el,
-      live: true,
-    });
+    mountLiveActions(actionsEl, el, migId, liveMig, () => { clearTimer(); tick(); });
   }
 
   async function tick() {
@@ -2579,6 +2633,8 @@ async function renderMigrationProgress(migId) {
         renderLive();
         if (!ACTIVE_STATUSES.includes(liveMig.status)) {
           clearTimer();
+          // A cutover that completes is followed by its validation.
+          showValidation(liveMig.status === 'completed');
           return;
         }
         if (!stopped) timer = setTimeout(tick, 1500);

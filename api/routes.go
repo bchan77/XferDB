@@ -42,6 +42,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/migrations/{id}", mh.GetMigration)
 	mux.HandleFunc("PATCH /api/v1/migrations/{id}", mh.PatchMigration)
 	mux.HandleFunc("DELETE /api/v1/migrations/{id}", mh.DeleteMigration)
+	mux.HandleFunc("POST /api/v1/migrations/{id}/cutover", mh.Cutover)
 	mux.HandleFunc("GET /api/v1/migrations/{id}/stats", mh.GetStats)
 	mux.HandleFunc("GET /api/v1/migrations/{id}/stats/history", mh.GetStatsHistory)
 

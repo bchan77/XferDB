@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 
+	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/api/handlers"
 	"gitea.homelab.local/nextdevops/XferDB/cdc/live"
 	"gitea.homelab.local/nextdevops/XferDB/engine"
@@ -40,6 +41,9 @@ type Server struct {
 // directory under dir and its workers started by launcher.
 func (s *Server) EnableLive(dir string, launcher live.Launcher) {
 	s.live = &live.Manager{DB: s.db, Dir: dir, Launcher: launcher, Log: s.log}
+	s.live.OnCompleted = func(id string, p *adapters.Project) {
+		s.validations.AfterCutover(id, p, s.log.With("migration_id", id))
+	}
 	s.metrics.SetLive(func() map[string]metrics.LiveStream {
 		out := map[string]metrics.LiveStream{}
 		for id, st := range s.live.Statuses() {

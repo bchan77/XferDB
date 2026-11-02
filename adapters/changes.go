@@ -249,6 +249,18 @@ func sortedKeys(m map[string]interface{}) []string {
 	return keys
 }
 
+// SequenceSyncer is implemented by targets that keep sequences of their
+// own, for a live migration's cutover: logical replication doesn't carry
+// sequence values, so without this the first insert after cutover reuses
+// an id the source already handed out.
+type SequenceSyncer interface {
+	// SetSequences sets each named sequence that exists on the target to
+	// value, as its last value handed out, and returns how many it set.
+	// Names are as the source reports them (schema-qualified outside the
+	// connection's own schema); one the target doesn't have is skipped.
+	SetSequences(ctx context.Context, values map[string]int64) (int, error)
+}
+
 // LiveCheck is one item of a live migration's preflight: something the
 // source (or target) needs before changes can be streamed from it.
 type LiveCheck struct {

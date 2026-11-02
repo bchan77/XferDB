@@ -51,6 +51,10 @@ tables that did complete are still validated.`,
 		validationSample, _ := cmd.Flags().GetInt("validation-sample")
 		skipValidation, _ := cmd.Flags().GetBool("skip-validation")
 		liveMode, _ := cmd.Flags().GetBool("live")
+		untilStreaming, _ := cmd.Flags().GetBool("until-streaming")
+		if untilStreaming && !liveMode {
+			return fmt.Errorf("--until-streaming needs --live")
+		}
 
 		if recreateSchema && truncate {
 			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
@@ -191,6 +195,9 @@ tables that did complete are still validated.`,
 			if err := pollStats(migrationID); err != nil {
 				return err
 			}
+			if untilStreaming {
+				return waitStreaming(migrationID)
+			}
 			return followLive(migrationID)
 		}
 
@@ -230,6 +237,7 @@ func init() {
 	migrateCmd.Flags().String("validation-level", validate.DefaultLevel, "Validation check to run: L1 (row counts), L2 (compare every row) or L3 (L2, then list the differing rows of a failing table) (overrides the project setting)")
 	migrateCmd.Flags().Int("validation-sample", 0, "Percentage of a failing table the L3 row diff checks; 0 checks every row (overrides the project setting)")
 	migrateCmd.Flags().Bool("skip-validation", false, "Do not validate this migration (same as --validation off)")
+	migrateCmd.Flags().Bool("until-streaming", false, "With --live, return once the migration is streaming instead of following its lag (for scripts, before 'xferdb cutover')")
 	migrateCmd.Flags().Bool("live", false, "Live migration (PostgreSQL sources): copy the tables, then keep streaming the source's changes to the target until cutover")
 }
 
@@ -753,9 +761,22 @@ type liveMigration struct {
 		Apply      *struct {
 			ChangesApplied int64 `json:"changes_applied"`
 		} `json:"apply"`
-		CaptureError string `json:"capture_error"`
-		ApplyError   string `json:"apply_error"`
+		CaptureError string       `json:"capture_error"`
+		ApplyError   string       `json:"apply_error"`
+		Cutover      *cutoverView `json:"cutover"`
 	} `json:"live"`
+}
+
+// cutoverView is a live migration's cutover progress.
+type cutoverView struct {
+	Running bool `json:"running"`
+	Steps   []struct {
+		Name   string `json:"name"`
+		Label  string `json:"label"`
+		State  string `json:"state"`
+		Detail string `json:"detail"`
+	} `json:"steps"`
+	Error string `json:"error"`
 }
 
 func getMigration(id string) (*liveMigration, error) {
