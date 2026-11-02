@@ -25,6 +25,18 @@ All notable changes to XferDB are documented here.
   cutover, which comes with phase 3 (until then a live migration streams until cancelled).
   Starting one runs the live readiness check first and refuses `data_only`, `truncate` and
   `schema_only`; cancelling or deleting it drops the slot and publication.
+- **Live migration cutover (#102, phase 3).** A streaming live migration is ended with *Cut over*
+  in the web UI, `xferdb cutover`, or `POST /migrations/:id/cutover`. Stop writing to the source
+  first; the cutover then applies every change up to the source's position, checks for a few
+  seconds that no more changes to the migrated tables arrive, sets the target's sequences to the
+  source's values (PostgreSQL targets), adds the foreign keys, checks and triggers held back so
+  far, drops the replication slot and publication, and completes the migration, which is then
+  validated by the project's settings. If changes keep arriving, the cutover stops and the
+  migration keeps streaming: cut over again once writes have stopped, or with `ignore_writes`
+  (`--ignore-writes`, *Cut over anyway*) to drain once more and leave later writes behind. A
+  cutover interrupted by a server restart starts over. `xferdb migrate --live --until-streaming`
+  returns once a migration is streaming, for scripts. Until this release a live migration
+  streamed until cancelled.
 
 ### Fixed
 - **Column defaults across databases.** A source column's default went into the target's
