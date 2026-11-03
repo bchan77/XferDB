@@ -84,6 +84,9 @@ type Status struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
+// queueDiskFree is diskFree, replaced in tests.
+var queueDiskFree = diskFree
+
 // CaptureDownWarning is how long capture may be stopped before Status
 // warns that the source is keeping its log for the stream.
 const CaptureDownWarning = time.Minute
@@ -627,6 +630,11 @@ func (r *run) warnings(st Status) []string {
 		}
 	} else {
 		r.captureDown = time.Time{}
+	}
+	// The queue grows on the server's disk while apply is behind or paused
+	// (a schema change waiting to be accepted): capture never stops for it.
+	if free, size, ok := queueDiskFree(worker.QueueDir(r.dir)); ok && (free < size/10 || free < 1<<30) {
+		out = append(out, fmt.Sprintf("The server's disk holding this migration's change queue (%s now) has only %s free: once it fills, capture stops and the source keeps its WAL instead.", fmtBytes(st.QueueBytes), fmtBytes(free)))
 	}
 	if ret == nil {
 		return out

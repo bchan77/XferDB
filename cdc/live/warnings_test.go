@@ -10,6 +10,9 @@ import (
 
 func TestWarnings(t *testing.T) {
 	gib := int64(1 << 30)
+	free := 100 * gib
+	queueDiskFree = func(string) (int64, int64, bool) { return free, 500 * gib, true }
+	defer func() { queueDiskFree = diskFree }()
 	safe := func(n int64) *int64 { return &n }
 	running := &cdc.CaptureStatus{}
 	for _, c := range []struct {
@@ -37,6 +40,13 @@ func TestWarnings(t *testing.T) {
 			}
 		})
 	}
+	// The disk the queue is on filling up.
+	free = gib / 2
+	if got := strings.Join((&run{}).warnings(Status{Capture: running, QueueBytes: 3 * gib}), " "); !strings.Contains(got, "(3.0 GiB now) has only 512.0 MiB free") {
+		t.Fatalf("low disk: %q", got)
+	}
+	free = 100 * gib
+
 	// Capture seen running again clears its clock.
 	r := &run{captureDown: time.Now().Add(-time.Hour)}
 	r.warnings(Status{Capture: running})
