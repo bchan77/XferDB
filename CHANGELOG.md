@@ -39,6 +39,11 @@ All notable changes to XferDB are documented here.
   streamed until cancelled.
 
 ### Fixed
+- **Re-running a PostgreSQL→PostgreSQL migration into an existing schema.** Without *Recreate
+  schema*, a second run failed after copying its rows with `multiple primary keys for table ...
+  are not allowed`: the post-data step (keys, indexes, constraints, triggers) stopped at the
+  first object the target already had, while the pre-data step already skipped existing ones.
+  Existing objects are now skipped in both.
 - **Column defaults across databases.** A source column's default went into the target's
   `CREATE TABLE` exactly as the source wrote it, so the migration failed before copying a row
   whenever the target spoke another SQL dialect: PostgreSQL `now()`, `'x'::text` or
