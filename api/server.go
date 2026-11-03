@@ -57,6 +57,10 @@ func (s *Server) EnableLive(dir string, launcher live.Launcher) {
 			if st.Apply != nil {
 				ls.ChangesApplied = st.Apply.ChangesApplied
 			}
+			if st.Retention != nil {
+				ls.RetainedBytes = &st.Retention.RetainedBytes
+			}
+			ls.SchemaChange = st.SchemaChange != nil
 			out[id] = ls
 		}
 		return out

@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,7 +72,18 @@ func startStream(t *testing.T, cfg adapters.ConnectionConfig, stream string, tab
 	return src, start, out, stop
 }
 
+// next returns the next row change, skipping the stream's descriptions of
+// tables (OpSchema), which nextChange returns too.
 func next(t *testing.T, out chan cdc.Change) cdc.Change {
+	t.Helper()
+	for {
+		if c := nextChange(t, out); c.Op != cdc.OpSchema {
+			return c
+		}
+	}
+}
+
+func nextChange(t *testing.T, out chan cdc.Change) cdc.Change {
 	t.Helper()
 	select {
 	case c := <-out:
@@ -80,6 +92,80 @@ func next(t *testing.T, out chan cdc.Change) cdc.Change {
 		t.Fatal("no change within 15s")
 	}
 	return cdc.Change{}
+}
+
+// TestStreamDescribesTables: the stream describes a table's columns exactly
+// as Columns does (else every new session would look like a schema change),
+// generated columns left out, and again after a column is added or retyped.
+// Retention reports the slot, and a slot that is gone as lost.
+func TestStreamDescribesTables(t *testing.T) {
+	cfg, db := cdcSource(t)
+	stream := fmt.Sprintf("ddl%d", time.Now().UnixNano())
+	table := "xferdb_cdc_ddl_" + stream
+	mustExec(t, db, `DROP DOMAIN IF EXISTS xferdb_cdc_code CASCADE; CREATE DOMAIN xferdb_cdc_code AS varchar(8)`)
+	mustExec(t, db, `CREATE TABLE `+table+` (id int PRIMARY KEY, vc varchar(40), num numeric(10,2),
+		code xferdb_cdc_code, tags text[], at timestamptz(3), twice int GENERATED ALWAYS AS (id * 2) STORED)`)
+	defer mustExec(t, db, `DROP TABLE IF EXISTS `+table)
+
+	src, _, out, stopStream := startStream(t, cfg, stream, []string{table}, nil)
+	defer src.Teardown(context.Background()) //nolint:errcheck
+	var once sync.Once
+	stop := func() { once.Do(stopStream) }
+	defer stop()
+	ctx := context.Background()
+	columns := func() []cdc.Column {
+		t.Helper()
+		m, err := src.Columns(ctx, []string{table})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m[table]
+	}
+	described := func() cdc.Change {
+		t.Helper()
+		c := nextChange(t, out)
+		if c.Op != cdc.OpSchema || c.Table != table || c.Pos != nil {
+			t.Fatalf("want the table described first, got %v %s", c.Op, c.Table)
+		}
+		if row := next(t, out); row.Op != cdc.OpInsert {
+			t.Fatalf("then the insert, got %v", row.Op)
+		}
+		return c
+	}
+
+	before := columns()
+	want := []cdc.Column{{Name: "id", Type: "integer"}, {Name: "vc", Type: "character varying(40)"}, {Name: "num", Type: "numeric(10,2)"},
+		{Name: "code", Type: "xferdb_cdc_code"}, {Name: "tags", Type: "text[]"}, {Name: "at", Type: "timestamp(3) with time zone"}}
+	if !reflect.DeepEqual(before, want) {
+		t.Fatalf("Columns = %v, want %v", before, want)
+	}
+	mustExec(t, db, `INSERT INTO `+table+` (id) VALUES (1)`)
+	if c := described(); !cdc.SameColumns(c.Columns, before) {
+		t.Fatalf("stream described %v, Columns %v", c.Columns, before)
+	}
+
+	mustExec(t, db, `ALTER TABLE `+table+` ADD COLUMN note text, ALTER COLUMN vc TYPE varchar(80)`)
+	mustExec(t, db, `INSERT INTO `+table+` (id) VALUES (2)`)
+	c := described()
+	if !cdc.SameColumns(c.Columns, columns()) {
+		t.Fatalf("after DDL the stream described %v, Columns %v", c.Columns, columns())
+	}
+	got := cdc.DescribeColumns(before, c.Columns)
+	if !reflect.DeepEqual(got, []string{"column vc changed type: character varying(40) → character varying(80)", "column note added (text)"}) {
+		t.Fatalf("described the change as %q", got)
+	}
+
+	ret, err := src.Retention(ctx)
+	if err != nil || ret.Lost || ret.RetainedBytes < 0 {
+		t.Fatalf("Retention = %+v, %v", ret, err)
+	}
+	stop()
+	if err := src.Teardown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ret, err := src.Retention(ctx); err != nil || !ret.Lost || ret.State != "missing" {
+		t.Fatalf("Retention of a dropped slot = %+v, %v", ret, err)
+	}
 }
 
 // TestDecodeMatchesSnapshot is the rule a live migration rests on: for every

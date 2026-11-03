@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -295,6 +296,15 @@ func (m *Manager) drain(ctx context.Context, r *run, src cdc.ChangeSource) (uint
 		}
 		if reached && st.Apply != nil && st.Apply.AppliedSeq >= seq {
 			return seq, pos, nil
+		}
+		// Apply won't pass a schema change before it is accepted.
+		sc := st.SchemaChange
+		if sc == nil && st.Apply != nil {
+			sc = st.Apply.Blocked
+		}
+		if sc != nil {
+			return 0, nil, fmt.Errorf("a schema change on the source stopped the stream at %s (%s): apply it to the target, resume the migration, then cut over again",
+				sc.Table, strings.Join(sc.Summary, "; "))
 		}
 		detail := fmt.Sprintf("capturing up to %s", src.FormatPosition(pos))
 		if reached {

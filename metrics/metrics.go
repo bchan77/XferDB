@@ -44,6 +44,10 @@ type LiveStream struct {
 	ChangesQueued  int64
 	ChangesApplied int64
 	QueueBytes     int64
+	// RetainedBytes is the log the source keeps for the stream (nil when
+	// unknown), and SchemaChange whether it is paused at a schema change.
+	RetainedBytes *int64
+	SchemaChange  bool
 }
 
 // SetLive makes the live migrations' streams, read by streams at scrape
@@ -208,6 +212,10 @@ var (
 		"Changes a live migration's apply worker has applied since it started.", []string{"migration"}, nil)
 	descQueueBytes = prometheus.NewDesc("xferdb_cdc_queue_bytes",
 		"Size of a live migration's change queue on the server's disk.", []string{"migration"}, nil)
+	descRetained = prometheus.NewDesc("xferdb_cdc_source_retained_bytes",
+		"Log the source keeps for a live migration's stream (PostgreSQL: WAL held by its replication slot).", []string{"migration"}, nil)
+	descSchemaChange = prometheus.NewDesc("xferdb_cdc_schema_change_paused",
+		"1 while a live migration is paused at a schema change on the source.", []string{"migration"}, nil)
 )
 
 // gaugeCollector reads the active migrations' snapshots at scrape time.
@@ -215,7 +223,8 @@ type gaugeCollector struct{ m *Metrics }
 
 func (g gaugeCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descActive, descPhase, descProgress, descRowsExpected, descRowsDone, descRate, descETA, descTables,
-		descLivePhase, descLagBytes, descLagChanges, descLagSeconds, descQueued, descApplied, descQueueBytes} {
+		descLivePhase, descLagBytes, descLagChanges, descLagSeconds, descQueued, descApplied, descQueueBytes,
+		descRetained, descSchemaChange} {
 		ch <- d
 	}
 }
@@ -245,6 +254,14 @@ func (g gaugeCollector) Collect(ch chan<- prometheus.Metric) {
 			gauge(descQueued, prometheus.CounterValue, float64(st.ChangesQueued))
 			gauge(descApplied, prometheus.CounterValue, float64(st.ChangesApplied))
 			gauge(descQueueBytes, prometheus.GaugeValue, float64(st.QueueBytes))
+			if st.RetainedBytes != nil {
+				gauge(descRetained, prometheus.GaugeValue, float64(*st.RetainedBytes))
+			}
+			paused := 0.0
+			if st.SchemaChange {
+				paused = 1
+			}
+			gauge(descSchemaChange, prometheus.GaugeValue, paused)
 		}
 	}
 

@@ -17,29 +17,33 @@ import (
 // queue and on the target, not here: the server is this database's only
 // writer.
 type CDCStream struct {
-	MigrationID string    `db:"migration_id" json:"migration_id"`
-	SlotName    string    `db:"slot_name" json:"slot_name"`
-	Publication string    `db:"publication" json:"publication,omitempty"`
-	StartPos    string    `db:"start_pos" json:"start_pos"`
-	CatchupPos  string    `db:"catchup_pos" json:"catchup_pos,omitempty"`
-	CutoverPos  string    `db:"cutover_pos" json:"cutover_pos,omitempty"`
-	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+	MigrationID string `db:"migration_id" json:"migration_id"`
+	SlotName    string `db:"slot_name" json:"slot_name"`
+	Publication string `db:"publication" json:"publication,omitempty"`
+	StartPos    string `db:"start_pos" json:"start_pos"`
+	CatchupPos  string `db:"catchup_pos" json:"catchup_pos,omitempty"`
+	CutoverPos  string `db:"cutover_pos" json:"cutover_pos,omitempty"`
+	// SchemaChange is the schema change on the source the stream is paused
+	// at (cdc.SchemaChange as JSON), until it is accepted.
+	SchemaChange string    `db:"schema_change" json:"schema_change,omitempty"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // SaveCDCStream inserts or replaces a migration's stream record.
 func (m *MetaDB) SaveCDCStream(ctx context.Context, s *CDCStream) error {
 	s.UpdatedAt = time.Now()
 	_, err := m.db.ExecContext(ctx, `
-		INSERT INTO cdc_streams (migration_id, slot_name, publication, start_pos, catchup_pos, cutover_pos, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO cdc_streams (migration_id, slot_name, publication, start_pos, catchup_pos, cutover_pos, schema_change, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (migration_id) DO UPDATE SET
 		    slot_name   = excluded.slot_name,
 		    publication = excluded.publication,
 		    start_pos   = excluded.start_pos,
 		    catchup_pos = excluded.catchup_pos,
 		    cutover_pos = excluded.cutover_pos,
+		    schema_change = excluded.schema_change,
 		    updated_at  = excluded.updated_at`,
-		s.MigrationID, s.SlotName, s.Publication, s.StartPos, s.CatchupPos, s.CutoverPos, s.UpdatedAt)
+		s.MigrationID, s.SlotName, s.Publication, s.StartPos, s.CatchupPos, s.CutoverPos, s.SchemaChange, s.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("save cdc stream: %w", err)
 	}

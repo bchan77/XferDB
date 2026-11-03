@@ -9,18 +9,26 @@
 //	snapshot   the stream exists and capture runs; the engine copies rows
 //	catch_up   apply replays what was written during the copy
 //	streaming  the target follows the source; unique indexes exist
+//	cutover    the stream is drained and ended (cutover.go)
+//	completed  the target has every change; the stream is gone
 //
-// Cutover, which ends a live migration, comes in a later phase of #102.
+// A schema change (DDL) on the source pauses the migration where apply
+// reaches it, with the change in Status.SchemaChange: whoever runs the
+// migration applies it to the target and resumes, which accepts it. The
+// WAL the source keeps for the stream is watched too (Status.Retention):
+// a slot the source has invalidated fails the migration.
 package live
 
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,10 +71,22 @@ type Status struct {
 	// QueueBytes is the size of the queue on the server's disk.
 	QueueBytes int64 `json:"queue_bytes"`
 	Paused     bool  `json:"paused,omitempty"`
+	// SchemaChange is the schema change on the source the migration is
+	// paused at, until resuming accepts it.
+	SchemaChange *cdc.SchemaChange `json:"schema_change,omitempty"`
+	// Retention is the log the source keeps for the stream, and Warnings
+	// what about it (or a stopped worker) needs attention before it ends
+	// the migration.
+	Retention *cdc.Retention `json:"retention,omitempty"`
+	Warnings  []string       `json:"warnings,omitempty"`
 	// Cutover is the latest cutover's progress, or why it stopped.
 	Cutover   *CutoverStatus `json:"cutover,omitempty"`
 	UpdatedAt time.Time      `json:"updated_at"`
 }
+
+// CaptureDownWarning is how long capture may be stopped before Status
+// warns that the source is keeping its log for the stream.
+const CaptureDownWarning = time.Minute
 
 // Manager runs the server's live migrations.
 type Manager struct {
@@ -111,6 +131,8 @@ type run struct {
 	// cutover is the latest cutover's progress; cutoverCancel stops it.
 	cutover       *CutoverStatus
 	cutoverCancel context.CancelFunc
+	// captureDown is when capture was first seen not running, if it isn't.
+	captureDown time.Time
 }
 
 type backoff struct {
@@ -168,6 +190,14 @@ func (m *Manager) Setup(ctx context.Context, id string, project *adapters.Projec
 		}
 	}
 	dir := m.WorkerDir(id)
+	// The columns a schema change is told from are those when the stream
+	// began: an interrupted snapshot run again keeps them.
+	var schema map[string][]cdc.Column
+	if old, err := worker.ReadSpec(dir); err == nil && old.Schema != nil {
+		schema = old.Schema
+	} else if schema, err = src.Columns(ctx, names); err != nil {
+		return err
+	}
 	if err := worker.WriteSpec(dir, &worker.Spec{
 		MigrationID: id,
 		Source:      project.SourceConfig,
@@ -175,6 +205,7 @@ func (m *Manager) Setup(ctx context.Context, id string, project *adapters.Projec
 		Tables:      names,
 		StartPos:    start,
 		Apply:       cdc.ApplyOptions{Workers: project.TransferConfig.TableWorkers},
+		Schema:      schema,
 	}); err != nil {
 		return err
 	}
@@ -294,10 +325,31 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 	return m.Launcher.Stop(ctx, r.dir, worker.RoleApply)
 }
 
-// Resume restarts apply after Pause.
+// Resume restarts apply after Pause. Paused at a schema change, it accepts
+// the change: apply goes past it, writing what follows to the target as it
+// is now, so the change should be on the target first.
 func (m *Manager) Resume(ctx context.Context, id string) error {
-	if m.get(id) == nil {
+	r := m.get(id)
+	if r == nil {
 		return fmt.Errorf("live migration %s isn't running", id)
+	}
+	stream, err := m.DB.GetCDCStream(ctx, id)
+	if err != nil {
+		return err
+	}
+	if stream != nil && stream.SchemaChange != "" {
+		var sc cdc.SchemaChange
+		if err := json.Unmarshal([]byte(stream.SchemaChange), &sc); err != nil {
+			return fmt.Errorf("schema change of %s: %w", id, err)
+		}
+		if err := worker.AcceptSchemaChange(r.dir, sc.Seq); err != nil {
+			return err
+		}
+		stream.SchemaChange = ""
+		if err := m.DB.SaveCDCStream(ctx, stream); err != nil {
+			return err
+		}
+		m.log().Info("live.schema_change_accepted", "migration_id", id, "table", sc.Table, "seq", sc.Seq)
 	}
 	// Supervision starts apply on its next check.
 	return m.DB.SetMigrationStatus(ctx, id, adapters.StatusInProgress)
@@ -488,6 +540,43 @@ func (m *Manager) check(ctx context.Context, r *run, src cdc.ChangeSource, log *
 			}
 		}
 	}
+	// Apply stopped at a schema change: pause there, keeping the change
+	// (apply itself is stopped once paused) until Resume accepts it.
+	if st.Apply != nil && st.Apply.Blocked != nil && stream != nil && stream.SchemaChange == "" {
+		b, err := json.Marshal(st.Apply.Blocked)
+		if err != nil {
+			return err
+		}
+		stream.SchemaChange = string(b)
+		if err := m.DB.SaveCDCStream(ctx, stream); err != nil {
+			return err
+		}
+		if err := m.DB.SetMigrationStatus(ctx, r.id, adapters.StatusPaused); err != nil {
+			return err
+		}
+		st.Paused = true
+		log.Warn("live.schema_change", "table", st.Apply.Blocked.Table, "seq", st.Apply.Blocked.Seq,
+			"change", strings.Join(st.Apply.Blocked.Summary, "; "))
+	}
+	if stream != nil && stream.SchemaChange != "" {
+		var sc cdc.SchemaChange
+		if err := json.Unmarshal([]byte(stream.SchemaChange), &sc); err == nil {
+			st.SchemaChange = &sc
+		}
+	}
+
+	if src != nil {
+		ret, err := src.Retention(ctx)
+		if err != nil {
+			log.Warn("live.retention", "error", err)
+		} else if ret.Lost {
+			return m.failLost(ctx, r, ret, stream, log)
+		} else {
+			st.Retention = &ret
+		}
+	}
+	st.Warnings = r.warnings(st)
+
 	r.mu.Lock()
 	if st.Apply != nil {
 		r.lastApply = st.Apply
@@ -518,6 +607,78 @@ func (m *Manager) check(ctx context.Context, r *run, src cdc.ChangeSource, log *
 		return m.catchUp(ctx, r, src, stream, st, log)
 	}
 	return nil
+}
+
+// warnings says what needs attention before it ends the migration: capture
+// stopped for a while (the source keeps its log meanwhile) and the source
+// running out of room for the log the stream needs.
+func (r *run) warnings(st Status) []string {
+	var out []string
+	ret := st.Retention
+	if st.Capture == nil {
+		if r.captureDown.IsZero() {
+			r.captureDown = time.Now()
+		} else if down := time.Since(r.captureDown); down >= CaptureDownWarning {
+			w := fmt.Sprintf("Capture has been stopped for %s: the source keeps every change for this migration until it runs again", down.Round(time.Second))
+			if ret != nil {
+				w += fmt.Sprintf(" (%s of WAL so far)", fmtBytes(ret.RetainedBytes))
+			}
+			out = append(out, w+".")
+		}
+	} else {
+		r.captureDown = time.Time{}
+	}
+	if ret == nil {
+		return out
+	}
+	switch {
+	case ret.State == "unreserved":
+		out = append(out, fmt.Sprintf("The source keeps more WAL for this migration (%s) than max_slot_wal_keep_size allows: PostgreSQL may remove WAL it still needs at its next checkpoint, which ends the migration.", fmtBytes(ret.RetainedBytes)))
+	case ret.SafeBytes != nil && *ret.SafeBytes < (ret.RetainedBytes+*ret.SafeBytes)/4:
+		out = append(out, fmt.Sprintf("Only %s more WAL can be written before the source may drop what this migration still needs (max_slot_wal_keep_size).", fmtBytes(*ret.SafeBytes)))
+	}
+	return out
+}
+
+// failLost fails a migration whose source has dropped log the stream still
+// needed: the changes in it are gone, so the stream can't go on and the
+// migration must start over. The stream is torn down as for any failure.
+func (m *Manager) failLost(ctx context.Context, r *run, ret cdc.Retention, stream *state.CDCStream, log *slog.Logger) error {
+	slot := r.id
+	if stream != nil {
+		slot = stream.SlotName
+	}
+	msg := fmt.Sprintf("the source removed WAL this live migration still needed (replication slot %s: wal_status = lost, past max_slot_wal_keep_size): changes made since are gone. Start the migration again", slot)
+	if ret.State == "missing" {
+		msg = fmt.Sprintf("the replication slot %s is gone from the source (dropped outside XferDB, or the source failed over to a server without it): changes can't be streamed any more. Start the migration again", slot)
+	}
+	log.Error("live.stream_lost", "state", ret.State)
+	r.mu.Lock()
+	if r.cutoverCancel != nil {
+		r.cutoverCancel()
+	}
+	r.mu.Unlock()
+	if err := m.DB.SetMigrationError(ctx, r.id, errors.New(msg)); err != nil {
+		return err
+	}
+	if err := m.teardown(ctx, r.id, r.project); err != nil {
+		log.Warn("live.teardown", "error", err)
+	}
+	return errEnded
+}
+
+// fmtBytes renders a byte count with a binary unit, e.g. 1.5 GiB.
+func fmtBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // catchUp ends catch-up once every change up to the catch-up position is
