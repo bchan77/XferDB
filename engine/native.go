@@ -75,10 +75,13 @@ func pgDumpSchemaArgs(src, tgt adapters.ConnectionConfig) (args []string, ok boo
 // Each object emits an EventPostSchemaItem before execution so the CLI shows
 // what is running instead of appearing to hang.
 //
-// keep, when set, runs only the statements it returns true for, and an
-// object that already exists is then skipped rather than failed: a live
-// migration runs post-data in stages (stageOfBlock), each of which may run
-// again after a restart.
+// keep, when set, runs only the statements it returns true for: a live
+// migration runs post-data in stages (stageOfBlock).
+//
+// An object that already exists is skipped rather than failed, as psql
+// skips one in pre-data: a migration that doesn't recreate the schema runs
+// into a target that kept its keys and indexes from an earlier run, and a
+// live stage may run again after a restart.
 func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.ConnectionConfig, keep func(ddlBlock) bool) (bool, error) {
 	if !hasPgTools() {
 		return false, nil
@@ -127,6 +130,9 @@ func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.Connectio
 			Timestamp:     time.Now(),
 		})
 		if _, err := db.ExecContext(ctx, stmt.SQL); err != nil {
+			if alreadyExists(err) {
+				continue
+			}
 			// Surface the first real DDL error but keep going so the rest of
 			// the schema is attempted (mirrors ON_ERROR_STOP=off behaviour).
 			if execErr == nil {
