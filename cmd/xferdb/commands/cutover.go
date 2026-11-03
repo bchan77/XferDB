@@ -147,9 +147,11 @@ func followCutover(migrationID string) error {
 
 // waitStreaming follows a live migration until it is streaming.
 func waitStreaming(id string) error {
+	seen := map[string]bool{}
 	for {
 		m, err := getMigration(id)
 		if err == nil {
+			printLiveNotices(m, seen)
 			switch {
 			case m.Status == "failed" || m.Status == "cancelled":
 				return fmt.Errorf("live migration %s: %s", m.Status, m.Error)

@@ -37,6 +37,16 @@ All notable changes to XferDB are documented here.
   cutover interrupted by a server restart starts over. `xferdb migrate --live --until-streaming`
   returns once a migration is streaming, for scripts. Until this release a live migration
   streamed until cancelled.
+- **Live migration: schema changes and WAL safety (#102, phase 4).** A table's columns changing
+  on the source (a column added, dropped or retyped, or the table renamed) pauses the live
+  migration where the stream reaches the change: every change before it is applied, none after
+  it, and the migration page (`live.schema_change` in the API) lists what changed. XferDB doesn't
+  apply DDL; make the same change on the target, then *Resume* (or `xferdb resume`, new), which
+  accepts it. Cutover is refused meanwhile. The migration page also shows the WAL the source
+  keeps for the replication slot, with a warning when capture has been stopped for over a minute
+  or the slot nears or passes `max_slot_wal_keep_size`; a slot PostgreSQL has invalidated, or
+  that was dropped, fails the migration with the reason instead of retrying forever. New
+  metrics `xferdb_cdc_source_retained_bytes` and `xferdb_cdc_schema_change_paused`.
 
 ### Fixed
 - **Re-running a PostgreSQL→PostgreSQL migration into an existing schema.** Without *Recreate
