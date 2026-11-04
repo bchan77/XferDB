@@ -51,6 +51,7 @@ automated yet.
 - **Data validation** — after a migration, compare source and target: row counts (L1), every row's content (L2, the default), or L2 plus a primary-key diff listing the differing rows (L3); for every source, MongoDB included. See [Validation](#validation)
 - **All PostgreSQL schemas** — a PostgreSQL source migrates every non-system schema by default; the optional *Schema* setting narrows it to one
 - **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration; a missing target database can be created from the web UI
+- **Live migration (beta)** — from a PostgreSQL source, copy the tables and then keep streaming the source's changes to the target until you cut over, so applications keep running during the copy. See [Live migration (beta)](#live-migration-beta)
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
 - **Live progress display** — per-table status, rows/s, read/write rates, ETA, and live resource usage (goroutines, heap, CPU%)
 - **Detailed table status** — shows "counting rows...", "waiting for schema", "waiting for indexes" so you always know what's happening
@@ -344,6 +345,14 @@ xferdb migrate --status
 # View recorded stats history after migration completes
 xferdb migrate --history
 
+# Live migration (beta, PostgreSQL sources): copy, then stream changes until cutover.
+# Guide: docs/LIVE_MIGRATION.md
+xferdb migrate --preflight --live         # check the source and target can do it
+xferdb migrate --live
+xferdb migrate --live --until-streaming   # return once it streams, for scripts
+xferdb cutover                            # stop writes to the source first
+xferdb resume                             # after a pause, e.g. at a schema change
+
 # Cancel the running migration (keeps history, preserves checkpoints)
 xferdb migrate --cancel
 
@@ -434,6 +443,25 @@ xferdb list
 | Accurate counts | `xferdb migrate --accurate-counts` | Use exact MongoDB `CountDocuments` instead of `EstimatedDocumentCount`. Slower but gives accurate row totals and ETA. |
 | Schema only | API: `schema_only: true` | Creates tables, indexes, constraints — no data transfer. |
 | Data only | API: `data_only: true` | Skips schema creation — target schema must already exist. |
+
+---
+
+## Live migration (beta)
+
+> **Beta.** Live migration works end to end and is tested on every change, but it hasn't yet run against real production workloads. Try it on a copy of your data before relying on it.
+
+**Step-by-step guide: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md)**: requirements and how to set them, the UI, CLI and API for each step, schema changes, cutover, WAL, and troubleshooting.
+
+A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical`; the target can be PostgreSQL, MySQL or SQLite. Every migrated table needs a primary key.
+
+1. **Readiness.** *Settings → Check live migration readiness*, `xferdb migrate --preflight --live`, or `POST /projects/:id/preflight` with `{"mode":"live"}`; checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication.
+2. **Start.** Tick *Live migration* on the migration form, or run `xferdb migrate --live`. XferDB creates a replication slot and publication, copies the tables, catches up on what was written meanwhile, then streams. The capture and apply workers run as their own processes and survive a server restart.
+3. **Stream.** The migration page shows the lag and the WAL the source keeps for the slot. *Pause* stops applying changes; they are still captured.
+4. **Cut over.** Stop every application writing to the source, then *Cut over* (`xferdb cutover`). The remaining changes are applied, sequences set (PostgreSQL targets), and foreign keys, checks and triggers added; then the slot is dropped and the migration validated. If writes are still arriving, the cutover stops and streaming goes on.
+
+**Schema changes.** XferDB doesn't apply DDL. When a table's columns change on the source, the migration pauses at that point and shows what changed. Make the same change on the target, then *Resume* (`xferdb resume`).
+
+**WAL.** The source keeps WAL for the slot until XferDB has captured it. The migration page warns when capture has stopped, the slot nears `max_slot_wal_keep_size`, or the server's queue disk runs low; a slot the source has invalidated fails the migration. Cancelling or deleting a live migration drops the slot.
 
 ---
 
@@ -620,6 +648,7 @@ POST   /api/v1/projects/:id/migrations      # body: {"table_workers":5,"segment_
 GET    /api/v1/projects/:id/migrations
 GET    /api/v1/migrations/:id
 PATCH  /api/v1/migrations/:id               # body: {"action":"pause"|"resume"|"cancel"}
+POST   /api/v1/migrations/:id/cutover       # live migrations (beta); body: {"ignore_writes":false}
 DELETE /api/v1/migrations/:id               # cancel + delete record
 GET    /api/v1/migrations/:id/stats
 GET    /api/v1/migrations/:id/stats/history # recorded snapshots (every 5s during migration)

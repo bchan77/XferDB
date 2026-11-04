@@ -20,7 +20,7 @@ var resumeCmd = &cobra.Command{
 	Short: "Resume the project's paused migration",
 	Long: `Resume the project's latest migration if it is paused.
 
-A live migration pauses by itself when a table's columns change on the
+A live migration (beta) pauses by itself when a table's columns change on the
 source (a column added, dropped or retyped): every change before it is
 applied, none after it. Make the same change on the target, then resume:
 the changes after it are applied to the target as it now is. The command
