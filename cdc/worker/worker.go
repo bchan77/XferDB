@@ -11,6 +11,8 @@
 //	<role>.addr        the status endpoint: "127.0.0.1:port token"
 //	<role>.error       why the last run stopped, if it failed
 //	<role>.lock        held while a worker of that role runs
+//	schema.json        each table's columns as capture last knew them
+//	schema.accepted    the seq up to which schema changes are accepted (the server's)
 //
 // Workers never write the server's metadb. The status endpoint is plain
 // HTTP on loopback with a random token rather than a Unix socket, whose path
@@ -29,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,10 +59,28 @@ type Spec struct {
 	// SegmentBytes is the queue's segment size; 0 means the default.
 	SegmentBytes int64            `json:"segment_bytes,omitempty"`
 	Apply        cdc.ApplyOptions `json:"apply"`
+	// Schema is each table's columns when the stream began, which a schema
+	// change on the source is told from.
+	Schema map[string][]cdc.Column `json:"schema,omitempty"`
 }
 
 // QueueDir is the queue inside a worker directory.
 func QueueDir(dir string) string { return filepath.Join(dir, "queue") }
+
+// AcceptSchemaChange lets apply go past the schema changes up to seq.
+func AcceptSchemaChange(dir string, seq uint64) error {
+	return writeFileAtomic(filepath.Join(dir, "schema.accepted"), []byte(strconv.FormatUint(seq, 10)+"\n"))
+}
+
+// schemaAccepted reads what AcceptSchemaChange wrote; 0 when nothing.
+func schemaAccepted(dir string) uint64 {
+	b, err := os.ReadFile(filepath.Join(dir, "schema.accepted"))
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return n
+}
 
 // WriteSpec saves spec in dir, readable only by its owner.
 func WriteSpec(dir string, spec *Spec) error {
@@ -139,7 +160,8 @@ func runCapture(ctx context.Context, dir string, spec *Spec, st Status) error {
 		return err
 	}
 	defer q.Close()
-	c := &cdc.Capturer{Source: src, Queue: q, Start: spec.StartPos}
+	c := &cdc.Capturer{Source: src, Queue: q, Start: spec.StartPos,
+		Schema: spec.Schema, SchemaFile: filepath.Join(dir, "schema.json")}
 	stop, err := serveStatus(dir, RoleCapture, func() Status {
 		s := c.Status()
 		st.Capture = &s
@@ -170,7 +192,8 @@ func runApply(ctx context.Context, dir string, spec *Spec, st Status) error {
 	}
 	opts := spec.Apply
 	opts.RemoveApplied = true
-	a := &cdc.Applier{Stream: spec.MigrationID, Dir: QueueDir(dir), Target: ap, Opts: opts}
+	a := &cdc.Applier{Stream: spec.MigrationID, Dir: QueueDir(dir), Target: ap, Opts: opts,
+		SchemaAccepted: func() uint64 { return schemaAccepted(dir) }}
 	refetch, closeSrc, err := sourceRefetch(ctx, spec.Source)
 	if err != nil {
 		return err

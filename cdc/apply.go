@@ -50,6 +50,62 @@ type ApplyStatus struct {
 	ChangesApplied int64     `json:"changes_applied"`
 	Batches        int64     `json:"batches"`
 	LastBatchAt    time.Time `json:"last_batch_at,omitempty"`
+	// Blocked is the schema change apply has stopped at, waiting for it to
+	// be accepted: every change before it is applied, none after it.
+	Blocked *SchemaChange `json:"blocked,omitempty"`
+}
+
+// SchemaChange is a schema change (DDL) on the source that apply stopped at.
+type SchemaChange struct {
+	Seq        uint64    `json:"seq"`
+	Table      string    `json:"table"`
+	Columns    []Column  `json:"columns"`
+	OldColumns []Column  `json:"old_columns,omitempty"`
+	CommitAt   time.Time `json:"commit_at,omitempty"`
+	// Summary says what changed, one line per difference.
+	Summary []string `json:"summary"`
+}
+
+// NewSchemaChange describes an OpSchema change.
+func NewSchemaChange(c *Change) *SchemaChange {
+	return &SchemaChange{
+		Seq: c.Seq, Table: c.Table, Columns: c.Columns, OldColumns: c.OldColumns,
+		CommitAt: c.CommitAt, Summary: DescribeColumns(c.OldColumns, c.Columns),
+	}
+}
+
+// DescribeColumns lists how a table's columns went from old to new. A
+// renamed column reads as one dropped and one added; nil old is a table
+// the stream didn't know by its name, which is how a renamed table looks.
+func DescribeColumns(old, new []Column) []string {
+	if old == nil {
+		return []string{"a table this migration doesn't know by that name: was a table renamed?"}
+	}
+	was := map[string]string{}
+	for _, c := range old {
+		was[c.Name] = c.Type
+	}
+	is := map[string]bool{}
+	var out []string
+	for _, c := range new {
+		is[c.Name] = true
+		t, ok := was[c.Name]
+		switch {
+		case !ok:
+			out = append(out, fmt.Sprintf("column %s added (%s)", c.Name, c.Type))
+		case t != c.Type:
+			out = append(out, fmt.Sprintf("column %s changed type: %s → %s", c.Name, t, c.Type))
+		}
+	}
+	for _, c := range old {
+		if !is[c.Name] {
+			out = append(out, fmt.Sprintf("column %s dropped", c.Name))
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, "columns reordered")
+	}
+	return out
 }
 
 // Applier replays a queue into a target.
@@ -63,6 +119,14 @@ type Applier struct {
 	// column, when the target has the row under neither key (see
 	// moveRow); without it such a change fails the apply.
 	Refetch func(ctx context.Context, table string, key map[string]interface{}) (row map[string]interface{}, found bool, err error)
+	// SchemaAccepted returns the seq up to which schema changes have been
+	// accepted, to be applied past. Apply stops at any later one until it
+	// is; without SchemaAccepted it stops at every one.
+	SchemaAccepted func() uint64
+
+	// held is a change read ahead of a batch: a schema change, which goes
+	// in a batch of its own.
+	held *Change
 
 	mu     sync.Mutex
 	status ApplyStatus
@@ -103,25 +167,71 @@ func (a *Applier) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if batch[0].Op == OpSchema {
+			if err := a.awaitSchema(ctx, &batch[0]); err != nil {
+				return err
+			}
+		}
 		if err := a.applyBatch(ctx, batch, applied); err != nil {
 			return err
 		}
 	}
 }
 
+// awaitSchema waits until the schema change c is accepted, reporting it as
+// Blocked meanwhile.
+func (a *Applier) awaitSchema(ctx context.Context, c *Change) error {
+	accepted := func() bool { return a.SchemaAccepted != nil && a.SchemaAccepted() >= c.Seq }
+	if accepted() {
+		return nil
+	}
+	a.mu.Lock()
+	a.status.Blocked = NewSchemaChange(c)
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.status.Blocked = nil
+		a.mu.Unlock()
+	}()
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for !accepted() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+	return nil
+}
+
 // readBatch waits for a first change, then takes what else arrives within
-// MaxWait, up to MaxBatch.
+// MaxWait, up to MaxBatch. A schema change is a batch on its own: the
+// changes before it are applied first, and those after it only once it is
+// accepted.
 func (a *Applier) readBatch(ctx context.Context, r *Reader) ([]Change, error) {
-	first, err := r.Next(ctx)
-	if err != nil {
-		return nil, err
+	var first Change
+	if a.held != nil {
+		first, a.held = *a.held, nil
+	} else {
+		var err error
+		if first, err = r.Next(ctx); err != nil {
+			return nil, err
+		}
 	}
 	batch := []Change{first}
+	if first.Op == OpSchema {
+		return batch, nil
+	}
 	deadline := time.Now().Add(a.Opts.MaxWait)
 	for len(batch) < a.Opts.MaxBatch {
 		c, ok, err := r.TryNext()
 		if err != nil {
 			return nil, err
+		}
+		if ok && c.Op == OpSchema {
+			a.held = &c
+			break
 		}
 		if ok {
 			batch = append(batch, c)
@@ -145,6 +255,9 @@ func (a *Applier) applyBatch(ctx context.Context, batch []Change, applied map[st
 	byTable := map[string][]Change{}
 	var tables []string
 	for _, c := range batch {
+		if c.Op == OpSchema {
+			continue // accepted: nothing to write but the high-water mark
+		}
 		if c.Seq <= applied[c.Table] {
 			continue // committed before a restart
 		}

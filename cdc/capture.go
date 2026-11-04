@@ -2,7 +2,10 @@ package cdc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -30,9 +33,54 @@ type Capturer struct {
 	// SyncEvery bounds how long a finished transaction may wait to be
 	// fsynced (and acked) while more changes keep arriving; 0 means 200ms.
 	SyncEvery time.Duration
+	// Schema is each table's columns when the stream began
+	// (ChangeSource.Columns), and SchemaFile where the columns known since
+	// are kept. A table's columns changing queues one OpSchema change;
+	// learning the same columns again (a new session) queues nothing.
+	// Without Schema, the first columns seen for a table are taken as they
+	// are.
+	Schema     map[string][]Column
+	SchemaFile string
 
 	mu     sync.Mutex
 	status CaptureStatus
+}
+
+// loadSchema returns the columns known when the capturer last stopped, or
+// Schema when it has saved none.
+func (c *Capturer) loadSchema() (map[string][]Column, error) {
+	known := map[string][]Column{}
+	if c.SchemaFile != "" {
+		b, err := os.ReadFile(c.SchemaFile)
+		if err == nil {
+			if err := json.Unmarshal(b, &known); err != nil {
+				return nil, fmt.Errorf("%s: %w", c.SchemaFile, err)
+			}
+			return known, nil
+		}
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	for t, cols := range c.Schema {
+		known[t] = cols
+	}
+	return known, nil
+}
+
+func (c *Capturer) saveSchema(known map[string][]Column) error {
+	if c.SchemaFile == "" {
+		return nil
+	}
+	b, err := json.Marshal(known)
+	if err != nil {
+		return err
+	}
+	tmp := c.SchemaFile + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, c.SchemaFile)
 }
 
 // Status returns a snapshot of the loop's progress.
@@ -55,6 +103,11 @@ func (c *Capturer) Run(ctx context.Context) error {
 	if c.SyncEvery <= 0 {
 		c.SyncEvery = 200 * time.Millisecond
 	}
+	known, err := c.loadSchema()
+	if err != nil {
+		return err
+	}
+	schemaDirty := false
 	seq, from := c.Queue.Last()
 	if from == nil {
 		from = c.Start
@@ -85,6 +138,16 @@ func (c *Capturer) Run(ctx context.Context) error {
 		seq, err := c.Queue.Sync()
 		if err != nil {
 			return err
+		}
+		// The columns a queued schema change moved to are known from now
+		// on, also after a restart: the source won't resend that change
+		// once acked. Saved after the queue, so a crash in between at worst
+		// queues the change twice, never loses it.
+		if schemaDirty {
+			if err := c.saveSchema(known); err != nil {
+				return err
+			}
+			schemaDirty = false
 		}
 		// Only now, with the changes on disk, may the source free them.
 		c.mu.Lock()
@@ -124,10 +187,31 @@ func (c *Capturer) Run(ctx context.Context) error {
 				return err
 			}
 		case ch := <-out:
-			if err := c.Queue.Append(&ch); err != nil {
-				return err
+			keep := true
+			if ch.Op == OpSchema {
+				old, ok := known[ch.Table]
+				switch {
+				case ok && SameColumns(old, ch.Columns):
+					keep = false // known: a new session describing it again
+				case !ok && len(known) == 0:
+					keep = false // no baseline: take it as it is
+					known[ch.Table], schemaDirty = ch.Columns, true
+				default:
+					ch.OldColumns = old // nil: a name the stream didn't know
+					known[ch.Table], schemaDirty = ch.Columns, true
+				}
 			}
-			appended++
+			if !keep && ch.Pos != nil {
+				// The queue marks a transaction's end by its Pos: dropped,
+				// the transaction would read as unfinished.
+				return fmt.Errorf("%s: a schema change ends its transaction", ch.Table)
+			}
+			if keep {
+				if err := c.Queue.Append(&ch); err != nil {
+					return err
+				}
+				appended++
+			}
 			if ch.Pos != nil {
 				unsynced, at = ch.Pos, ch.CommitAt
 				// Sync at a transaction's end when the stream has gone

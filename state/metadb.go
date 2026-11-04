@@ -206,6 +206,10 @@ func (m *MetaDB) migrate() error {
 			return err
 		}
 	}
+	// The schema change a live stream is paused at (#102 phase 4), as JSON.
+	if err := m.addColumnIfMissing("cdc_streams", "schema_change TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// L3 row-diff totals (#103 phase 2) on a validation_tables created before them.
 	for _, col := range []string{
 		"diff_missing INTEGER NOT NULL DEFAULT 0",

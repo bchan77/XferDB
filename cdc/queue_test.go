@@ -57,6 +57,26 @@ func TestCodecRoundTrip(t *testing.T) {
 		t.Fatalf("nil/empty maps: %#v", got)
 	}
 
+	// A schema change keeps both column lists; a renamed table has no old one.
+	for _, c := range []Change{
+		{Seq: 9, Table: "orders", Op: OpSchema,
+			Columns:    []Column{{"id", "integer"}, {"note", "character varying(40)"}},
+			OldColumns: []Column{{"id", "integer"}}},
+		{Seq: 10, Table: "orders2", Op: OpSchema, Columns: []Column{}},
+	} {
+		b, err := encodeChange(nil, &c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := decodeChange(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, c) {
+			t.Fatalf("schema change round trip:\n got %#v\nwant %#v", got, c)
+		}
+	}
+
 	if _, err := encodeChange(nil, &Change{After: map[string]interface{}{"x": 3}}); err == nil {
 		t.Fatal("int (not int64) should be refused")
 	}

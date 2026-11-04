@@ -1906,8 +1906,13 @@ function liveStatusHTML(mig) {
   const l = mig.live;
   const phase = mig.phase || 'setup';
   let body = livePhaseStrip(phase);
-  if (mig.status === 'paused' && ['catch_up', 'streaming'].includes(phase)) {
+  if (l && l.schema_change) {
+    body += schemaChangeHTML(l.schema_change);
+  } else if (mig.status === 'paused' && ['catch_up', 'streaming', 'cutover'].includes(phase)) {
     body += `<div class="banner info"><span>Paused: changes are still captured from the source and queued here; the target catches up when you resume.</span></div>`;
+  }
+  for (const w of (l && l.warnings) || []) {
+    body += `<div class="banner warn" data-warning><span>${esc(w)}</span></div>`;
   }
   if (!l) {
     if (['setup', 'snapshot'].includes(phase)) {
@@ -1924,16 +1929,28 @@ function liveStatusHTML(mig) {
       <div class="stat-box" data-stat="lag-bytes"><div class="label">Behind source</div><div class="value">${esc(fmtBytes(l.lag_bytes))}</div></div>
       <div class="stat-box" data-stat="applied"><div class="label">Applied</div><div class="value">${applied}</div></div>
       <div class="stat-box" data-stat="queue"><div class="label">Queue on disk</div><div class="value">${esc(fmtBytes(l.queue_bytes))}</div></div>
+      ${l.retention ? `<div class="stat-box" data-stat="retained" title="WAL the source keeps for this migration's replication slot"><div class="label">WAL held on source</div><div class="value">${esc(fmtBytes(l.retention.retained_bytes))}</div></div>` : ''}
     </div>`;
   if (phase === 'catch_up') {
     body += `<div class="hint">Catching up: replaying what was written during the copy, up to ${esc(l.catch_up_pos || 'the position recorded when it ended')}. Unique indexes are added once it is done.</div>`;
-  } else if (phase === 'streaming' && !(l.cutover && l.cutover.running)) {
+  } else if (phase === 'streaming' && mig.status !== 'paused' && !(l.cutover && l.cutover.running)) {
     body += `<div class="hint">The target follows the source. To switch over, stop every application writing to the source, then cut over: the rest of the changes are applied, sequences set, foreign keys and checks added, and the replication slot dropped.</div>`;
   }
   if (l.cutover) body += cutoverHTML(l.cutover);
   if (l.capture_error) body += errorBanner('Capture worker: ' + l.capture_error + ' (restarting)');
   if (l.apply_error) body += errorBanner('Apply worker: ' + l.apply_error + ' (restarting)');
   return body;
+}
+
+// schemaChangeHTML explains a pause at a schema change on the source.
+function schemaChangeHTML(sc) {
+  const when = sc.commit_at ? ` at ${esc(new Date(sc.commit_at).toLocaleString())}` : '';
+  return `<div class="schema-change" data-table="${esc(sc.table)}">
+    <strong>Paused at a schema change on the source</strong>
+    <div>Table <code>${esc(sc.table)}</code> changed${when}:</div>
+    <ul>${(sc.summary || []).map((line) => `<li>${esc(line)}</li>`).join('')}</ul>
+    <div class="hint">Every change before it is applied; none after it, for any table, until you resume. Make the same change on the target first, then resume: the changes after it are written to the target as it is then. Cut over is not possible meanwhile.</div>
+  </div>`;
 }
 
 // cutoverHTML shows a cutover's steps, and why it stopped if it did.
@@ -1963,6 +1980,27 @@ function mountLiveActions(actionsEl, area, migId, mig, onDone) {
   // A running cutover can be cancelled but not paused.
   const state = mig.status === 'paused' ? 'paused' : cutting ? 'cutting_over' : 'in_progress';
   mountMigActions(actionsEl, migId, state, { onDone, errorArea: area, live: true });
+  // Resuming past a schema change accepts it: ask first.
+  const sc = mig.live && mig.live.schema_change;
+  const resume = actionsEl.querySelector('#resumeBtn');
+  if (sc && resume) {
+    const fresh = resume.cloneNode(true);
+    resume.replaceWith(fresh);
+    fresh.addEventListener('click', async () => {
+      const ok = await confirmModal({
+        title: 'Resume past the schema change?',
+        body: `Make sure ${sc.table} on the target has the same change (${(sc.summary || []).join('; ')}). Changes after it are then applied to the target as it is.`,
+        confirmLabel: 'Resume',
+      });
+      if (!ok) return;
+      try {
+        await api.patchMigration(migId, 'resume');
+        onDone();
+      } catch (err) {
+        area.insertAdjacentHTML('afterbegin', errorBanner('resume failed: ' + err.message));
+      }
+    });
+  }
   const doCutover = async (ignoreWrites) => {
     try {
       await api.cutover(migId, ignoreWrites);

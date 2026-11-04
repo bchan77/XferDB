@@ -54,6 +54,9 @@ type relation struct {
 	name    string
 	columns []*pglogrepl.RelationMessageColumn
 	key     []string
+	// described is the columns with their type names, as Columns reports
+	// them, for telling a schema change.
+	described []cdc.Column
 }
 
 // SlotName returns the replication slot and publication name used for a
@@ -317,8 +320,16 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 				}
 				switch m := lm.(type) {
 				case *pglogrepl.RelationMessage:
-					if err := s.addRelation(ctx, m); err != nil {
+					rel, err := s.addRelation(ctx, m)
+					if err != nil {
 						return err
+					}
+					// Sent before a change to the table, in its transaction:
+					// the capturer tells whether the columns changed.
+					if inTxn {
+						if err := emit(cdc.Change{Table: rel.name, Op: cdc.OpSchema, Columns: rel.described}); err != nil {
+							return err
+						}
 					}
 				case *pglogrepl.BeginMessage:
 					inTxn, commitAt, pending = true, m.CommitTime.UTC(), nil
@@ -530,28 +541,123 @@ func decodeLSN(p cdc.Position) (pglogrepl.LSN, error) {
 // addRelation caches a table's columns as pgoutput describes them. It is
 // sent before the first change to a table and again after its schema
 // changes.
-func (s *ChangeSource) addRelation(ctx context.Context, m *pglogrepl.RelationMessage) error {
+func (s *ChangeSource) addRelation(ctx context.Context, m *pglogrepl.RelationMessage) (*relation, error) {
 	name := m.RelationName
 	if m.Namespace != s.ownSchema {
 		name = m.Namespace + "." + m.RelationName
 	}
 	key, err := s.primaryKey(ctx, m.RelationID)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	described, err := s.describe(ctx, m.Columns)
+	if err != nil {
+		return nil, err
 	}
 	for _, c := range m.Columns {
 		if _, known := s.baseTypes[c.DataType]; !known && c.DataType >= 16384 {
 			// A type created after Stream started, maybe a new domain.
 			if err := s.loadBaseTypes(ctx); err != nil {
-				return err
+				return nil, err
 			}
 			break
 		}
 	}
+	rel := &relation{name: name, columns: m.Columns, key: key, described: described}
 	s.mu.Lock()
-	s.rels[m.RelationID] = &relation{name: name, columns: m.Columns, key: key}
+	s.rels[m.RelationID] = rel
 	s.mu.Unlock()
-	return nil
+	return rel, nil
+}
+
+// describe names a Relation message's column types as Columns does.
+func (s *ChangeSource) describe(ctx context.Context, cols []*pglogrepl.RelationMessageColumn) ([]cdc.Column, error) {
+	oids := make([]int64, len(cols))
+	mods := make([]int64, len(cols))
+	for i, c := range cols {
+		oids[i], mods[i] = int64(c.DataType), int64(c.TypeModifier)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT format_type(t, m) FROM unnest($1::oid[], $2::int[]) WITH ORDINALITY AS u(t, m, n) ORDER BY n`,
+		pq.Array(oids), pq.Array(mods))
+	if err != nil {
+		return nil, fmt.Errorf("name column types: %w", err)
+	}
+	defer rows.Close()
+	out := make([]cdc.Column, 0, len(cols))
+	for i := 0; rows.Next(); i++ {
+		var typ string
+		if err := rows.Scan(&typ); err != nil {
+			return nil, err
+		}
+		out = append(out, cdc.Column{Name: cols[i].Name, Type: typ})
+	}
+	return out, rows.Err()
+}
+
+// Columns implements cdc.ChangeSource: the columns pgoutput describes, in
+// order, which leaves out generated columns.
+func (s *ChangeSource) Columns(ctx context.Context, tables []string) (map[string][]cdc.Column, error) {
+	out := make(map[string][]cdc.Column, len(tables))
+	for _, t := range tables {
+		schema, table := splitName(t)
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+			FROM pg_attribute a
+			WHERE a.attrelid = format('%I.%I', `+schemaExpr(2)+`, $1::text)::regclass
+			  AND a.attnum > 0 AND NOT a.attisdropped
+			  AND COALESCE(to_jsonb(a) ->> 'attgenerated', '') = ''
+			ORDER BY a.attnum`, table, schema)
+		if err != nil {
+			return nil, fmt.Errorf("read columns of %s: %w", t, err)
+		}
+		cols := []cdc.Column{}
+		for rows.Next() {
+			var c cdc.Column
+			if err := rows.Scan(&c.Name, &c.Type); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			cols = append(cols, c)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		out[t] = cols
+	}
+	return out, nil
+}
+
+// Retention implements cdc.ChangeSource: the WAL the slot holds back, and on
+// PostgreSQL 13 and later its wal_status and safe_wal_size. A slot that is
+// gone (dropped by hand) counts as lost.
+func (s *ChangeSource) Retention(ctx context.Context) (cdc.Retention, error) {
+	var r cdc.Retention
+	var version int
+	if err := s.db.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::int`).Scan(&version); err != nil {
+		return r, fmt.Errorf("read server version: %w", err)
+	}
+	status := `'' AS wal_status, NULL::bigint AS safe_wal_size`
+	if version >= 130000 {
+		status = `COALESCE(wal_status, ''), safe_wal_size`
+	}
+	var safe sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0)::bigint, `+status+`
+		FROM pg_replication_slots WHERE slot_name = $1`, s.slot).Scan(&r.RetainedBytes, &r.State, &safe)
+	if err == sql.ErrNoRows {
+		r.State, r.Lost = "missing", true
+		return r, nil
+	}
+	if err != nil {
+		return r, fmt.Errorf("read replication slot %s: %w", s.slot, err)
+	}
+	if safe.Valid {
+		r.SafeBytes = &safe.Int64
+	}
+	r.Lost = r.State == "lost"
+	return r, nil
 }
 
 func (s *ChangeSource) relation(id uint32) (*relation, error) {

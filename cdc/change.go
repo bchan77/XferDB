@@ -17,6 +17,10 @@ const (
 	OpUpdate   Op = 'U'
 	OpDelete   Op = 'D'
 	OpTruncate Op = 'T'
+	// OpSchema marks a table whose columns changed on the source: a schema
+	// change (DDL) apply stops at until it is accepted (#102). It carries
+	// the columns before and after the change, and no row.
+	OpSchema Op = 'S'
 )
 
 func (o Op) String() string {
@@ -29,6 +33,8 @@ func (o Op) String() string {
 		return "delete"
 	case OpTruncate:
 		return "truncate"
+	case OpSchema:
+		return "schema change"
 	}
 	return "unknown"
 }
@@ -61,6 +67,48 @@ type Change struct {
 	// it is the point to resume from once everything up to it is applied.
 	Pos      Position
 	CommitAt time.Time
+	// Columns and OldColumns are an OpSchema change's columns after and
+	// before it; OldColumns is nil for a table the stream didn't know by
+	// that name (a renamed table).
+	Columns    []Column
+	OldColumns []Column
+}
+
+// Column is a table column as a source describes it, in the source's own
+// type names (PostgreSQL: format_type, as in numeric(10,2)).
+type Column struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// SameColumns reports whether a and b are the same columns in the same order.
+func SameColumns(a, b []Column) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Retention is how much of its log a source keeps for a stream that hasn't
+// been confirmed yet (PostgreSQL: WAL held by the replication slot).
+type Retention struct {
+	// RetainedBytes is the log kept for the stream.
+	RetainedBytes int64 `json:"retained_bytes"`
+	// SafeBytes is how much more log may be written before the source may
+	// drop what the stream still needs (PostgreSQL: safe_wal_size, set when
+	// max_slot_wal_keep_size limits it); nil when there is no such limit.
+	SafeBytes *int64 `json:"safe_bytes,omitempty"`
+	// State is the source's own word for it (PostgreSQL: wal_status:
+	// reserved, extended, unreserved or lost), when it has one.
+	State string `json:"state,omitempty"`
+	// Lost means the source has dropped log the stream needs: changes are
+	// gone, and the stream can't go on.
+	Lost bool `json:"lost,omitempty"`
 }
 
 // Partial reports whether the change leaves some columns as they are.
@@ -94,6 +142,15 @@ type ChangeSource interface {
 	// when the source's log goes on without any change to our tables, so an
 	// idle source still reaches a position recorded later.
 	Confirmed() Position
+	// Columns returns each table's columns as they are now, the baseline a
+	// schema change is told by. Stream sends an OpSchema change, with only
+	// Columns set, whenever it learns a table's columns (PostgreSQL: each
+	// Relation message, also sent without any change once per session);
+	// the capturer keeps those that differ from what it knew. It comes before
+	// the change it describes, so it never carries Pos.
+	Columns(ctx context.Context, tables []string) (map[string][]Column, error)
+	// Retention reports how much log the source keeps for this stream.
+	Retention(ctx context.Context) (Retention, error)
 	// Behind reports how far pos is behind target, in the source's own
 	// unit (PostgreSQL: WAL bytes); 0 when pos has reached target.
 	Behind(pos, target Position) int64

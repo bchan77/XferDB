@@ -50,7 +50,24 @@ func encodeChange(buf []byte, c *Change) ([]byte, error) {
 	for _, s := range c.Unchanged {
 		buf = appendString(buf, s)
 	}
+	if c.Op == OpSchema {
+		buf = appendColumns(buf, c.Columns)
+		buf = appendColumns(buf, c.OldColumns)
+	}
 	return buf, nil
+}
+
+// appendColumns writes a column list, told apart from nil as maps are.
+func appendColumns(buf []byte, cols []Column) []byte {
+	if cols == nil {
+		return binary.AppendUvarint(buf, 0)
+	}
+	buf = binary.AppendUvarint(buf, uint64(len(cols))+1)
+	for _, c := range cols {
+		buf = appendString(buf, c.Name)
+		buf = appendString(buf, c.Type)
+	}
+	return buf
 }
 
 // decodeChange decodes one change from b.
@@ -77,6 +94,10 @@ func decodeChange(b []byte) (Change, error) {
 		for i := range c.Unchanged {
 			c.Unchanged[i] = d.string()
 		}
+	}
+	if c.Op == OpSchema {
+		c.Columns = d.columns()
+		c.OldColumns = d.columns()
 	}
 	if d.err != nil {
 		return Change{}, d.err
@@ -214,6 +235,23 @@ func (d *decoder) bytes() []byte {
 		return nil
 	}
 	return append([]byte{}, b...)
+}
+
+func (d *decoder) columns() []Column {
+	n := d.uvarint()
+	if n == 0 || d.err != nil {
+		return nil
+	}
+	n--
+	if n > uint64(len(d.b)) {
+		d.fail()
+		return nil
+	}
+	cols := make([]Column, n)
+	for i := range cols {
+		cols[i] = Column{Name: d.string(), Type: d.string()}
+	}
+	return cols
 }
 
 func (d *decoder) mapValue() map[string]interface{} {

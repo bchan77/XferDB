@@ -322,7 +322,11 @@ func (h *MigrationsHandler) afterLiveSnapshot(id string, p *adapters.Project, ru
 	if runErr == nil {
 		if err := h.Live.SnapshotDone(ctx, id); err != nil {
 			log.Error("live.snapshot_done", "error", err)
-			h.DB.SetMigrationError(ctx, id, fmt.Errorf("start catch-up: %w", err)) //nolint:errcheck
+			// Supervision may have failed it already (the source lost the
+			// stream's WAL): keep that reason.
+			if mig, gerr := h.DB.GetMigration(ctx, id); gerr != nil || mig.Status != adapters.StatusFailed {
+				h.DB.SetMigrationError(ctx, id, fmt.Errorf("start catch-up: %w", err)) //nolint:errcheck
+			}
 		} else {
 			log.Info("live.catch_up")
 			return

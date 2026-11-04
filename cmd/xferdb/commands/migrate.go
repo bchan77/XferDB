@@ -761,10 +761,44 @@ type liveMigration struct {
 		Apply      *struct {
 			ChangesApplied int64 `json:"changes_applied"`
 		} `json:"apply"`
-		CaptureError string       `json:"capture_error"`
-		ApplyError   string       `json:"apply_error"`
-		Cutover      *cutoverView `json:"cutover"`
+		CaptureError string            `json:"capture_error"`
+		ApplyError   string            `json:"apply_error"`
+		Cutover      *cutoverView      `json:"cutover"`
+		SchemaChange *schemaChangeView `json:"schema_change"`
+		Retention    *struct {
+			RetainedBytes int64 `json:"retained_bytes"`
+		} `json:"retention"`
+		Warnings []string `json:"warnings"`
 	} `json:"live"`
+}
+
+// schemaChangeView is the schema change a live migration is paused at.
+type schemaChangeView struct {
+	Seq     uint64   `json:"seq"`
+	Table   string   `json:"table"`
+	Summary []string `json:"summary"`
+}
+
+// printLiveNotices prints, once each, a live migration's schema change and
+// warnings, on lines of their own above the status line.
+func printLiveNotices(m *liveMigration, seen map[string]bool) {
+	if m.Live == nil {
+		return
+	}
+	var notes []string
+	if sc := m.Live.SchemaChange; sc != nil {
+		notes = append(notes, fmt.Sprintf("Paused at a schema change on the source, table %s:\n    %s\n  Apply it to the target, then run 'xferdb resume'. Changes after it wait until then.",
+			sc.Table, strings.Join(sc.Summary, "\n    ")))
+	}
+	for _, w := range m.Live.Warnings {
+		notes = append(notes, "[warn] "+w)
+	}
+	for _, n := range notes {
+		if !seen[n] {
+			seen[n] = true
+			fmt.Printf("\r\033[2K  %s\n", n)
+		}
+	}
 }
 
 // cutoverView is a live migration's cutover progress.
@@ -804,6 +838,7 @@ func isLive(id string) bool {
 // every second, until it ends. Ctrl+C only stops following: the stream runs
 // on in the server.
 func followLive(id string) error {
+	seen := map[string]bool{}
 	for {
 		m, err := getMigration(id)
 		if err != nil {
@@ -822,6 +857,7 @@ func followLive(id string) error {
 			fmt.Println("\nLive migration completed.")
 			return nil
 		}
+		printLiveNotices(m, seen)
 		fmt.Printf("\r\033[2K%s", liveLine(m))
 		time.Sleep(time.Second)
 	}
@@ -841,6 +877,9 @@ func liveLine(m *liveMigration) string {
 		secs = fmt.Sprintf("%.1fs", *l.LagSeconds)
 	}
 	line += fmt.Sprintf("  Lag: %s changes, %s, %s behind the source", fmtInt(int64(l.LagChanges)), secs, fmtBytes(l.LagBytes))
+	if l.Retention != nil {
+		line += fmt.Sprintf("  WAL held: %s", fmtBytes(l.Retention.RetainedBytes))
+	}
 	if l.Apply != nil {
 		line += fmt.Sprintf("  Applied: %s", fmtInt(l.Apply.ChangesApplied))
 	}
