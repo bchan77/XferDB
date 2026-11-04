@@ -345,7 +345,9 @@ xferdb migrate --status
 # View recorded stats history after migration completes
 xferdb migrate --history
 
-# Live migration (beta, PostgreSQL sources): copy, then stream changes until cutover
+# Live migration (beta, PostgreSQL sources): copy, then stream changes until cutover.
+# Guide: docs/LIVE_MIGRATION.md
+xferdb migrate --preflight --live         # check the source and target can do it
 xferdb migrate --live
 xferdb migrate --live --until-streaming   # return once it streams, for scripts
 xferdb cutover                            # stop writes to the source first
@@ -448,9 +450,11 @@ xferdb list
 
 > **Beta.** Live migration works end to end and is tested on every change, but it hasn't yet run against real production workloads. Try it on a copy of your data before relying on it.
 
+**Step-by-step guide: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md)**: requirements and how to set them, the UI, CLI and API for each step, schema changes, cutover, WAL, and troubleshooting.
+
 A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical`; the target can be PostgreSQL, MySQL or SQLite. Every migrated table needs a primary key.
 
-1. **Readiness.** *Settings → Check live migration readiness* (or `POST /projects/:id/preflight` with `{"mode":"live"}`) checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication.
+1. **Readiness.** *Settings → Check live migration readiness*, `xferdb migrate --preflight --live`, or `POST /projects/:id/preflight` with `{"mode":"live"}`; checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication.
 2. **Start.** Tick *Live migration* on the migration form, or run `xferdb migrate --live`. XferDB creates a replication slot and publication, copies the tables, catches up on what was written meanwhile, then streams. The capture and apply workers run as their own processes and survive a server restart.
 3. **Stream.** The migration page shows the lag and the WAL the source keeps for the slot. *Pause* stops applying changes; they are still captured.
 4. **Cut over.** Stop every application writing to the source, then *Cut over* (`xferdb cutover`). The remaining changes are applied, sequences set (PostgreSQL targets), and foreign keys, checks and triggers added; then the slot is dropped and the migration validated. If writes are still arriving, the cutover stops and streaming goes on.

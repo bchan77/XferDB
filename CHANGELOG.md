@@ -5,6 +5,7 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 Live migration (#102) ships as a **beta**: labelled so in the web UI, the CLI and the README until it has run against real workloads.
+How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `xferdb migrate --preflight --live` runs the live readiness checks from the CLI.
 
 ### Added
 - **Live migration readiness check (#102, phase 1; beta).** The project settings page has a *Live

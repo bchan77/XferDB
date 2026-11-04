@@ -231,7 +231,7 @@ var projectPreflightCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return runPreflight(name, projectID)
+		return runPreflight(name, projectID, false)
 	},
 }
 

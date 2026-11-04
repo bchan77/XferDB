@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -144,7 +145,7 @@ tables that did complete are still validated.`,
 		}
 
 		if preflightOnly {
-			return runPreflight(projectName, projectID)
+			return runPreflight(projectName, projectID, liveMode)
 		}
 
 		if statusOnly {
@@ -222,7 +223,7 @@ tables that did complete are still validated.`,
 
 func init() {
 	migrateCmd.Flags().StringP("project", "p", "", "Project name (overrides current context)")
-	migrateCmd.Flags().Bool("preflight", false, "Check connectivity and permissions without migrating")
+	migrateCmd.Flags().Bool("preflight", false, "Check connectivity and permissions without migrating (with --live, also what a live migration needs)")
 	migrateCmd.Flags().Bool("status", false, "Re-attach to the latest migration and show live progress")
 	migrateCmd.Flags().Bool("cancel", false, "Cancel the currently running migration")
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
@@ -244,9 +245,14 @@ func init() {
 	migrateCmd.Flags().Bool("live", false, "Live migration, beta (PostgreSQL sources): copy the tables, then keep streaming the source's changes to the target until cutover")
 }
 
-// runPreflight calls the preflight API and prints a human-readable result.
-func runPreflight(name, projectID string) error {
-	resp, err := http.Post(ServerAddr+"/api/v1/projects/"+projectID+"/preflight", "application/json", nil)
+// runPreflight calls the preflight API and prints a human-readable result;
+// with live, also the checks a live migration needs.
+func runPreflight(name, projectID string, live bool) error {
+	var body io.Reader
+	if live {
+		body = strings.NewReader(`{"mode":"live"}`)
+	}
+	resp, err := http.Post(ServerAddr+"/api/v1/projects/"+projectID+"/preflight", "application/json", body)
 	if err != nil {
 		return fmt.Errorf("API request failed: %w", err)
 	}
@@ -278,6 +284,16 @@ func runPreflight(name, projectID string) error {
 		SourceInfo *dbInfo `json:"source_info"`
 		TargetInfo *dbInfo `json:"target_info"`
 		Error      string  `json:"error"`
+		Live       *struct {
+			Ready  bool `json:"ready"`
+			Checks []struct {
+				Name    string `json:"name"`
+				OK      bool   `json:"ok"`
+				Detail  string `json:"detail"`
+				Fix     string `json:"fix"`
+				Warning bool   `json:"warning"`
+			} `json:"checks"`
+		} `json:"live"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
@@ -344,6 +360,35 @@ func runPreflight(name, projectID string) error {
 		}
 	}
 
+	if live && result.Live != nil {
+		state := "ready"
+		if !result.Live.Ready {
+			state = "not ready"
+		}
+		fmt.Printf("\nLive migration (beta): %s\n", state)
+		for _, c := range result.Live.Checks {
+			mark := "✓"
+			switch {
+			case c.Warning:
+				mark = "!"
+			case !c.OK:
+				mark = "✗"
+			}
+			line := fmt.Sprintf("  %s %s", mark, c.Name)
+			if c.Detail != "" {
+				line += " (" + c.Detail + ")"
+			}
+			fmt.Println(line)
+			if (!c.OK || c.Warning) && c.Fix != "" {
+				fmt.Printf("      fix: %s\n", c.Fix)
+			}
+		}
+	}
+
+	// A live check failing fails the whole preflight too: name it first.
+	if live && (result.Live == nil || !result.Live.Ready) {
+		return fmt.Errorf("not ready for a live migration — fix the checks marked ✗ above")
+	}
 	if result.Status != "ready" {
 		return fmt.Errorf("preflight check failed — fix the errors above before migrating")
 	}
