@@ -21,8 +21,9 @@ import (
 // migration completed, which is then validated.
 var cutoverCmd = &cobra.Command{
 	Use:   "cutover",
-	Short: "Cut a live migration over to the target",
-	Long: `Cut the project's live migration over to the target.
+	Short: "Cut a live migration over to the target (beta)",
+	Long: `Cut the project's live migration over to the target. Live migration is in
+beta.
 
 Stop every application writing to the source first: the cutover drains the
 changes made so far, then checks for a few seconds that no more arrive. If

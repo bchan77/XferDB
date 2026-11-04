@@ -4,13 +4,15 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+Live migration (#102) ships as a **beta**: labelled so in the web UI, the CLI and the README until it has run against real workloads.
+
 ### Added
-- **Live migration readiness check (#102, phase 1).** The project settings page has a *Live
+- **Live migration readiness check (#102, phase 1; beta).** The project settings page has a *Live
   Migration* section, and `POST /projects/:id/preflight` takes `{"mode": "live"}`, checking
   whether a PostgreSQL source can stream changes (wal_level, replication privilege, free slot
   and WAL sender, primary keys, publication permissions, WAL retention) and whether the target
   can apply them.
-- **Live migration, streaming (#102, phase 2).** A PostgreSQL source can now be migrated live:
+- **Live migration, streaming (#102, phase 2; beta).** A PostgreSQL source can now be migrated live:
   `POST /projects/:id/migrations` with `{"mode": "live"}`, `xferdb migrate --live`, or the run
   form's *Live migration* checkbox. XferDB creates a replication slot and publication, copies
   the tables while capturing every change made meanwhile, replays those changes (catch-up), and
@@ -25,7 +27,7 @@ All notable changes to XferDB are documented here.
   cutover, which comes with phase 3 (until then a live migration streams until cancelled).
   Starting one runs the live readiness check first and refuses `data_only`, `truncate` and
   `schema_only`; cancelling or deleting it drops the slot and publication.
-- **Live migration cutover (#102, phase 3).** A streaming live migration is ended with *Cut over*
+- **Live migration cutover (#102, phase 3; beta).** A streaming live migration is ended with *Cut over*
   in the web UI, `xferdb cutover`, or `POST /migrations/:id/cutover`. Stop writing to the source
   first; the cutover then applies every change up to the source's position, checks for a few
   seconds that no more changes to the migrated tables arrive, sets the target's sequences to the
@@ -37,7 +39,7 @@ All notable changes to XferDB are documented here.
   cutover interrupted by a server restart starts over. `xferdb migrate --live --until-streaming`
   returns once a migration is streaming, for scripts. Until this release a live migration
   streamed until cancelled.
-- **Live migration: schema changes and WAL safety (#102, phase 4).** A table's columns changing
+- **Live migration: schema changes and WAL safety (#102, phase 4; beta).** A table's columns changing
   on the source (a column added, dropped or retyped, or the table renamed) pauses the live
   migration where the stream reaches the change: every change before it is applied, none after
   it, and the migration page (`live.schema_change` in the API) lists what changed. XferDB doesn't

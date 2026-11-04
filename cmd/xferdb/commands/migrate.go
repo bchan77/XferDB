@@ -190,6 +190,9 @@ tables that did complete are still validated.`,
 			return err
 		}
 		fmt.Printf("Migration started: %s\n", migrationID)
+		if liveMode {
+			fmt.Println(liveBetaNote)
+		}
 		fmt.Println("Tracking progress (Ctrl+C to detach)...")
 		if liveMode {
 			if err := pollStats(migrationID); err != nil {
@@ -238,7 +241,7 @@ func init() {
 	migrateCmd.Flags().Int("validation-sample", 0, "Percentage of a failing table the L3 row diff checks; 0 checks every row (overrides the project setting)")
 	migrateCmd.Flags().Bool("skip-validation", false, "Do not validate this migration (same as --validation off)")
 	migrateCmd.Flags().Bool("until-streaming", false, "With --live, return once the migration is streaming instead of following its lag (for scripts, before 'xferdb cutover')")
-	migrateCmd.Flags().Bool("live", false, "Live migration (PostgreSQL sources): copy the tables, then keep streaming the source's changes to the target until cutover")
+	migrateCmd.Flags().Bool("live", false, "Live migration, beta (PostgreSQL sources): copy the tables, then keep streaming the source's changes to the target until cutover")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result.
@@ -746,6 +749,10 @@ func maxRate(records []struct {
 	return max
 }
 
+
+// liveBetaNote is printed when a live migration starts: the feature is in
+// beta until it has run against real workloads.
+const liveBetaNote = "Live migration is in beta: try it on a copy of your data before relying on it in production."
 
 // liveMigration is the part of GET /migrations/:id a live migration adds.
 type liveMigration struct {

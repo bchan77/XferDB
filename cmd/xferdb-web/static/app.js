@@ -648,8 +648,8 @@ async function renderProjectSettings(id) {
       <div id="preflightArea"></div>
     </div>
     <div class="section">
-      <h2>Live Migration</h2>
-      <p>A live migration copies the data and then keeps streaming the source's changes to the target until you cut over, so the application keeps running during the copy. This checks whether this project's source and target can support one; starting a live migration comes in a later release.</p>
+      <h2>Live Migration ${betaBadge()}</h2>
+      <p>A live migration copies the data and then keeps streaming the source's changes to the target until you cut over, so the application keeps running during the copy. This checks whether this project's source and target can support one; start it from the project's migration form. Live migration is in beta: try it on a copy of your data before relying on it in production.</p>
       <button class="btn" id="liveCheckBtn">Check live migration readiness</button>
       <div id="liveCheckArea"></div>
     </div>
@@ -1889,6 +1889,12 @@ function fmtBytes(n) {
   return `${v.toFixed(1)} ${units[i]}`;
 }
 
+// betaBadge marks live migration, which is in beta, wherever it is offered
+// or shown.
+function betaBadge() {
+  return '<span class="badge beta" title="Live migration is in beta: try it on a copy of your data before relying on it in production.">Beta</span>';
+}
+
 // livePhaseStrip shows where a live migration is: the phases it passed,
 // the current one, and those still to come.
 function livePhaseStrip(phase) {
@@ -2081,7 +2087,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
   function mountLiveCard(migId) {
     container.innerHTML = `
       <div class="page-header">
-        <h2>Live migration</h2>
+        <h2>Live migration ${betaBadge()}</h2>
         <div class="actions-row" id="migActions"></div>
       </div>
       <div id="migCardBody"></div>
@@ -2276,7 +2282,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
         ${sourceType === 'postgres' ? `
-        <div class="checkbox-row" id="m-live-row"><input type="checkbox" id="m-live"><label for="m-live">Live migration</label><span class="hint" style="margin-left:8px;">Copy the tables, then keep streaming the source's changes to the target. Run the live readiness check in Settings first.</span></div>` : ''}
+        <div class="checkbox-row" id="m-live-row"><input type="checkbox" id="m-live"><label for="m-live" style="white-space:nowrap;">Live migration ${betaBadge()}</label><span class="hint" style="margin-left:8px;">Copy the tables, then keep streaming the source's changes to the target. Run the live readiness check in Settings first. In beta: try it on a copy of your data first.</span></div>` : ''}
         <div class="field-row">
           <div><label>Table workers</label><input type="number" id="m-workers" value="${esc(tc.table_workers > 0 ? tc.table_workers : 1)}"><div class="hint">Parallel tables to migrate</div></div>
           <div><label>Batch size</label><input type="number" id="m-batch" value="${esc(tc.batch_size > 0 ? tc.batch_size : 1000)}"><div class="hint">Rows per INSERT batch</div></div>
@@ -2445,7 +2451,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
       histEl.innerHTML = migs.map((m) => `
         <div class="list-row" data-id="${esc(m.id)}">
           <div>
-            <div class="name mono">${esc(m.id.slice(0, 8))}${m.mode === 'live' ? ' <span class="badge info">live</span>' : ''}</div>
+            <div class="name mono">${esc(m.id.slice(0, 8))}${m.mode === 'live' ? ' <span class="badge info">live</span> ' + betaBadge() : ''}</div>
             <div class="meta">created ${esc(fmtDate(m.created_at))}${m.error ? ' · ' + esc(m.error) : ''}</div>
           </div>
           <span class="badge ${esc(m.status)}">${esc(m.status)}</span>
@@ -2645,7 +2651,7 @@ async function renderMigrationProgress(migId) {
   let liveMig = mig;
   function renderLive() {
     const el = document.getElementById('liveArea');
-    if (el) el.innerHTML = `<strong>Live migration</strong>${liveStatusHTML(liveMig)}`;
+    if (el) el.innerHTML = `<strong>Live migration</strong> ${betaBadge()}${liveStatusHTML(liveMig)}`;
     const actionsEl = document.getElementById('migActions');
     if (!actionsEl || ['setup', 'snapshot'].includes(liveMig.phase)) return;
     if (!ACTIVE_STATUSES.includes(liveMig.status)) {

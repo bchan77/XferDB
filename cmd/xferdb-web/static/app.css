@@ -228,13 +228,14 @@ table.live-checks td { padding: 7px 0; }
 .phase-strip li.done { color: var(--ok); border-color: var(--ok); }
 .phase-strip li.current { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 600; }
 .badge.info { background: #eff6ff; color: var(--accent); }
+.badge.beta { background: #efedff; color: #5b47c7; text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
 .cutover { margin-top: 12px; }
 .cutover-steps { list-style: none; padding: 0; margin: 8px 0; }
 .cutover-steps li { padding: 4px 0; }
 .cutover-steps li.pending { color: var(--muted); }
 .cutover-steps li.failed { color: var(--danger); }
 .cutover-steps li.done .status-icon { color: var(--ok); }
-@media (prefers-color-scheme: dark) { .badge.info { background: #17233a; } }
+@media (prefers-color-scheme: dark) { .badge.info { background: #17233a; } .badge.beta { background: #2a2350; color: #b9adff; } }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 640px) { .split { grid-template-columns: 1fr; } }
