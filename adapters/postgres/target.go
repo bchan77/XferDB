@@ -490,7 +490,7 @@ func (t *Target) GetInfo(ctx context.Context) (*adapters.DatabaseInfo, error) {
 	if t.config.Host != "" {
 		port := t.config.Port
 		if port == 0 {
-			port = 5432
+			port = DefaultPort(t.config.Type)
 		}
 		info.Host = fmt.Sprintf("%s:%d", t.config.Host, port)
 	} else {

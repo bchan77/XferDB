@@ -9,7 +9,7 @@
 | Database | Source | Target | Tested Versions |
 |----------|--------|--------|-----------------|
 | PostgreSQL | ✅ | ✅ | 14, 15, 16, 17 |
-| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified as source and target) |
+| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified as source and target; type `yugabyte`, or `postgres`) |
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
@@ -452,7 +452,7 @@ xferdb list
 
 **Step-by-step guide: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md)**: requirements and how to set them, the UI, CLI and API for each step, schema changes, cutover, WAL, and troubleshooting.
 
-A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical`; the target can be PostgreSQL, MySQL or SQLite. Every migrated table needs a primary key.
+A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical` (YugabyteDB sources aren't supported yet: the readiness check shows what one needs); the target can be PostgreSQL, MySQL or SQLite. Every migrated table needs a primary key.
 
 1. **Readiness.** *Settings → Check live migration readiness*, `xferdb migrate --preflight --live`, or `POST /projects/:id/preflight` with `{"mode":"live"}`; checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication.
 2. **Start.** Tick *Live migration* on the migration form, or run `xferdb migrate --live`. XferDB creates a replication slot and publication, copies the tables, catches up on what was written meanwhile, then streams. The capture and apply workers run as their own processes and survive a server restart.
@@ -508,9 +508,11 @@ introspection, which can't recreate custom enum types.
 ## DSN formats
 
 ```bash
-# PostgreSQL / YugabyteDB
+# PostgreSQL
 postgres://user:pass@host:5432/dbname?sslmode=require
-postgres://user:pass@host:5433/dbname?sslmode=require   # YugabyteDB default port
+
+# YugabyteDB (YSQL): type yugabyte, default port 5433
+yugabyte://user:pass@host:5433/dbname?sslmode=require
 
 # MySQL
 mysql://user:pass@host:3306/dbname

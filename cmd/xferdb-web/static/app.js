@@ -36,8 +36,18 @@ function findActiveMigration(migs) {
 // Connection config editor (shared by create + edit forms)
 // ---------------------------------------------------------------------------
 
+// isPgFamily: the types that speak PostgreSQL's SQL (YugabyteDB's YSQL runs
+// the postgres adapter), so they take the same connection fields.
+function isPgFamily(type) {
+  return type === 'postgres' || type === 'yugabyte';
+}
+
+function defaultPort(type) {
+  return { mysql: '3306', yugabyte: '5433' }[type] || '5432';
+}
+
 function connTypeOptions(isTarget, selected) {
-  const types = isTarget ? ['postgres', 'mysql', 'sqlite'] : ['postgres', 'mysql', 'sqlite', 'mongodb'];
+  const types = isTarget ? ['postgres', 'yugabyte', 'mysql', 'sqlite'] : ['postgres', 'yugabyte', 'mysql', 'sqlite', 'mongodb'];
   return types.map((t) => `<option value="${t}" ${t === selected ? 'selected' : ''}>${t}</option>`).join('');
 }
 
@@ -68,7 +78,7 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
   return `
     <div class="field-row">
       <div><label>Host</label><input type="text" id="${prefix}-host" value="${esc(cfg.host || '')}" placeholder="localhost"></div>
-      <div><label>Port</label><input type="number" id="${prefix}-port" value="${cfg.port || ''}" placeholder="${type === 'mysql' ? '3306' : '5432'}"></div>
+      <div><label>Port</label><input type="number" id="${prefix}-port" value="${cfg.port || ''}" placeholder="${defaultPort(type)}"></div>
     </div>
     <div class="field-row">
       <div><label>Username</label><input type="text" id="${prefix}-username" value="${esc(cfg.username || '')}"></div>
@@ -77,7 +87,7 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
         <input type="password" id="${prefix}-password" placeholder="${hasPassword ? 'leave blank to keep current password' : ''}">
       </div>
     </div>
-    ${type === 'postgres' ? `
+    ${isPgFamily(type) ? `
     <div class="field-row">
       <div>
         <label>SSL mode</label>
@@ -94,7 +104,7 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
       <button type="button" class="btn" id="${prefix}-loaddbs">Load databases</button>
     </div>
     <div id="${prefix}-dbstatus"></div>
-    ${type === 'postgres' ? `
+    ${isPgFamily(type) ? `
     <div class="field-row">
       <div>
         <label>Schema</label>
@@ -222,7 +232,7 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
       username: g(`${prefix}-username`).trim(),
       password: g(`${prefix}-password`),
       ssl_mode: g(`${prefix}-sslmode`) || '',
-      schema: t === 'postgres' ? g(`${prefix}-schema`).trim() : '',
+      schema: isPgFamily(t) ? g(`${prefix}-schema`).trim() : '',
       dsn: '',
     };
   };
@@ -458,7 +468,7 @@ function connSummaryHTML(cfg) {
     if (cfg.username) rows.push(['Username', cfg.username]);
     rows.push(['Password', cfg.password ? '•'.repeat(10) : '(none set)']);
     if (cfg.ssl_mode) rows.push(['SSL mode', cfg.ssl_mode]);
-    if (cfg.type === 'postgres') rows.push(['Schema', cfg.schema || '(all schemas)']);
+    if (isPgFamily(cfg.type)) rows.push(['Schema', cfg.schema || '(all schemas)']);
   }
   return `<table class="kv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`;
 }
@@ -2281,7 +2291,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeNone" value="none" checked><label for="modeNone">Keep existing target schema/data</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
-        ${sourceType === 'postgres' ? `
+        ${isPgFamily(sourceType) ? `
         <div class="checkbox-row" id="m-live-row"><input type="checkbox" id="m-live"><label for="m-live" style="white-space:nowrap;">Live migration ${betaBadge()}</label><span class="hint" style="margin-left:8px;">Copy the tables, then keep streaming the source's changes to the target. Run the live readiness check in Settings first. In beta: try it on a copy of your data first.</span></div>` : ''}
         <div class="field-row">
           <div><label>Table workers</label><input type="number" id="m-workers" value="${esc(tc.table_workers > 0 ? tc.table_workers : 1)}"><div class="hint">Parallel tables to migrate</div></div>

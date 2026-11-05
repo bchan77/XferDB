@@ -115,3 +115,39 @@ func TestPreflightLivePostgres(t *testing.T) {
 }
 
 func sqlOpen(dsn string) (*sql.DB, error) { return sql.Open("postgres", dsn) }
+
+// A yugabyte project runs YugabyteDB's source checks, but can't start a
+// live migration yet (#158). Needs XFERDB_TEST_YB, a YugabyteDB YSQL DSN;
+// read-only.
+func TestPreflightLiveYugabyte(t *testing.T) {
+	dsn := os.Getenv("XFERDB_TEST_YB")
+	if dsn == "" {
+		t.Skip("XFERDB_TEST_YB not set")
+	}
+	h, db, cleanup := newTestHandler(t)
+	defer cleanup()
+	p := &adapters.Project{ID: "yb", Name: "yb",
+		SourceConfig: adapters.ConnectionConfig{Type: adapters.TypeYugabyte, DSN: dsn},
+		TargetConfig: adapters.ConnectionConfig{Type: "sqlite", Database: filepath.Join(t.TempDir(), "dst.db")},
+	}
+	if err := db.CreateProject(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runPreflight(t, h, "yb", `{"mode":"live"}`)
+	var live liveResult
+	if err := json.Unmarshal(out["live"], &live); code != http.StatusOK || err != nil {
+		t.Fatalf("live preflight: %d %v %s", code, err, out)
+	}
+	var unsupported, recognised bool
+	for _, c := range live.Checks {
+		if c.Name == "a source live migration supports" && !c.OK && strings.Contains(c.Fix, "YugabyteDB") {
+			unsupported = true
+		}
+		if c.Name == "YugabyteDB" && c.OK {
+			recognised = true
+		}
+	}
+	if live.Ready || !unsupported || !recognised {
+		t.Fatalf("checks = %+v", live.Checks)
+	}
+}

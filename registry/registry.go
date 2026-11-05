@@ -19,8 +19,12 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/cdc"
 )
 
+// YugabyteDB (its PostgreSQL-compatible YSQL API) runs the postgres
+// adapter, which tells the two apart by ConnectionConfig.Type where they
+// differ (#158).
 var sourceFactories = map[string]func() adapters.SourceAdapter{
 	"postgres": postgres.NewSource,
+	"yugabyte": postgres.NewSource,
 	"mysql":    mysql.NewSource,
 	"sqlite":   sqlite.NewSource,
 	"mongodb":  mongoadapter.NewSource,
@@ -28,13 +32,16 @@ var sourceFactories = map[string]func() adapters.SourceAdapter{
 
 var targetFactories = map[string]func() adapters.TargetAdapter{
 	"postgres": postgres.NewTarget,
+	"yugabyte": postgres.NewTarget,
 	"mysql":    mysql.NewTarget,
 	"sqlite":   sqlite.NewTarget,
 	// MongoDB is source-only for this feature; no mongo target adapter planned
 }
 
 // changeSourceFactories are the source types a live migration (#102) can
-// stream changes from.
+// stream changes from. Not yet yugabyte: its replication slots number
+// changes on their own counter, not by WAL position, which catch-up and
+// cutover compare (#158).
 var changeSourceFactories = map[string]func(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error){
 	"postgres": func(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
 		return postgres.NewChangeSource(ctx, cfg, stream)
@@ -81,6 +88,7 @@ func NewTarget(adapterType string) (adapters.TargetAdapter, error) {
 // Supported formats:
 //
 //	postgres://user:pass@host:5432/dbname?sslmode=require
+//	yugabyte://user:pass@host:5433/dbname (YugabyteDB YSQL)
 //	mysql://user:pass@host:3306/dbname
 //	sqlite:///absolute/path/to/file.db
 //	mongodb://user:pass@host:27017/dbname?replicaSet=rs0&authSource=admin

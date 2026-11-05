@@ -429,19 +429,30 @@ type liveResult struct {
 func liveChecks(ctx context.Context, p *adapters.Project, src adapters.SourceAdapter, tgt adapters.TargetAdapter) *liveResult {
 	res := &liveResult{}
 	add := func(c adapters.LiveCheck) { res.Checks = append(res.Checks, c) }
-	if !registry.SupportsLive(p.SourceConfig.Type) {
+	supported := registry.SupportsLive(p.SourceConfig.Type)
+	switch {
+	case p.SourceConfig.Type == adapters.TypeYugabyte && !supported:
+		// The source checks below still run, so they show what the source
+		// will need.
+		add(adapters.LiveCheck{
+			Name:   "a source live migration supports",
+			Detail: "source is yugabyte",
+			Fix:    "live migration from YugabyteDB isn't available yet: XferDB can't yet tell when the target has caught up with a YugabyteDB stream",
+		})
+	case !supported:
 		add(adapters.LiveCheck{
 			Name:   "a source live migration supports",
 			Detail: "source is " + p.SourceConfig.Type,
 			Fix:    "live migration streams changes from PostgreSQL sources only, for now",
 		})
-	} else if lp, ok := src.(adapters.LivePreflighter); ok {
+	}
+	if lp, ok := src.(adapters.LivePreflighter); ok {
 		checks, err := lp.LiveChecks(ctx, p.TransferConfig.Tables)
 		if err != nil {
 			add(adapters.LiveCheck{Name: "source checks", Detail: err.Error()})
 		}
 		res.Checks = append(res.Checks, checks...)
-	} else if src == nil {
+	} else if src == nil && supported {
 		add(adapters.LiveCheck{Name: "source checks", Detail: "the source didn't connect"})
 	}
 	if _, ok := tgt.(adapters.ChangeApplier); ok {
