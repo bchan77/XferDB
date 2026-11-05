@@ -8,6 +8,16 @@ Live migration (#102) ships as a **beta**: labelled so in the web UI, the CLI an
 How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `xferdb migrate --preflight --live` runs the live readiness checks from the CLI.
 
 ### Added
+- **YugabyteDB adapter type (#158).** `yugabyte` is a source and target type of its own (web UI,
+  `yugabyte://` DSNs, default port 5433), running the postgres adapter. Projects that reach
+  YugabyteDB as `postgres` keep working unchanged. Live migration from YugabyteDB isn't available
+  yet; its readiness check already runs and shows what the source needs: replication commands
+  enabled (`yb_enable_replication_commands`), a replica identity other than YugabyteDB's default
+  `CHANGE`, and how long the tservers keep changes (`cdc_intent_retention_ms`) in place of WAL
+  limits. A `postgres` project pointing at a YugabyteDB server is told to switch type.
+- **Replica identity check (#158).** The live readiness check fails a table whose replica identity
+  pgoutput can't use: `NOTHING` (on PostgreSQL, updates and deletes on it fail once it's
+  published) or YugabyteDB's `CHANGE`, with the `ALTER TABLE … REPLICA IDENTITY DEFAULT` fix.
 - **Live migration readiness check (#102, phase 1; beta).** The project settings page has a *Live
   Migration* section, and `POST /projects/:id/preflight` takes `{"mode": "live"}`, checking
   whether a PostgreSQL source can stream changes (wal_level, replication privilege, free slot
@@ -52,6 +62,12 @@ How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `
   metrics `xferdb_cdc_source_retained_bytes` and `xferdb_cdc_schema_change_paused`.
 
 ### Fixed
+- **The live readiness check no longer hangs or hides results (#158).** Each check runs on its own
+  with a 15-second limit per query: one the source fails or doesn't answer fails that check, and
+  the others are still reported (before, the first failing query replaced every result with a
+  single *source checks* error, after however long the source took). On YugabyteDB it no longer
+  reads `pg_stat_replication`, which waits up to two minutes for a table only the first
+  replication slot creates.
 - **Re-running a PostgreSQL→PostgreSQL migration into an existing schema.** Without *Recreate
   schema*, a second run failed after copying its rows with `multiple primary keys for table ...
   are not allowed`: the post-data step (keys, indexes, constraints, triggers) stopped at the

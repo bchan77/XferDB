@@ -89,7 +89,7 @@ export function redactMongoURI(uri) {
   }
 }
 
-// inferTypeFromDSN mirrors registry.InferTypeFromDSN for the four supported schemes.
+// inferTypeFromDSN mirrors registry.InferTypeFromDSN for the supported schemes.
 export function inferTypeFromDSN(dsn) {
   if (!dsn) return '';
   const lower = dsn.toLowerCase();
@@ -97,6 +97,6 @@ export function inferTypeFromDSN(dsn) {
   const m = lower.match(/^([a-z0-9+.-]+):\/\//);
   if (!m) return '';
   const scheme = m[1];
-  if (['postgres', 'mysql', 'sqlite'].includes(scheme)) return scheme;
+  if (['postgres', 'yugabyte', 'mysql', 'sqlite'].includes(scheme)) return scheme;
   return '';
 }

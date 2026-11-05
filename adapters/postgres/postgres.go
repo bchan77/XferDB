@@ -12,10 +12,11 @@ import (
 )
 
 // buildDSN constructs a postgres connection string from config fields.
-// If DSN is already set it is used directly.
+// If DSN is already set it is used directly, a yugabyte:// URL as the
+// postgres:// URL it stands for.
 func buildDSN(config adapters.ConnectionConfig) string {
 	if config.DSN != "" {
-		return withSearchPath(config.DSN, config.Schema)
+		return withSearchPath(postgresURL(config.DSN), config.Schema)
 	}
 	sslMode := config.SSLMode
 	if sslMode == "" {
@@ -23,7 +24,7 @@ func buildDSN(config adapters.ConnectionConfig) string {
 	}
 	port := config.Port
 	if port == 0 {
-		port = 5432
+		port = DefaultPort(config.Type)
 	}
 	dsn := fmt.Sprintf(
 		"host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
@@ -31,6 +32,28 @@ func buildDSN(config adapters.ConnectionConfig) string {
 		dsnValue(config.Password), dsnValue(sslMode),
 	)
 	return withSearchPath(dsn, config.Schema)
+}
+
+// DefaultPort is the port a server of adapter type t listens on unless told
+// otherwise: 5433 for YugabyteDB's YSQL, 5432 for PostgreSQL.
+func DefaultPort(t string) int {
+	if t == adapters.TypeYugabyte {
+		return 5433
+	}
+	return 5432
+}
+
+// postgresURL turns a yugabyte:// (or yugabytedb://) URL, which names the
+// adapter type, into the postgres:// URL lib/pq and pgconn understand. Any
+// other DSN is returned as is.
+func postgresURL(dsn string) string {
+	lower := strings.ToLower(dsn)
+	for _, scheme := range []string{"yugabyte://", "yugabytedb://"} {
+		if strings.HasPrefix(lower, scheme) {
+			return "postgres://" + dsn[len(scheme):]
+		}
+	}
+	return dsn
 }
 
 // withSearchPath adds schema to dsn (keyword or URL form) as the session's

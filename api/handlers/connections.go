@@ -38,8 +38,8 @@ func (h *ProjectsHandler) ListDatabases(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cfg := body.Config
-	if cfg.Type != "postgres" && cfg.Type != "mysql" {
-		writeError(w, http.StatusBadRequest, "listing databases is supported for postgres and mysql only")
+	if !adapters.PostgresFamily(cfg.Type) && cfg.Type != "mysql" {
+		writeError(w, http.StatusBadRequest, "listing databases is supported for postgres, yugabyte and mysql only")
 		return
 	}
 	if strings.TrimSpace(cfg.Host) == "" {
@@ -92,8 +92,11 @@ func effectivePort(c adapters.ConnectionConfig) int {
 	if c.Port != 0 {
 		return c.Port
 	}
-	if c.Type == "mysql" {
+	switch c.Type {
+	case "mysql":
 		return 3306
+	case adapters.TypeYugabyte:
+		return 5433
 	}
 	return 5432
 }
@@ -103,18 +106,23 @@ func effectivePort(c adapters.ConnectionConfig) int {
 // that is missing. MySQL connects with no database. Postgres must name one
 // and would otherwise default to a database named after the user, which
 // usually doesn't exist, so it tries cfg's database (when set), then the
-// "postgres" maintenance database, then "template1", moving on only while
-// the error is that the database doesn't exist.
+// "postgres" maintenance database (YugabyteDB: "yugabyte" first, the
+// database it creates for its default user), then "template1", moving on
+// only while the error is that the database doesn't exist.
 func onServer(ctx context.Context, cfg adapters.ConnectionConfig, fn func(adapters.ConnectionConfig) error) error {
 	cfg.DSN = ""
 	var candidates []string
 	switch {
 	case cfg.Type == "mysql":
 		candidates = []string{""}
-	case cfg.Database != "":
-		candidates = []string{cfg.Database, "postgres", "template1"}
 	default:
 		candidates = []string{"postgres", "template1"}
+		if cfg.Type == adapters.TypeYugabyte {
+			candidates = append([]string{"yugabyte"}, candidates...)
+		}
+		if cfg.Database != "" {
+			candidates = append([]string{cfg.Database}, candidates...)
+		}
 	}
 	var err error
 	for _, db := range candidates {
@@ -167,8 +175,8 @@ func (h *ProjectsHandler) CreateTargetDatabase(w http.ResponseWriter, r *http.Re
 		return
 	}
 	cfg := p.TargetConfig
-	if cfg.Type != "postgres" && cfg.Type != "mysql" {
-		writeError(w, http.StatusBadRequest, "creating the target database is supported for postgres and mysql only")
+	if !adapters.PostgresFamily(cfg.Type) && cfg.Type != "mysql" {
+		writeError(w, http.StatusBadRequest, "creating the target database is supported for postgres, yugabyte and mysql only")
 		return
 	}
 	if cfg.Database == "" {
@@ -198,8 +206,8 @@ func (h *ProjectsHandler) CreateDatabase(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	cfg := body.Config
-	if cfg.Type != "postgres" && cfg.Type != "mysql" {
-		writeError(w, http.StatusBadRequest, "creating a database is supported for postgres and mysql only")
+	if !adapters.PostgresFamily(cfg.Type) && cfg.Type != "mysql" {
+		writeError(w, http.StatusBadRequest, "creating a database is supported for postgres, yugabyte and mysql only")
 		return
 	}
 	if strings.TrimSpace(cfg.Host) == "" || strings.TrimSpace(cfg.Database) == "" {

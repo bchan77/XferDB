@@ -128,3 +128,24 @@ func TestParseConnectionString_UnknownScheme(t *testing.T) {
 		t.Error("expected error for unknown scheme, got nil")
 	}
 }
+
+// yugabyte is a type of its own, source and target, that live migration
+// doesn't stream from yet (#158).
+func TestYugabyteType(t *testing.T) {
+	cfg, err := ParseConnectionString("yugabyte://u:p@h:5433/db?sslmode=require")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Type != "yugabyte" || cfg.Host != "h" || cfg.Port != 5433 || cfg.Database != "db" || cfg.SSLMode != "require" {
+		t.Fatalf("parsed %+v", cfg)
+	}
+	if got := InferTypeFromDSN("yugabyte://u@h/db"); got != "yugabyte" {
+		t.Fatalf("InferTypeFromDSN = %q", got)
+	}
+	if _, err := NewTarget("yugabyte"); err != nil {
+		t.Fatal(err)
+	}
+	if SupportsLive("yugabyte") {
+		t.Fatal("live from yugabyte isn't supported yet")
+	}
+}

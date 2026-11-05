@@ -282,11 +282,11 @@ func (f *File) Validate() error {
 
 func validateConnConfig(prefix string, c adapters.ConnectionConfig) error {
 	switch c.Type {
-	case "postgres", "postgresql", "mysql", "mongodb", "sqlite", "sqlite3":
+	case "postgres", "postgresql", "yugabyte", "mysql", "mongodb", "sqlite", "sqlite3":
 	case "":
 		// DSN-only is allowed; type is then inferred from DSN prefix.
 	default:
-		return fmt.Errorf("%s.type %q is not a supported adapter (postgres, mysql, mongodb, sqlite)", prefix, c.Type)
+		return fmt.Errorf("%s.type %q is not a supported adapter (postgres, yugabyte, mysql, mongodb, sqlite)", prefix, c.Type)
 	}
 	return nil
 }

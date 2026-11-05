@@ -34,6 +34,7 @@ writes, *cut over*, and point the applications at the target.
 | A login with the replication privilege | `ALTER ROLE xferdb REPLICATION;` (on RDS: `GRANT rds_replication TO xferdb;`) |
 | A free replication slot and WAL sender | XferDB uses one of each for the whole migration. Raise `max_replication_slots` / `max_wal_senders` (restart needed) if none are free. |
 | A primary key on every migrated table | Changes are applied by key. Leave tables without one out with `--tables`. |
+| A replica identity other than `NOTHING` | `DEFAULT` (the primary key, PostgreSQL's default) or `FULL`. Under `NOTHING`, updates and deletes on a published table fail on the source. Fix: `ALTER TABLE <table> REPLICA IDENTITY DEFAULT;` |
 | Permission to create a publication | `CREATE` on the database, and the login must own the migrated tables (or be a member of the owning role). |
 | Recommended: a WAL limit for slots | `ALTER SYSTEM SET max_slot_wal_keep_size = '50GB'; SELECT pg_reload_conf();` (PostgreSQL 13+). See [WAL and disk space](#wal-and-disk-space). |
 
@@ -75,7 +76,9 @@ Live migration (beta): ready
 ```
 
 A `✗` blocks the migration; a `!` is a warning worth reading. When the
-project's settings name tables, only those are checked.
+project's settings name tables, only those are checked. Each check runs on
+its own with a 15-second limit: a query the source doesn't answer in time
+fails that check only, and the others are still shown.
 
 **API:** `POST /api/v1/projects/:id/preflight` with `{"mode": "live"}`; the
 checks are in the response's `live` field.
@@ -237,7 +240,13 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 
 ## Limitations
 
-- The source must be PostgreSQL. MySQL and MongoDB sources are planned.
+- The source must be PostgreSQL. YugabyteDB, MySQL and MongoDB sources are planned.
+- **YugabyteDB** (source type `yugabyte`): the readiness check runs and shows
+  what the source needs (replication commands enabled, a replica identity
+  other than YugabyteDB's default `CHANGE`), but a live migration can't start
+  yet. A YugabyteDB replication slot numbers changes on its own counter rather
+  than by WAL position, and XferDB's catch-up and cutover still compare WAL
+  positions.
 - Every migrated table needs a primary key.
 - Schema changes are not applied; they pause the migration (step 5).
 - Sequences are set at cutover on PostgreSQL targets only.
@@ -249,6 +258,8 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 | Symptom | What to do |
 |---|---|
 | Readiness: `wal_level = replica` | Set `wal_level = logical` and restart PostgreSQL. |
+| Readiness: replica identity `NOTHING` or `CHANGE` | `ALTER TABLE <table> REPLICA IDENTITY DEFAULT;` for each table listed. `CHANGE` is YugabyteDB's default for new tables. |
+| Readiness: *source type matches the server* | The project's source type is `postgres` but the server is YugabyteDB (or the reverse). Change the type in the project's settings. |
 | Readiness: no free replication slot | Drop an unused slot (`SELECT slot_name, active FROM pg_replication_slots;`) or raise `max_replication_slots`. |
 | `permission denied` creating the publication | Connect as the owner of the tables, or grant the login membership in the owning role; it also needs `CREATE` on the database. |
 | *Capture worker: ... (restarting)* | The worker lost the source; it retries with a growing delay. Check the source is reachable from the XferDB server. |

@@ -41,7 +41,7 @@ func TestSupportedAdapters_ContainsMongoDB(t *testing.T) {
 
 // TestNewSource_AllKnownAdapters ensures every registered source can be instantiated.
 func TestNewSource_AllKnownAdapters(t *testing.T) {
-	known := []string{"postgres", "mysql", "sqlite", "mongodb"}
+	known := []string{"postgres", "yugabyte", "mysql", "sqlite", "mongodb"}
 	for _, name := range known {
 		t.Run(name, func(t *testing.T) {
 			src, err := NewSource(name)

@@ -45,7 +45,7 @@ func lossyRule(fromType, toType, target string) convertFn {
 	if strings.EqualFold(strings.TrimSpace(fromType), strings.TrimSpace(toType)) {
 		return nil
 	}
-	if target != "postgres" && target != "mysql" {
+	if !adapters.PostgresFamily(target) && target != "mysql" {
 		return nil
 	}
 	from, to := kindOf(fromType), kindOf(toType)
