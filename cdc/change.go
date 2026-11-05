@@ -160,3 +160,16 @@ type ChangeSource interface {
 	ParsePosition(s string) (Position, error)
 	Close() error
 }
+
+// TimePositions is implemented by a source whose positions are times rather
+// than offsets in a log (YugabyteDB: hybrid times). Its Behind is in
+// microseconds, and it keeps no log whose size Retention could report.
+type TimePositions interface {
+	PositionsAreTimes() bool
+}
+
+// PositionsAreTimes reports whether src's positions are times.
+func PositionsAreTimes(src ChangeSource) bool {
+	tp, ok := src.(TimePositions)
+	return ok && tp.PositionsAreTimes()
+}

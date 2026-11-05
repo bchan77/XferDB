@@ -189,7 +189,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	if !dataOnly && !cfg.Truncate {
 		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
 
-		if e.project.SourceConfig.Type == "postgres" && e.project.TargetConfig.Type == "postgres" && len(relationalPlan) == 0 {
+		if adapters.PostgresFamily(e.project.SourceConfig.Type) && adapters.PostgresFamily(e.project.TargetConfig.Type) && len(relationalPlan) == 0 {
 			ok, err := e.pgDumpPreData(ctx, e.project.SourceConfig, e.project.TargetConfig, cfg.RecreateSchema)
 			if err != nil {
 				return e.fail(ctx, fmt.Errorf("pg_dump pre-data: %w", err))

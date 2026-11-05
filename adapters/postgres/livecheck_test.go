@@ -216,7 +216,8 @@ func TestLiveChecksYugabyte(t *testing.T) {
 			t.Errorf("unexpected %q check on YugabyteDB", name)
 		}
 	}
-	for _, name := range []string{"replication commands enabled", "a replica identity logical replication can use", "how long the source keeps changes"} {
+	for _, name := range []string{"replication commands enabled", "hybrid-time replication slots", "permission to create the heartbeat table",
+		"a replica identity logical replication can use", "how long the source keeps changes"} {
 		if _, ok := byName[name]; !ok {
 			t.Errorf("no %q check on YugabyteDB", name)
 		}

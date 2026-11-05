@@ -8,10 +8,21 @@ Live migration (#102) ships as a **beta**: labelled so in the web UI, the CLI an
 How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `xferdb migrate --preflight --live` runs the live readiness checks from the CLI.
 
 ### Added
+- **Live migration from YugabyteDB (#158; beta).** A `yugabyte` source can now be migrated live, to
+  any target. XferDB creates its replication slot with hybrid-time positions
+  (`yb_lsn_type = HYBRID_TIME`), compares them with `yb_get_current_hybrid_time_lsn()` to tell
+  when catch-up and cutover are done, and commits a heartbeat (one row per migration in a small
+  `xferdb_heartbeat` table in the publication, never copied) right after recording a position, since
+  an idle YugabyteDB stream doesn't advance on its own. Lag is reported in time (`behind_seconds`)
+  rather than WAL bytes; sequences are read from the sequences themselves (YugabyteDB's
+  `pg_sequences.last_value` is always NULL); dropping the slot waits out YugabyteDB's one-minute
+  active window. The readiness check adds hybrid-time slot support and `CREATE` on the schema for
+  the heartbeat table. The pg_dump schema copy now covers `yugabyte` sources and targets too
+  (leaving out the heartbeat table), as it did for YugabyteDB reached as `postgres`.
 - **YugabyteDB adapter type (#158).** `yugabyte` is a source and target type of its own (web UI,
   `yugabyte://` DSNs, default port 5433), running the postgres adapter. Projects that reach
-  YugabyteDB as `postgres` keep working unchanged. Live migration from YugabyteDB isn't available
-  yet; its readiness check already runs and shows what the source needs: replication commands
+  YugabyteDB as `postgres` keep working unchanged. Its live readiness check shows what the source
+  needs: replication commands
   enabled (`yb_enable_replication_commands`), a replica identity other than YugabyteDB's default
   `CHANGE`, and how long the tservers keep changes (`cdc_intent_retention_ms`) in place of WAL
   limits. A `postgres` project pointing at a YugabyteDB server is told to switch type.

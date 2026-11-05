@@ -1942,7 +1942,7 @@ function liveStatusHTML(mig) {
     <div class="stat-grid live-lag">
       <div class="stat-box" data-stat="lag-changes"><div class="label">Changes to apply</div><div class="value">${fmtInt(l.lag_changes)}</div></div>
       <div class="stat-box" data-stat="lag-seconds"><div class="label">Apply lag</div><div class="value">${esc(secs)}</div></div>
-      <div class="stat-box" data-stat="lag-bytes"><div class="label">Behind source</div><div class="value">${esc(fmtBytes(l.lag_bytes))}</div></div>
+      <div class="stat-box" data-stat="lag-bytes"><div class="label">Behind source</div><div class="value">${esc(l.behind_seconds != null ? (l.behind_seconds < 1 ? '< 1s' : fmtDuration(l.behind_seconds)) : fmtBytes(l.lag_bytes))}</div></div>
       <div class="stat-box" data-stat="applied"><div class="label">Applied</div><div class="value">${applied}</div></div>
       <div class="stat-box" data-stat="queue"><div class="label">Queue on disk</div><div class="value">${esc(fmtBytes(l.queue_bytes))}</div></div>
       ${l.retention ? `<div class="stat-box" data-stat="retained" title="WAL the source keeps for this migration's replication slot"><div class="label">WAL held on source</div><div class="value">${esc(fmtBytes(l.retention.retained_bytes))}</div></div>` : ''}

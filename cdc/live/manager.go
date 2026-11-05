@@ -63,6 +63,9 @@ type Status struct {
 	LagBytes   int64    `json:"lag_bytes"`
 	LagChanges uint64   `json:"lag_changes"`
 	LagSeconds *float64 `json:"lag_seconds,omitempty"`
+	// BehindSeconds replaces LagBytes for a source whose positions are
+	// times (YugabyteDB): how far capture is behind the source, in time.
+	BehindSeconds *float64 `json:"behind_seconds,omitempty"`
 	// SourcePos is the source's current position, StartPos and CatchUpPos
 	// where the stream began and where catch-up ends.
 	SourcePos  string `json:"source_pos,omitempty"`
@@ -539,7 +542,13 @@ func (m *Manager) check(ctx context.Context, r *run, src cdc.ChangeSource, log *
 		if cur, err := src.CurrentPosition(ctx); err == nil {
 			st.SourcePos = src.FormatPosition(cur)
 			if len(st.Capture.Confirmed) > 0 {
-				st.LagBytes = src.Behind(st.Capture.Confirmed, cur)
+				behind := src.Behind(st.Capture.Confirmed, cur)
+				if cdc.PositionsAreTimes(src) {
+					secs := float64(behind) / 1e6
+					st.BehindSeconds = &secs
+				} else {
+					st.LagBytes = behind
+				}
 			}
 		}
 	}
@@ -574,7 +583,8 @@ func (m *Manager) check(ctx context.Context, r *run, src cdc.ChangeSource, log *
 			log.Warn("live.retention", "error", err)
 		} else if ret.Lost {
 			return m.failLost(ctx, r, ret, stream, log)
-		} else {
+		} else if !cdc.PositionsAreTimes(src) {
+			// A source with time positions keeps no log to measure.
 			st.Retention = &ret
 		}
 	}
@@ -625,6 +635,9 @@ func (r *run) warnings(st Status) []string {
 			w := fmt.Sprintf("Capture has been stopped for %s: the source keeps every change for this migration until it runs again", down.Round(time.Second))
 			if ret != nil {
 				w += fmt.Sprintf(" (%s of WAL so far)", fmtBytes(ret.RetainedBytes))
+			}
+			if r.project != nil && r.project.SourceConfig.Type == adapters.TypeYugabyte {
+				w += ", for as long as its tservers' cdc_intent_retention_ms (8 hours unless changed): after that the stream expires and the migration can't go on"
 			}
 			out = append(out, w+".")
 		}

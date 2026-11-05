@@ -130,6 +130,8 @@ func listTables(ctx context.Context, db *sql.DB, all bool) ([]string, error) {
 		filter = `table_schema NOT IN ('pg_catalog', 'information_schema', '` + changeStateSchema + `')
 		  AND table_schema NOT LIKE 'pg\_%'`
 	}
+	// A live migration's heartbeats on a YugabyteDB source (yugabyte_cdc.go).
+	filter += ` AND NOT (table_schema = current_schema() AND table_name = '` + heartbeatTable + `')`
 	rows, err := db.QueryContext(ctx, `
 		SELECT CASE WHEN table_schema = current_schema() THEN table_name
 		            ELSE table_schema || '.' || table_name END

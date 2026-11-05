@@ -39,13 +39,15 @@ var targetFactories = map[string]func() adapters.TargetAdapter{
 }
 
 // changeSourceFactories are the source types a live migration (#102) can
-// stream changes from. Not yet yugabyte: its replication slots number
-// changes on their own counter, not by WAL position, which catch-up and
-// cutover compare (#158).
+// stream changes from. YugabyteDB streams through the postgres change
+// source, with hybrid-time positions and heartbeats (#158).
 var changeSourceFactories = map[string]func(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error){
-	"postgres": func(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
-		return postgres.NewChangeSource(ctx, cfg, stream)
-	},
+	"postgres": newPostgresChangeSource,
+	"yugabyte": newPostgresChangeSource,
+}
+
+func newPostgresChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
+	return postgres.NewChangeSource(ctx, cfg, stream)
 }
 
 // SupportsLive reports whether a source type can be live-migrated.
@@ -58,7 +60,7 @@ func SupportsLive(sourceType string) bool {
 func NewChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
 	factory, ok := changeSourceFactories[cfg.Type]
 	if !ok {
-		return nil, fmt.Errorf("live migration from %s isn't supported yet (supported: postgres)", cfg.Type)
+		return nil, fmt.Errorf("live migration from %s isn't supported yet (supported: postgres, yugabyte)", cfg.Type)
 	}
 	return factory(ctx, cfg, stream)
 }

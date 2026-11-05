@@ -33,9 +33,32 @@ func TestLiveMigrationConverges(t *testing.T) {
 	if dsn == "" {
 		t.Skip("XFERDB_TEST_CDC_PG not set; skipping live migration test")
 	}
+	testConverges(t, adapters.ConnectionConfig{Type: "postgres", DSN: dsn}, dsn)
+}
+
+// TestLiveMigrationConvergesYugabyte is the same from YugabyteDB (#158):
+// hybrid-time positions, and a heartbeat table in the publication whose
+// changes never reach the queue. Needs XFERDB_TEST_YB, a YugabyteDB DSN
+// (yugabyte:// or postgres://).
+func TestLiveMigrationConvergesYugabyte(t *testing.T) {
+	dsn := os.Getenv("XFERDB_TEST_YB")
+	if dsn == "" {
+		t.Skip("XFERDB_TEST_YB not set; skipping YugabyteDB live migration test")
+	}
+	testConverges(t, adapters.ConnectionConfig{Type: adapters.TypeYugabyte, DSN: dsn}, sqlDSN(dsn))
+}
+
+// sqlDSN is dsn as lib/pq takes it: a yugabyte:// URL as postgres://.
+func sqlDSN(dsn string) string {
+	if strings.HasPrefix(dsn, "yugabyte://") {
+		return "postgres://" + strings.TrimPrefix(dsn, "yugabyte://")
+	}
+	return dsn
+}
+
+func testConverges(t *testing.T, srcCfg adapters.ConnectionConfig, sqlDSN string) {
 	ctx := context.Background()
-	srcCfg := adapters.ConnectionConfig{Type: "postgres", DSN: dsn}
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", sqlDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +73,8 @@ func TestLiveMigrationConverges(t *testing.T) {
 	}
 	exec(`CREATE TABLE ` + table + ` (grp text, id int, name text, big text, n bigint, PRIMARY KEY (grp, id))`)
 	defer exec(`DROP TABLE IF EXISTS ` + table)
+	// YugabyteDB's default replica identity, CHANGE, can't be streamed.
+	exec(`ALTER TABLE ` + table + ` REPLICA IDENTITY DEFAULT`)
 	for i := 0; i < 500; i++ {
 		exec(`INSERT INTO `+table+` VALUES ($1, $2, $3, NULL, $4)`, grpOf(i), i, fmt.Sprint("row", i), i)
 	}
@@ -192,12 +217,12 @@ func startWriter(t *testing.T, db *sql.DB, table string) (chan struct{}, chan st
 func copyTable(t *testing.T, srcCfg, tgtCfg adapters.ConnectionConfig, table string) {
 	t.Helper()
 	ctx := context.Background()
-	src, _ := registry.NewSource("postgres")
+	src, _ := registry.NewSource(srcCfg.Type)
 	if err := src.Connect(ctx, srcCfg); err != nil {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	db, err := sql.Open("postgres", srcCfg.DSN)
+	db, err := sql.Open("postgres", sqlDSN(srcCfg.DSN))
 	if err != nil {
 		t.Fatal(err)
 	}

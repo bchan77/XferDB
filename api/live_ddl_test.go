@@ -20,7 +20,7 @@ import (
 
 // liveTestServer starts a server with live migrations on a SQLite target
 // and a live migration of tables, waiting until it streams.
-func liveTestServer(t *testing.T, srcDSN string, src *sql.DB, tables ...string) (*httptest.Server, string, *sql.DB) {
+func liveTestServer(t *testing.T, srcType, srcDSN string, src *sql.DB, tables ...string) (*httptest.Server, string, *sql.DB) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := state.Open(filepath.Join(dir, "state.db"))
@@ -43,7 +43,7 @@ func liveTestServer(t *testing.T, srcDSN string, src *sql.DB, tables ...string) 
 	}
 	post(t, hs.URL+"/api/v1/projects", map[string]any{
 		"name":          "ddl",
-		"source_config": map[string]any{"type": "postgres", "dsn": srcDSN},
+		"source_config": map[string]any{"type": srcType, "dsn": srcDSN},
 		"target_config": map[string]any{"type": "sqlite", "dsn": tgtPath},
 	}, http.StatusCreated, &p)
 	var m struct {
@@ -93,19 +93,36 @@ func TestLiveMigrationSchemaChange(t *testing.T) {
 	if dsn == "" {
 		t.Skip("XFERDB_TEST_CDC_PG not set; skipping live schema change test")
 	}
-	src, err := sql.Open("postgres", dsn)
+	testSchemaChange(t, "postgres", dsn, dsn)
+}
+
+// TestLiveMigrationSchemaChangeYugabyte is the same from YugabyteDB (#158).
+// Needs XFERDB_TEST_YB.
+func TestLiveMigrationSchemaChangeYugabyte(t *testing.T) {
+	dsn := os.Getenv("XFERDB_TEST_YB")
+	if dsn == "" {
+		t.Skip("XFERDB_TEST_YB not set; skipping YugabyteDB live schema change test")
+	}
+	testSchemaChange(t, "yugabyte", dsn, "postgres://"+strings.TrimPrefix(dsn, "yugabyte://"))
+}
+
+func testSchemaChange(t *testing.T, srcType, dsn, sqlDSN string) {
+	src, err := sql.Open("postgres", sqlDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer src.Close()
+	t.Cleanup(func() { src.Close() }) // after the cleanups that use it
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	items, other := "ddl_items_"+suffix, "ddl_other_"+suffix
 	mustExecDB(t, src, `CREATE TABLE `+items+` (id int PRIMARY KEY, name text)`)
 	mustExecDB(t, src, `CREATE TABLE `+other+` (id int PRIMARY KEY)`)
 	t.Cleanup(func() { src.Exec(`DROP TABLE IF EXISTS ` + items + `, ` + other) })
+	for _, table := range []string{items, other} { // YugabyteDB's default, CHANGE, can't be streamed
+		mustExecDB(t, src, `ALTER TABLE `+table+` REPLICA IDENTITY DEFAULT`)
+	}
 	mustExecDB(t, src, `INSERT INTO `+items+` SELECT i, 'n' || i FROM generate_series(1, 100) i`)
 
-	hs, id, tgt := liveTestServer(t, dsn, src, items, other)
+	hs, id, tgt := liveTestServer(t, srcType, dsn, src, items, other)
 
 	mustExecDB(t, src, `INSERT INTO `+items+` VALUES (101, 'before')`)
 	mustExecDB(t, src, `ALTER TABLE `+items+` ADD COLUMN note text`)
@@ -172,12 +189,12 @@ func TestLiveMigrationSlotLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer src.Close()
+	t.Cleanup(func() { src.Close() }) // after the cleanups that use it
 	table := fmt.Sprint("lost_", time.Now().UnixNano())
 	mustExecDB(t, src, `CREATE TABLE `+table+` (id int PRIMARY KEY)`)
 	t.Cleanup(func() { src.Exec(`DROP TABLE IF EXISTS ` + table) })
 
-	hs, id, _ := liveTestServer(t, dsn, src, table)
+	hs, id, _ := liveTestServer(t, "postgres", dsn, src, table)
 	var ret struct {
 		Live struct {
 			Retention *struct {

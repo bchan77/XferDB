@@ -64,9 +64,15 @@ func pgDumpSchemaArgs(src, tgt adapters.ConnectionConfig) (args []string, ok boo
 	}
 	if src.Schema != "" {
 		// Double quotes make pg_dump match the name literally, not as a pattern.
-		return []string{`--schema="` + strings.ReplaceAll(src.Schema, `"`, `""`) + `"`}, true
+		args = append(args, `--schema="`+strings.ReplaceAll(src.Schema, `"`, `""`)+`"`)
 	}
-	return nil, true
+	if src.Type == adapters.TypeYugabyte {
+		// A live migration's heartbeat table (adapters/postgres
+		// yugabyte_cdc.go) isn't migrated: pre-data would create it on
+		// the target, and post-data add its key to a table that isn't there.
+		args = append(args, `--exclude-table=*.xferdb_heartbeat`)
+	}
+	return args, true
 }
 
 // pgDumpPostData transfers the post-data schema section (indexes, FK constraints,
@@ -289,7 +295,16 @@ func (e *Engine) runPgDumpPsql(ctx context.Context, dumpArgs []string, src, tgt 
 // pgConnStr returns the connection string for pg_dump / psql / sql.Open.
 func pgConnStr(cfg adapters.ConnectionConfig) string {
 	if cfg.DSN != "" {
+		// pg_dump and psql know postgres:// URLs, not yugabyte://.
+		for _, scheme := range []string{"yugabyte://", "yugabytedb://"} {
+			if len(cfg.DSN) > len(scheme) && strings.EqualFold(cfg.DSN[:len(scheme)], scheme) {
+				return "postgres://" + cfg.DSN[len(scheme):]
+			}
+		}
 		return cfg.DSN
+	}
+	if cfg.Port == 0 && cfg.Type == adapters.TypeYugabyte {
+		cfg.Port = 5433
 	}
 	var b strings.Builder
 	b.WriteString("postgres://")

@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/config"
 	"gitea.homelab.local/nextdevops/XferDB/stats"
 	"gitea.homelab.local/nextdevops/XferDB/validate"
+	"github.com/spf13/cobra"
 )
 
 var migrateCmd = &cobra.Command{
@@ -794,7 +794,6 @@ func maxRate(records []struct {
 	return max
 }
 
-
 // liveBetaNote is printed when a live migration starts: the feature is in
 // beta until it has run against real workloads.
 const liveBetaNote = "Live migration is in beta: try it on a copy of your data before relying on it in production."
@@ -809,8 +808,10 @@ type liveMigration struct {
 		LagBytes   int64    `json:"lag_bytes"`
 		LagChanges uint64   `json:"lag_changes"`
 		LagSeconds *float64 `json:"lag_seconds"`
-		QueueBytes int64    `json:"queue_bytes"`
-		Apply      *struct {
+		// BehindSeconds replaces LagBytes for a YugabyteDB source.
+		BehindSeconds *float64 `json:"behind_seconds"`
+		QueueBytes    int64    `json:"queue_bytes"`
+		Apply         *struct {
 			ChangesApplied int64 `json:"changes_applied"`
 		} `json:"apply"`
 		CaptureError string            `json:"capture_error"`
@@ -928,7 +929,11 @@ func liveLine(m *liveMigration) string {
 	if l.LagSeconds != nil {
 		secs = fmt.Sprintf("%.1fs", *l.LagSeconds)
 	}
-	line += fmt.Sprintf("  Lag: %s changes, %s, %s behind the source", fmtInt(int64(l.LagChanges)), secs, fmtBytes(l.LagBytes))
+	behind := fmtBytes(l.LagBytes)
+	if l.BehindSeconds != nil {
+		behind = fmt.Sprintf("%.1fs", *l.BehindSeconds)
+	}
+	line += fmt.Sprintf("  Lag: %s changes, %s, %s behind the source", fmtInt(int64(l.LagChanges)), secs, behind)
 	if l.Retention != nil {
 		line += fmt.Sprintf("  WAL held: %s", fmtBytes(l.Retention.RetainedBytes))
 	}

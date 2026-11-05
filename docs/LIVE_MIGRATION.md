@@ -38,7 +38,33 @@ writes, *cut over*, and point the applications at the target.
 | Permission to create a publication | `CREATE` on the database, and the login must own the migrated tables (or be a member of the owning role). |
 | Recommended: a WAL limit for slots | `ALTER SYSTEM SET max_slot_wal_keep_size = '50GB'; SELECT pg_reload_conf();` (PostgreSQL 13+). See [WAL and disk space](#wal-and-disk-space). |
 
-**Target:** PostgreSQL, MySQL or SQLite.
+**Or source: YugabyteDB** (YSQL; source type `yugabyte`), with:
+
+| Requirement | How to set it |
+|---|---|
+| Replication commands and hybrid-time slots | The tserver gflags `ysql_yb_enable_replication_commands=true` and `ysql_yb_allow_replication_slot_lsn_types=true`, on a release that has `yb_get_current_hybrid_time_lsn()` (2025.2 has all three). |
+| A replica identity pgoutput can stream | New YugabyteDB tables get `CHANGE`, which pgoutput refuses: `ALTER TABLE <table> REPLICA IDENTITY DEFAULT;` for each, **before** starting (a slot fixes the identity it streams with when it is created). |
+| `CREATE` on the connection's schema | XferDB creates a small `xferdb_heartbeat` table there for the migration and drops it at the end (see below). |
+| The login, slot, primary key and publication requirements above | As for PostgreSQL, except WAL senders, which YugabyteDB doesn't have. |
+
+How it differs from PostgreSQL:
+
+- **Heartbeats.** An idle YugabyteDB stream doesn't move forward the way an
+  idle PostgreSQL one does, so XferDB couldn't otherwise tell that the target
+  has caught up while nothing is written. During the migration it updates one
+  row in `xferdb_heartbeat` about once a second; those changes are never
+  copied to the target.
+- **Lag in time, not bytes.** *Behind source* is shown as a time, and there is
+  no *WAL held on source*.
+- **Retention.** YugabyteDB keeps a stream's changes for the tservers'
+  `cdc_intent_retention_ms` (8 hours unless changed). If capture is stopped
+  for longer, the stream expires and the migration must start over.
+- **Sequences** are set at cutover from each sequence's cached block, so the
+  target may skip up to `cache_size` values: it never reuses one.
+- **Dropping the slot** waits up to a minute after the stream stops, so
+  cutover and cancel take that long to finish.
+
+**Target:** PostgreSQL, YugabyteDB, MySQL or SQLite.
 
 **The XferDB server:** the capture and apply workers run as processes on the
 machine running `xferdb server`, and queue changes on its disk under
@@ -240,13 +266,10 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 
 ## Limitations
 
-- The source must be PostgreSQL. YugabyteDB, MySQL and MongoDB sources are planned.
-- **YugabyteDB** (source type `yugabyte`): the readiness check runs and shows
-  what the source needs (replication commands enabled, a replica identity
-  other than YugabyteDB's default `CHANGE`), but a live migration can't start
-  yet. A YugabyteDB replication slot numbers changes on its own counter rather
-  than by WAL position, and XferDB's catch-up and cutover still compare WAL
-  positions.
+- The source must be PostgreSQL or YugabyteDB. MySQL and MongoDB sources are planned.
+- **YugabyteDB**: the snapshot pages each table by its primary key. On a
+  hash-sharded key, every page costs a scan of the table, so a large table
+  copies slowly; range-sharded keys page efficiently.
 - Every migrated table needs a primary key.
 - Schema changes are not applied; they pause the migration (step 5).
 - Sequences are set at cutover on PostgreSQL targets only.
