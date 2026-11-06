@@ -15,7 +15,8 @@ How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `
   and *Rows copied*, so they aren't read as the stream's. The counts survive an apply restart
   (`activity.json` in the worker directory), so *Applied* no longer drops to 0 when apply is
   restarted. API: `live.apply.tables` and `live.changes_per_sec` in `GET /migrations/:id`; the CLI
-  status line shows the rate.
+  status line shows the rate. After a server restart, when the copy's live stats are gone, the page
+  shows its recorded stats and table list instead of dropping them, so the per-table lines stay.
 - **Leftover live migration streams are found and can be dropped.** A replication slot or
   publication named like a live migration's that no migration still running on this server owns
   (its cancel couldn't reach the source, the server stopped mid-teardown, or the migration was

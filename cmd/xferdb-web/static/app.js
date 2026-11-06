@@ -2628,6 +2628,9 @@ async function renderMigrationProgress(migId) {
   const isLive = mig.mode === 'live';
   // A live migration's latest state, refreshed on every tick (renderLive).
   let liveMig = mig;
+  // The copy's recorded stats once the server has no live ones (after a
+  // restart); they don't change any more, so they are fetched once.
+  let copySnap = null;
 
   let stopped = false;
   let timer = null;
@@ -2792,7 +2795,15 @@ async function renderMigrationProgress(migId) {
       if (!['setup', 'snapshot'].includes(liveMig.phase) || !ACTIVE_STATUSES.includes(liveMig.status)) {
         try {
           renderProgress(await api.getStats(migId));
-        } catch (err) { /* no copy stats after a restart */ }
+        } catch (err) {
+          // No live copy stats after a server restart: show the copy's
+          // last recorded stats and its tables, so the stream's per-table
+          // activity still has a table list to go under.
+          try {
+            if (!copySnap) copySnap = await historySnap(liveMig, 'snapshot_done');
+            renderProgress(copySnap);
+          } catch (err2) { /* keep what is shown; the next tick retries */ }
+        }
         renderLive();
         if (!ACTIVE_STATUSES.includes(liveMig.status)) {
           clearTimer();
@@ -2832,53 +2843,56 @@ async function renderMigrationProgress(migId) {
   // A finished migration's tables, from the migration record (stats history
   // has no per-table rows), in the shape of a stats snapshot's TableDetails.
   const STATUS_TO_DETAIL = { completed: 'done', in_progress: 'in_progress', failed: 'failed', cancelled: 'cancelled', pending: 'pending', paused: 'pending' };
-  const finishedTableDetails = (mig.tables || [])
-    .map((t) => ({ Name: t.table_name, Status: STATUS_TO_DETAIL[t.status] || t.status, Transferred: t.rows_transferred, Total: t.rows_total }))
-    .sort((a, b) => a.Name.localeCompare(b.Name));
+  // historySnap is a migration's progress as a stats snapshot, for when
+  // the server keeps no live stats for it: a finished migration, or a live
+  // one whose copy ended before the server restarted. The last recorded
+  // stats, with the table list from the migration's own table records.
+  async function historySnap(m, phase) {
+    const tables = (m.tables || [])
+      .map((t) => ({ Name: t.table_name, Status: STATUS_TO_DETAIL[t.status] || t.status, Transferred: t.rows_transferred, Total: t.rows_total }))
+      .sort((a, b) => a.Name.localeCompare(b.Name));
+    const records = await api.getStatsHistory(migId);
+    const last = records && records.length ? records[records.length - 1] : null;
+    if (!last) {
+      const transferred = tables.reduce((n, t) => n + (t.Transferred || 0), 0);
+      const total = tables.reduce((n, t) => n + (t.Total || 0), 0);
+      return {
+        Phase: phase || (m.status === 'completed' ? 'complete' : m.status),
+        ElapsedSeconds: 0,
+        ETASeconds: 0,
+        Rows: { Total: total, Transferred: transferred, RatePerSecond: 0 },
+        resource: {},
+        TableDetails: tables,
+        Errors: m.error ? [m.error] : [],
+      };
+    }
+    return {
+      Phase: phase || last.phase,
+      ElapsedSeconds: last.elapsed_secs,
+      ETASeconds: 0,
+      Rows: {
+        Total: last.rows_total,
+        Transferred: last.rows_transferred,
+        RatePerSecond: last.rate_per_sec,
+      },
+      resource: {
+        CPUPercent: last.cpu_percent,
+        MemAllocMB: last.mem_alloc_mb,
+        MemSysMB: last.mem_sys_mb,
+        Goroutines: last.goroutines,
+      },
+      TableDetails: tables,
+      Errors: m.error ? [m.error] : [],
+    };
+  }
 
   // For completed/failed/cancelled migrations, load from history instead of live stats
   const finishedStatuses = ['completed', 'failed', 'cancelled'];
   if (finishedStatuses.includes(mig.status)) {
     showValidation(false);
     if (isLive) renderLive();
-    // Load last stats from history
     try {
-      const records = await api.getStatsHistory(migId);
-      if (records && records.length > 0) {
-        const last = records[records.length - 1];
-        // Build a snap-like object from the history record
-        const snap = {
-          Phase: last.phase,
-          ElapsedSeconds: last.elapsed_secs,
-          ETASeconds: 0,
-          Rows: {
-            Total: last.rows_total,
-            Transferred: last.rows_transferred,
-            RatePerSecond: last.rate_per_sec,
-          },
-          resource: {
-            CPUPercent: last.cpu_percent,
-            MemAllocMB: last.mem_alloc_mb,
-            MemSysMB: last.mem_sys_mb,
-            Goroutines: last.goroutines,
-          },
-          TableDetails: finishedTableDetails,
-          Errors: mig.error ? [mig.error] : [],
-        };
-        renderProgress(snap);
-      } else {
-        // No history, show minimal info from migration record
-        const snap = {
-          Phase: mig.status === 'completed' ? 'complete' : mig.status,
-          ElapsedSeconds: 0,
-          ETASeconds: 0,
-          Rows: { Total: 0, Transferred: 0, RatePerSecond: 0 },
-          resource: {},
-          TableDetails: finishedTableDetails,
-          Errors: mig.error ? [mig.error] : [],
-        };
-        renderProgress(snap);
-      }
+      renderProgress(await historySnap(mig));
     } catch (err) {
       const area = document.getElementById('progressArea');
       if (area) area.innerHTML = errorBanner('Failed to load migration stats: ' + err.message);
