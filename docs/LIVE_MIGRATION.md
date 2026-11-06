@@ -232,8 +232,29 @@ again.
 
 *Cancel* on the migration page, `xferdb migrate --cancel`, or deleting the
 migration stops the stream and drops the replication slot and publication on
-the source. Rows already on the target stay. A cancelled or failed live
-migration can't be resumed: start a new one.
+the source (and, on YugabyteDB, its heartbeat row). Rows already on the target
+stay. A cancelled or failed live migration can't be resumed: start a new one.
+
+### Leftover streams
+
+A stream can still be left on the source: the source was unreachable when the
+migration was cancelled (the cancel then fails, and can be repeated), the
+server stopped in the middle of dropping it, or someone deleted XferDB's state.
+The source keeps every change for a leftover slot, so XferDB looks for them:
+
+- The readiness check warns about **leftover live migration streams**: those
+  named like a live migration's (`xferdb_` plus an id) that no migration still
+  running on this server owns, and lists them under *Leftover streams on the
+  source*, each with a **Drop** button.
+- `xferdb leftovers` lists the streams on the project's source, leftovers
+  marked `!`; `xferdb leftovers drop NAME` drops one.
+- API: `GET /api/v1/projects/:id/live-streams`,
+  `DELETE /api/v1/projects/:id/live-streams/:name`.
+
+Nothing is dropped automatically. Another XferDB server using the same source
+owns streams this one doesn't know, which look like leftovers from here: drop
+one only if no other server uses it. A stream a running migration owns, or
+whose slot is in use, can't be dropped this way.
 
 ## WAL and disk space
 
@@ -289,4 +310,4 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 | *Apply worker: ... (restarting)* | A change couldn't be applied to the target, often a schema difference. The error names the table. |
 | *writes are still happening on the source* at cutover | Something still writes to a migrated table. Stop it and cut over again. |
 | Migration failed: *the source removed WAL ...* | The slot went past `max_slot_wal_keep_size` while capture was down. Start a new live migration. |
-| A slot left behind after a crash | Its name is `xferdb_` plus the migration id without dashes: `SELECT pg_drop_replication_slot('xferdb_...'); DROP PUBLICATION xferdb_...;` — only once that migration is cancelled or deleted. |
+| Readiness: *no leftover live migration streams* (!) | A slot or publication no running migration owns: see [Leftover streams](#leftover-streams). Drop it in *Settings → Live Migration* or with `xferdb leftovers drop NAME`, once you know no other XferDB server uses it. |

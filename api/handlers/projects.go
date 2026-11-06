@@ -263,7 +263,7 @@ func (h *ProjectsHandler) Preflight(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Mode == adapters.MigrationModeLive {
-		result.Live = liveChecks(ctx, p, srcAdapter, tgtAdapter)
+		result.Live = liveChecks(ctx, h.DB, p, srcAdapter, tgtAdapter)
 		if !result.Live.Ready {
 			result.Status = "failed"
 		}
@@ -422,11 +422,14 @@ func connectSource(ctx context.Context, cfg adapters.ConnectionConfig) (adapters
 type liveResult struct {
 	Ready  bool                 `json:"ready"`
 	Checks []adapters.LiveCheck `json:"checks"`
+	// Leftovers are live migration streams on the source no running
+	// migration owns (see liveStreamInfo), for the UI to offer dropping.
+	Leftovers []liveStreamInfo `json:"leftovers,omitempty"`
 }
 
 // liveChecks runs the live-migration checks on the connected adapters (nil
 // for a side that failed to connect, which the plain preflight reports).
-func liveChecks(ctx context.Context, p *adapters.Project, src adapters.SourceAdapter, tgt adapters.TargetAdapter) *liveResult {
+func liveChecks(ctx context.Context, db *state.MetaDB, p *adapters.Project, src adapters.SourceAdapter, tgt adapters.TargetAdapter) *liveResult {
 	res := &liveResult{}
 	add := func(c adapters.LiveCheck) { res.Checks = append(res.Checks, c) }
 	supported := registry.SupportsLive(p.SourceConfig.Type)
@@ -445,6 +448,20 @@ func liveChecks(ctx context.Context, p *adapters.Project, src adapters.SourceAda
 		res.Checks = append(res.Checks, checks...)
 	} else if src == nil && supported {
 		add(adapters.LiveCheck{Name: "source checks", Detail: "the source didn't connect"})
+	}
+	// Leftover streams don't block a new migration, but the source keeps
+	// changes for each until it is dropped.
+	if src != nil {
+		if streams, ok, err := classifyStreams(ctx, db, src); ok && err == nil {
+			if c, any := leftoverCheck(streams); any {
+				add(c)
+				for _, st := range streams {
+					if st.Leftover {
+						res.Leftovers = append(res.Leftovers, st)
+					}
+				}
+			}
+		}
 	}
 	if _, ok := tgt.(adapters.ChangeApplier); ok {
 		add(adapters.LiveCheck{Name: "a target that can apply changes", OK: true, Detail: "target is " + p.TargetConfig.Type})

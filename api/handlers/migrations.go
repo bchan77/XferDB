@@ -363,7 +363,7 @@ func (h *MigrationsHandler) checkLiveStart(w http.ResponseWriter, ctx context.Co
 			tgt = t
 		}
 	}
-	res := liveChecks(ctx, p, src, tgt)
+	res := liveChecks(ctx, h.DB, p, src, tgt)
 	if srcErr != nil || tgtErr != nil || !res.Ready {
 		writeJSON(w, http.StatusBadRequest, struct {
 			Error string      `json:"error"`

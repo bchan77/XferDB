@@ -280,3 +280,27 @@ type LiveCheck struct {
 type LivePreflighter interface {
 	LiveChecks(ctx context.Context, tables []string) ([]LiveCheck, error)
 }
+
+// LiveStream is what a live migration keeps on its source, found there by
+// name: a replication slot, a publication and, on YugabyteDB, a heartbeat
+// row, all named after the migration (PostgreSQL: "xferdb_" + its id
+// without dashes).
+type LiveStream struct {
+	Name        string `json:"name"`
+	Slot        bool   `json:"slot"`
+	Publication bool   `json:"publication"`
+	Heartbeat   bool   `json:"heartbeat,omitempty"`
+	// Active is set while something streams from the slot: it can't be
+	// dropped then.
+	Active bool `json:"active,omitempty"`
+	// RetainedBytes is the WAL the slot holds back (PostgreSQL), when known.
+	RetainedBytes *int64 `json:"retained_bytes,omitempty"`
+}
+
+// LiveStreamLister is implemented by sources a live migration streams from:
+// LiveStreams finds every live migration's stream on the source (this
+// database), and DropLiveStream removes one, refusing an active slot.
+type LiveStreamLister interface {
+	LiveStreams(ctx context.Context) ([]LiveStream, error)
+	DropLiveStream(ctx context.Context, name string) error
+}

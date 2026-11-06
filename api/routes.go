@@ -27,6 +27,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/connections/databases", ph.ListDatabases)
 	mux.HandleFunc("POST /api/v1/connections/create-database", ph.CreateDatabase)
 	mux.HandleFunc("POST /api/v1/projects/{id}/target-database", ph.CreateTargetDatabase)
+	mux.HandleFunc("GET /api/v1/projects/{id}/live-streams", ph.ListLiveStreams)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}/live-streams/{name}", ph.DropLiveStream)
 	mux.HandleFunc("GET /api/v1/projects/{id}/support-bundle", ph.SupportBundle)
 	mux.HandleFunc("POST /api/v1/projects/{id}/analyze", ph.Analyze)
 	mux.HandleFunc("GET /api/v1/projects/{id}/tables/{table}", ph.GetTableSchema)
