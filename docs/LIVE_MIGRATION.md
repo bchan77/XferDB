@@ -43,6 +43,7 @@ writes, *cut over*, and point the applications at the target.
 | Requirement | How to set it |
 |---|---|
 | Replication commands and hybrid-time slots | The tserver gflags `ysql_yb_enable_replication_commands=true` and `ysql_yb_allow_replication_slot_lsn_types=true`, on a release that has `yb_get_current_hybrid_time_lsn()` (2025.2 has all three). |
+| Old values for rows changed twice in one transaction | The tserver gflag `cdc_enable_intra_transactional_before_image=true` (2025.2.4 and later), if the application updates or deletes a row it already inserted or changed earlier in the same transaction (for example a delete and re-insert under the same key). Without it, capture stops at *Failed to get the beforeimage for tablet_id* when the stream reaches such a transaction. Readiness can't check this flag: SQL can't read it. |
 | A replica identity pgoutput can stream | New YugabyteDB tables get `CHANGE`, which pgoutput refuses: `ALTER TABLE <table> REPLICA IDENTITY DEFAULT;` for each, **before** starting (a slot fixes the identity it streams with when it is created). |
 | `CREATE` on the connection's schema | XferDB creates a small `xferdb_heartbeat` table there for the migration and drops it at the end (see below). |
 | The login, slot, primary key and publication requirements above | As for PostgreSQL, except WAL senders, which YugabyteDB doesn't have. |
@@ -313,6 +314,7 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 | Readiness: no free replication slot | Drop an unused slot (`SELECT slot_name, active FROM pg_replication_slots;`) or raise `max_replication_slots`. |
 | `permission denied` creating the publication | Connect as the owner of the tables, or grant the login membership in the owning role; it also needs `CREATE` on the database. |
 | *Capture worker: ... (restarting)* | The worker lost the source; it retries with a growing delay. Check the source is reachable from the XferDB server. |
+| *Capture worker: ... Failed to get the beforeimage for tablet_id ... (SQLSTATE XX000)* (YugabyteDB) | A transaction changed the same row more than once, and the source can't send its old values. Set the tserver gflag `cdc_enable_intra_transactional_before_image=true` on every tserver (2025.2.4+) and restart them. Set it before starting: a transaction the stream has already reached may still fail, in which case cancel and start a new live migration. |
 | *Apply worker: ... (restarting)* | A change couldn't be applied to the target, often a schema difference. The error names the table. |
 | *writes are still happening on the source* at cutover | Something still writes to a migrated table. Stop it and cut over again. |
 | Migration failed: *the source removed WAL ...* | The slot went past `max_slot_wal_keep_size` while capture was down. Start a new live migration. |
