@@ -191,7 +191,11 @@ func (h *ProjectsHandler) DropLiveStream(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, name+" isn't a leftover: "+found.Reason+"; cancel or delete that migration instead")
 		return
 	case found.Active:
-		writeError(w, http.StatusConflict, "replication slot "+name+" is in use: something (maybe another XferDB server) is streaming from it")
+		msg := "replication slot " + name + " is in use: something (maybe another XferDB server) is streaming from it"
+		if p.SourceConfig.Type == adapters.TypeYugabyte {
+			msg += ". YugabyteDB also counts a slot as in use for a minute after its stream stops: if nothing streams from it, try again then"
+		}
+		writeError(w, http.StatusConflict, msg)
 		return
 	}
 	if err := src.(adapters.LiveStreamLister).DropLiveStream(ctx, name); err != nil {
