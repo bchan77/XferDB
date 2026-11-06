@@ -36,6 +36,24 @@ function findActiveMigration(migs) {
 // Connection config editor (shared by create + edit forms)
 // ---------------------------------------------------------------------------
 
+// intField reads a whole-number input: def when it is blank or not a
+// number, and never below min. A number box can be typed or scrolled into a
+// negative value (a project once saved table_workers -75), which
+// parseInt(...) || def lets through.
+function intField(id, def, min) {
+  const el = document.getElementById(id);
+  const n = el ? parseInt(el.value, 10) : NaN;
+  if (Number.isNaN(n)) return def;
+  return Math.max(n, min);
+}
+
+// The mouse wheel over a focused number box changes its value, easily
+// unnoticed while scrolling the page: let the page scroll instead.
+document.addEventListener('wheel', (e) => {
+  const el = e.target;
+  if (el instanceof HTMLInputElement && el.type === 'number' && document.activeElement === el) el.blur();
+}, { passive: true });
+
 // isPgFamily: the types that speak PostgreSQL's SQL (YugabyteDB's YSQL runs
 // the postgres adapter), so they take the same connection fields.
 function isPgFamily(type) {
@@ -380,11 +398,11 @@ async function renderProjectCreate() {
     <details class="advanced">
       <summary>Advanced transfer options</summary>
       <div class="field-row">
-        <div><label>Batch size</label><input type="number" id="p-batch" value="1000"><div class="hint">Rows per INSERT batch</div></div>
-        <div><label>Table workers</label><input type="number" id="p-workers" value="1"><div class="hint">Parallel tables to migrate</div></div>
+        <div><label>Batch size</label><input type="number" id="p-batch" value="1000" min="1"><div class="hint">Rows per INSERT batch</div></div>
+        <div><label>Table workers</label><input type="number" id="p-workers" value="1" min="1"><div class="hint">Parallel tables to migrate</div></div>
       </div>
       <div class="field-row">
-        <div id="p-segment-row"><label>Segment workers</label><input type="number" id="p-segment" value="0"><div class="hint" id="p-segment-hint">Workers per table (0 = disabled)</div></div>
+        <div id="p-segment-row"><label>Segment workers</label><input type="number" id="p-segment" value="0" min="0"><div class="hint" id="p-segment-hint">Workers per table (0 = disabled)</div></div>
         <div></div>
       </div>
     </details>
@@ -429,9 +447,9 @@ async function renderProjectCreate() {
       source_config: srcEditor.read(),
       target_config: tgtEditor.read(),
       transfer_config: {
-        batch_size: parseInt(document.getElementById('p-batch').value, 10) || 1000,
-        table_workers: parseInt(document.getElementById('p-workers').value, 10) || 1,
-        segment_workers: parseInt(document.getElementById('p-segment').value, 10) || 0,
+        batch_size: intField('p-batch', 1000, 1),
+        table_workers: intField('p-workers', 1, 1),
+        segment_workers: intField('p-segment', 0, 0),
         on_error: 'abort',
       },
     };
@@ -2344,11 +2362,11 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         ${isPgFamily(sourceType) ? `
         <div class="checkbox-row" id="m-live-row"><input type="checkbox" id="m-live"><label for="m-live" style="white-space:nowrap;">Live migration ${betaBadge()}</label><span class="hint" style="margin-left:8px;">Copy the tables, then keep streaming the source's changes to the target. Run the live readiness check in Settings first. In beta: try it on a copy of your data first.</span></div>` : ''}
         <div class="field-row">
-          <div><label>Table workers</label><input type="number" id="m-workers" value="${esc(tc.table_workers > 0 ? tc.table_workers : 1)}"><div class="hint">Parallel tables to migrate</div></div>
-          <div><label>Batch size</label><input type="number" id="m-batch" value="${esc(tc.batch_size > 0 ? tc.batch_size : 1000)}"><div class="hint">Rows per INSERT batch</div></div>
+          <div><label>Table workers</label><input type="number" id="m-workers" min="1" value="${esc(tc.table_workers > 0 ? tc.table_workers : 1)}"><div class="hint">Parallel tables to migrate</div></div>
+          <div><label>Batch size</label><input type="number" id="m-batch" min="1" value="${esc(tc.batch_size > 0 ? tc.batch_size : 1000)}"><div class="hint">Rows per INSERT batch</div></div>
         </div>
         <div class="field-row">
-          <div><label>Segment workers</label><input type="number" id="m-segment" value="${esc(tc.segment_workers > 0 ? tc.segment_workers : 0)}" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
+          <div><label>Segment workers</label><input type="number" id="m-segment" min="0" value="${esc(tc.segment_workers > 0 ? tc.segment_workers : 0)}" ${segmentDisabled ? 'disabled' : ''}><div class="hint">${segmentDisabled ? 'Not supported for MongoDB sources' : 'Workers per table (0 = disabled)'}</div></div>
           <div></div>
         </div>
         ${validationOptionsHTML('m', transferCfg)}
@@ -2465,9 +2483,9 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     document.getElementById('startMigBtn').addEventListener('click', async () => {
       const mode = document.querySelector('input[name=schemaMode]:checked').value;
       const body = {
-        table_workers: parseInt(document.getElementById('m-workers').value, 10) || 1,
-        segment_workers: parseInt(document.getElementById('m-segment').value, 10) || 0,
-        batch_size: parseInt(document.getElementById('m-batch').value, 10) || 1000,
+        table_workers: intField('m-workers', 1, 1),
+        segment_workers: intField('m-segment', 0, 0),
+        batch_size: intField('m-batch', 1000, 1),
         recreate_schema: mode === 'recreate',
         truncate: mode === 'truncate',
         async_pipeline: document.getElementById('m-async')?.checked || false,

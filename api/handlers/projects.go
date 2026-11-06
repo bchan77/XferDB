@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -49,7 +50,7 @@ func (h *ProjectsHandler) CreateProject(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if err := validate.CheckSettings(body.TransferConfig); err != nil {
+	if err := checkTransferConfig(body.TransferConfig); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -151,7 +152,7 @@ func (h *ProjectsHandler) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	existing.SourceConfig = body.SourceConfig
 	existing.TargetConfig = body.TargetConfig
 	if body.TransferConfig != nil {
-		if err := validate.CheckSettings(*body.TransferConfig); err != nil {
+		if err := checkTransferConfig(*body.TransferConfig); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -408,6 +409,22 @@ func friendlyConnectError(err error) string {
 	default:
 		return msg
 	}
+}
+
+// checkTransferConfig rejects transfer settings a project can't be saved
+// with: negative worker counts or batch size (0 means the default), and
+// invalid validation settings. A project saved before this check may still
+// hold a negative value, which a run treats as the default.
+func checkTransferConfig(t adapters.TransferConfig) error {
+	switch {
+	case t.TableWorkers < 0:
+		return fmt.Errorf("table_workers must be 0 or more (0 = the default, 1), not %d", t.TableWorkers)
+	case t.SegmentWorkers < 0:
+		return fmt.Errorf("segment_workers must be 0 or more (0 = off), not %d", t.SegmentWorkers)
+	case t.BatchSize < 0:
+		return fmt.Errorf("batch_size must be 0 or more (0 = the default), not %d", t.BatchSize)
+	}
+	return validate.CheckSettings(t)
 }
 
 // connectSource is a helper used by Preflight and Analyze.
