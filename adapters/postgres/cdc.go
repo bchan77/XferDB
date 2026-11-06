@@ -38,6 +38,9 @@ type ChangeSource struct {
 
 	db        *sql.DB // catalog queries, with the source's search_path
 	ownSchema string  // current_schema(): its tables are named bare
+	// yb is set on a YugabyteDB source: hybrid-time positions and
+	// heartbeats (yugabyte_cdc.go).
+	yb bool
 
 	mu        sync.Mutex
 	rels      map[uint32]*relation
@@ -57,6 +60,9 @@ type relation struct {
 	// described is the columns with their type names, as Columns reports
 	// them, for telling a schema change.
 	described []cdc.Column
+	// heartbeat marks YugabyteDB's heartbeat table: its changes aren't
+	// streamed, only confirmed past.
+	heartbeat bool
 }
 
 // SlotName returns the replication slot and publication name used for a
@@ -89,6 +95,7 @@ func NewChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream 
 	s := &ChangeSource{
 		cfg: cfg, slot: SlotName(stream), pub: SlotName(stream), db: db,
 		rels: map[uint32]*relation{}, baseTypes: map[uint32]uint32{},
+		yb: cfg.Type == adapters.TypeYugabyte,
 	}
 	if err := db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&s.ownSchema); err != nil {
 		db.Close()
@@ -145,10 +152,18 @@ func (s *ChangeSource) Prepare(ctx context.Context, tables []string) (cdc.Positi
 	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, s.pub).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("check publication: %w", err)
 	}
+	if s.yb {
+		if err := s.prepareHeartbeat(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if !exists {
 		names := make([]string, len(tables))
 		for i, t := range tables {
 			names[i] = qualify(t)
+		}
+		if s.yb {
+			names = append(names, quote(heartbeatTable))
 		}
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE PUBLICATION %s FOR TABLE %s`, quote(s.pub), strings.Join(names, ", "))); err != nil {
 			return nil, fmt.Errorf("create publication %s: %w", s.pub, err)
@@ -170,6 +185,9 @@ func (s *ChangeSource) Prepare(ctx context.Context, tables []string) (cdc.Positi
 	}
 	if err != sql.ErrNoRows {
 		return nil, fmt.Errorf("check replication slot: %w", err)
+	}
+	if s.yb {
+		return s.createHybridTimeSlot(ctx)
 	}
 	conn, err := s.replConn(ctx)
 	if err != nil {
@@ -326,7 +344,7 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 					}
 					// Sent before a change to the table, in its transaction:
 					// the capturer tells whether the columns changed.
-					if inTxn {
+					if inTxn && !rel.heartbeat {
 						if err := emit(cdc.Change{Table: rel.name, Op: cdc.OpSchema, Columns: rel.described}); err != nil {
 							return err
 						}
@@ -350,6 +368,9 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 					}
 					pending = nil
 				case *pglogrepl.InsertMessage:
+					if s.isHeartbeat(m.RelationID) {
+						continue
+					}
 					c, err := s.rowChange(m.RelationID, cdc.OpInsert, nil, m.Tuple)
 					if err != nil {
 						return err
@@ -358,6 +379,9 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 						return err
 					}
 				case *pglogrepl.UpdateMessage:
+					if s.isHeartbeat(m.RelationID) {
+						continue
+					}
 					c, err := s.rowChange(m.RelationID, cdc.OpUpdate, m.OldTuple, m.NewTuple)
 					if err != nil {
 						return err
@@ -366,6 +390,9 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 						return err
 					}
 				case *pglogrepl.DeleteMessage:
+					if s.isHeartbeat(m.RelationID) {
+						continue
+					}
 					c, err := s.rowChange(m.RelationID, cdc.OpDelete, m.OldTuple, nil)
 					if err != nil {
 						return err
@@ -378,6 +405,9 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 						rel, err := s.relation(id)
 						if err != nil {
 							return err
+						}
+						if rel.heartbeat {
+							continue
 						}
 						if err := emit(cdc.Change{Table: rel.name, Op: cdc.OpTruncate}); err != nil {
 							return err
@@ -429,6 +459,9 @@ func (s *ChangeSource) Ack(_ context.Context, upTo cdc.Position) error {
 
 // CurrentPosition implements cdc.ChangeSource.
 func (s *ChangeSource) CurrentPosition(ctx context.Context) (cdc.Position, error) {
+	if s.yb {
+		return s.ybCurrentPosition(ctx)
+	}
 	var text string
 	if err := s.db.QueryRowContext(ctx, `SELECT pg_current_wal_lsn()::text`).Scan(&text); err != nil {
 		return nil, fmt.Errorf("current WAL position: %w", err)
@@ -442,6 +475,9 @@ func (s *ChangeSource) CurrentPosition(ctx context.Context) (cdc.Position, error
 
 // Sequences implements cdc.ChangeSource, naming sequences like tables.
 func (s *ChangeSource) Sequences(ctx context.Context) (map[string]int64, error) {
+	if s.yb {
+		return s.ybSequences(ctx)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT CASE WHEN schemaname = current_schema() THEN sequencename
 		            ELSE schemaname || '.' || sequencename END, last_value
@@ -466,8 +502,18 @@ func (s *ChangeSource) Sequences(ctx context.Context) (map[string]int64, error) 
 
 // Teardown implements cdc.ChangeSource. The slot must not be streaming:
 // once its stream has stopped, the server may still hold it as active for
-// a moment, which is waited out, up to 10s.
+// a moment, which is waited out, up to 10s (YugabyteDB: up to 75s, for its
+// ysql_cdc_active_replication_slot_window_ms).
 func (s *ChangeSource) Teardown(ctx context.Context) error {
+	maxWait := 50 // 10s
+	if s.yb {
+		maxWait = ybSlotDropWait * 5
+		// First, so a slot drop that waits out the active window (or is
+		// interrupted) doesn't leave this stream's row behind.
+		if err := s.deleteHeartbeat(ctx); err != nil {
+			return err
+		}
+	}
 	for wait := 0; ; wait++ {
 		_, err := s.db.ExecContext(ctx,
 			`SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`, s.slot)
@@ -475,7 +521,7 @@ func (s *ChangeSource) Teardown(ctx context.Context) error {
 			break
 		}
 		var pqErr *pq.Error
-		if !errors.As(err, &pqErr) || pqErr.Code != "55006" || wait >= 50 { // object_in_use
+		if !errors.As(err, &pqErr) || pqErr.Code != "55006" || wait >= maxWait { // object_in_use
 			return fmt.Errorf("drop replication slot %s: %w", s.slot, err)
 		}
 		select {
@@ -486,6 +532,9 @@ func (s *ChangeSource) Teardown(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `DROP PUBLICATION IF EXISTS `+quote(s.pub)); err != nil {
 		return fmt.Errorf("drop publication %s: %w", s.pub, err)
+	}
+	if s.yb {
+		return s.dropHeartbeatTable(ctx)
 	}
 	return nil
 }
@@ -514,12 +563,16 @@ func (s *ChangeSource) Confirmed() cdc.Position {
 	return encodeLSN(s.flushLSN())
 }
 
-// Behind implements cdc.ChangeSource, in WAL bytes.
+// Behind implements cdc.ChangeSource, in WAL bytes (YugabyteDB:
+// microseconds of hybrid time).
 func (s *ChangeSource) Behind(pos, target cdc.Position) int64 {
 	p, err1 := decodeLSN(pos)
 	t, err2 := decodeLSN(target)
 	if err1 != nil || err2 != nil || p >= t {
 		return 0
+	}
+	if s.yb {
+		return ybBehind(p, t)
 	}
 	return int64(t - p)
 }
@@ -563,7 +616,8 @@ func (s *ChangeSource) addRelation(ctx context.Context, m *pglogrepl.RelationMes
 			break
 		}
 	}
-	rel := &relation{name: name, columns: m.Columns, key: key, described: described}
+	rel := &relation{name: name, columns: m.Columns, key: key, described: described,
+		heartbeat: s.yb && m.Namespace == s.ownSchema && m.RelationName == heartbeatTable}
 	s.mu.Lock()
 	s.rels[m.RelationID] = rel
 	s.mu.Unlock()
@@ -633,6 +687,9 @@ func (s *ChangeSource) Columns(ctx context.Context, tables []string) (map[string
 // PostgreSQL 13 and later its wal_status and safe_wal_size. A slot that is
 // gone (dropped by hand) counts as lost.
 func (s *ChangeSource) Retention(ctx context.Context) (cdc.Retention, error) {
+	if s.yb {
+		return s.ybRetention(ctx)
+	}
 	var r cdc.Retention
 	var version int
 	if err := s.db.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::int`).Scan(&version); err != nil {

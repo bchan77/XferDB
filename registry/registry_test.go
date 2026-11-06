@@ -129,8 +129,8 @@ func TestParseConnectionString_UnknownScheme(t *testing.T) {
 	}
 }
 
-// yugabyte is a type of its own, source and target, that live migration
-// doesn't stream from yet (#158).
+// yugabyte is a type of its own, source and target, live migration
+// streams from (#158).
 func TestYugabyteType(t *testing.T) {
 	cfg, err := ParseConnectionString("yugabyte://u:p@h:5433/db?sslmode=require")
 	if err != nil {
@@ -145,7 +145,7 @@ func TestYugabyteType(t *testing.T) {
 	if _, err := NewTarget("yugabyte"); err != nil {
 		t.Fatal(err)
 	}
-	if SupportsLive("yugabyte") {
-		t.Fatal("live from yugabyte isn't supported yet")
+	if !SupportsLive("yugabyte") {
+		t.Fatal("live from yugabyte should be supported")
 	}
 }

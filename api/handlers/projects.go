@@ -430,20 +430,11 @@ func liveChecks(ctx context.Context, p *adapters.Project, src adapters.SourceAda
 	res := &liveResult{}
 	add := func(c adapters.LiveCheck) { res.Checks = append(res.Checks, c) }
 	supported := registry.SupportsLive(p.SourceConfig.Type)
-	switch {
-	case p.SourceConfig.Type == adapters.TypeYugabyte && !supported:
-		// The source checks below still run, so they show what the source
-		// will need.
-		add(adapters.LiveCheck{
-			Name:   "a source live migration supports",
-			Detail: "source is yugabyte",
-			Fix:    "live migration from YugabyteDB isn't available yet: XferDB can't yet tell when the target has caught up with a YugabyteDB stream",
-		})
-	case !supported:
+	if !supported {
 		add(adapters.LiveCheck{
 			Name:   "a source live migration supports",
 			Detail: "source is " + p.SourceConfig.Type,
-			Fix:    "live migration streams changes from PostgreSQL sources only, for now",
+			Fix:    "live migration streams changes from PostgreSQL and YugabyteDB sources only, for now",
 		})
 	}
 	if lp, ok := src.(adapters.LivePreflighter); ok {

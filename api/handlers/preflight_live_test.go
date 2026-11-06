@@ -56,7 +56,7 @@ func TestPreflightLiveMode(t *testing.T) {
 	}
 	var sawSource, sawTarget bool
 	for _, c := range live.Checks {
-		if strings.Contains(c.Fix, "PostgreSQL sources only") && !c.OK {
+		if strings.Contains(c.Fix, "sources only") && !c.OK {
 			sawSource = true
 		}
 		if c.Name == "a target that can apply changes" && c.OK {
@@ -116,8 +116,8 @@ func TestPreflightLivePostgres(t *testing.T) {
 
 func sqlOpen(dsn string) (*sql.DB, error) { return sql.Open("postgres", dsn) }
 
-// A yugabyte project runs YugabyteDB's source checks, but can't start a
-// live migration yet (#158). Needs XFERDB_TEST_YB, a YugabyteDB YSQL DSN;
+// A yugabyte project runs YugabyteDB's source checks, and live migration
+// streams from it (#158). Needs XFERDB_TEST_YB, a YugabyteDB YSQL DSN;
 // read-only.
 func TestPreflightLiveYugabyte(t *testing.T) {
 	dsn := os.Getenv("XFERDB_TEST_YB")
@@ -138,16 +138,18 @@ func TestPreflightLiveYugabyte(t *testing.T) {
 	if err := json.Unmarshal(out["live"], &live); code != http.StatusOK || err != nil {
 		t.Fatalf("live preflight: %d %v %s", code, err, out)
 	}
-	var unsupported, recognised bool
+	var unsupported, recognised, hybrid bool
 	for _, c := range live.Checks {
-		if c.Name == "a source live migration supports" && !c.OK && strings.Contains(c.Fix, "YugabyteDB") {
+		switch c.Name {
+		case "a source live migration supports":
 			unsupported = true
-		}
-		if c.Name == "YugabyteDB" && c.OK {
-			recognised = true
+		case "YugabyteDB":
+			recognised = c.OK
+		case "hybrid-time replication slots":
+			hybrid = true
 		}
 	}
-	if live.Ready || !unsupported || !recognised {
+	if unsupported || !recognised || !hybrid {
 		t.Fatalf("checks = %+v", live.Checks)
 	}
 }

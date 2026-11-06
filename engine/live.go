@@ -208,7 +208,7 @@ func stageSchema(tables []adapters.TableSchema, stage SchemaStage) []adapters.Ta
 // nativeSchemaFor reports whether a run of project uses pg_dump for the
 // target schema, as Run decides it.
 func nativeSchemaFor(project *adapters.Project, plan []state.SchemaPlanRow) bool {
-	if project.SourceConfig.Type != "postgres" || project.TargetConfig.Type != "postgres" || len(plan) > 0 || !hasPgTools() {
+	if !adapters.PostgresFamily(project.SourceConfig.Type) || !adapters.PostgresFamily(project.TargetConfig.Type) || len(plan) > 0 || !hasPgTools() {
 		return false
 	}
 	_, ok := pgDumpSchemaArgs(project.SourceConfig, project.TargetConfig)

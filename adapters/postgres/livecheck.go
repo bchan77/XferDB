@@ -137,6 +137,22 @@ func (s *Source) LiveChecks(ctx context.Context, tables []string) ([]adapters.Li
 		}
 	}
 
+	if yb {
+		// Live migration needs hybrid-time slot positions, comparable with
+		// the time now, to tell when the target has caught up.
+		var lsnTypes string
+		var hasNow bool
+		if query("hybrid-time replication slots", `SELECT current_setting('yb_allow_replication_slot_lsn_types', true),
+				to_regproc('yb_get_current_hybrid_time_lsn') IS NOT NULL`, []any{&lsnTypes, &hasNow}) {
+			add(adapters.LiveCheck{
+				Name:   "hybrid-time replication slots",
+				OK:     lsnTypes == "on" && hasNow,
+				Detail: fmt.Sprintf("yb_allow_replication_slot_lsn_types = %s, yb_get_current_hybrid_time_lsn() %s", orUnset(lsnTypes), map[bool]string{true: "available", false: "missing"}[hasNow]),
+				Fix:    "XferDB tells when the target has caught up by the hybrid time of each change: it needs a YugabyteDB release with HYBRID_TIME replication slots, and the gflag ysql_yb_allow_replication_slot_lsn_types=true on every tserver",
+			})
+		}
+	}
+
 	var walLevel string
 	if query("wal_level = logical", `SHOW wal_level`, []any{&walLevel}) {
 		add(adapters.LiveCheck{
@@ -194,6 +210,21 @@ func (s *Source) LiveChecks(ctx context.Context, tables []string) ([]adapters.Li
 	}
 
 	notOwned, tablesOK := s.tableChecks(ctx, tables, yb, superuser, add)
+
+	if yb {
+		// The heartbeats that move an idle stream along go to a small table
+		// XferDB creates in the connection's schema.
+		var canCreateTable bool
+		var schema string
+		if query("permission to create the heartbeat table", `SELECT current_schema(), has_schema_privilege(current_schema(), 'CREATE')`, []any{&schema, &canCreateTable}) {
+			add(adapters.LiveCheck{
+				Name:   "permission to create the heartbeat table",
+				OK:     canCreateTable,
+				Detail: fmt.Sprintf("CREATE on schema %s, for %s.%s", schema, schema, heartbeatTable),
+				Fix:    fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s; XferDB writes a heartbeat row there during the migration so it can tell when the target has caught up, and drops the table at the end", quote(schema), quote(user)),
+			})
+		}
+	}
 
 	var canCreate bool
 	if query("permission to create the publication", `SELECT has_database_privilege(current_database(), 'CREATE')`, []any{&canCreate}) {

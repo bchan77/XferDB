@@ -44,11 +44,13 @@ func TestLiveMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer src.Close()
+	// Closed after runLive's cleanups, which drop its tables and stream
+	// with it (a defer would close it before them).
+	t.Cleanup(func() { src.Close() })
 
 	t.Run("sqlite", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "target.db")
-		runLive(t, dsn, src, map[string]any{"type": "sqlite", "dsn": path}, func(t *testing.T) *sql.DB {
+		runLive(t, "postgres", dsn, src, map[string]any{"type": "sqlite", "dsn": path}, func(t *testing.T) *sql.DB {
 			db, err := sql.Open("sqlite3", path)
 			if err != nil {
 				t.Fatal(err)
@@ -65,7 +67,67 @@ func TestLiveMigration(t *testing.T) {
 		mustExecDB(t, src, `CREATE DATABASE `+name)
 		t.Cleanup(func() { src.Exec(`DROP DATABASE IF EXISTS ` + name + ` WITH (FORCE)`) })
 		tgtDSN := withDatabase(t, dsn, name)
-		runLive(t, dsn, src, map[string]any{"type": "postgres", "dsn": tgtDSN}, func(t *testing.T) *sql.DB {
+		runLive(t, "postgres", dsn, src, map[string]any{"type": "postgres", "dsn": tgtDSN}, func(t *testing.T) *sql.DB {
+			db, err := sql.Open("postgres", tgtDSN)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return db
+		}, func(db *sql.DB, index string) bool {
+			var n int
+			db.QueryRow(`SELECT count(*) FROM pg_indexes WHERE indexname = $1`, index).Scan(&n)
+			return n == 1
+		}, func(db *sql.DB, table string) bool {
+			var n int
+			db.QueryRow(`SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND conrelid = to_regclass($1)`, table).Scan(&n)
+			return n == 1
+		}, func(db *sql.DB, table string) int64 {
+			var v int64
+			if err := db.QueryRow(`SELECT nextval(pg_get_serial_sequence($1, 'id'))`, table).Scan(&v); err != nil {
+				t.Fatalf("nextval on the target: %v", err)
+			}
+			return v
+		})
+	})
+}
+
+// TestLiveMigrationYugabyte is TestLiveMigration from a YugabyteDB source
+// (#158): catch-up and cutover end by hybrid-time positions and heartbeats.
+// The targets are a SQLite file and a new database on the same YugabyteDB
+// cluster, whose schema pg_dump copies. Needs XFERDB_TEST_YB, a YugabyteDB
+// DSN (yugabyte:// or postgres://).
+func TestLiveMigrationYugabyte(t *testing.T) {
+	dsn := os.Getenv("XFERDB_TEST_YB")
+	if dsn == "" {
+		t.Skip("XFERDB_TEST_YB not set; skipping YugabyteDB live migration API test")
+	}
+	pgDSN := "postgres://" + strings.TrimPrefix(dsn, "yugabyte://")
+	src, err := sql.Open("postgres", pgDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { src.Close() })
+
+	t.Run("sqlite", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "target.db")
+		runLive(t, "yugabyte", dsn, src, map[string]any{"type": "sqlite", "dsn": path}, func(t *testing.T) *sql.DB {
+			db, err := sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return db
+		}, func(db *sql.DB, index string) bool {
+			var n int
+			db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&n)
+			return n == 1
+		}, nil, nil)
+	})
+	t.Run("yugabyte", func(t *testing.T) {
+		name := fmt.Sprintf("xferdb_live_tgt_%d", time.Now().UnixNano())
+		mustExecDB(t, src, `CREATE DATABASE `+name)
+		t.Cleanup(func() { src.Exec(`DROP DATABASE IF EXISTS ` + name + ` WITH (FORCE)`) })
+		tgtDSN := withDatabase(t, pgDSN, name)
+		runLive(t, "yugabyte", dsn, src, map[string]any{"type": "yugabyte", "dsn": tgtDSN}, func(t *testing.T) *sql.DB {
 			db, err := sql.Open("postgres", tgtDSN)
 			if err != nil {
 				t.Fatal(err)
@@ -93,7 +155,7 @@ func TestLiveMigration(t *testing.T) {
 // target; nextval, when set, draws the next value of a table's id sequence
 // there. A SQLite target has neither: its foreign keys are declared, not
 // enforced, from the start, and it keeps no sequences.
-func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, openTarget func(*testing.T) *sql.DB,
+func runLive(t *testing.T, srcType, srcDSN string, src *sql.DB, target map[string]any, openTarget func(*testing.T) *sql.DB,
 	hasIndex func(*sql.DB, string) bool, hasFK func(*sql.DB, string) bool, nextval func(*sql.DB, string) int64) {
 	ctx := context.Background()
 	suffix := fmt.Sprint(time.Now().UnixNano())
@@ -107,6 +169,10 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 	kids := "live_kids_" + suffix
 	mustExecDB(t, src, `CREATE TABLE `+kids+` (id serial PRIMARY KEY, note_id bigint REFERENCES `+notes+` (id) ON DELETE CASCADE, label text)`)
 	t.Cleanup(func() { src.Exec(`DROP TABLE IF EXISTS ` + kids + `, ` + items + `, ` + notes) })
+	// PostgreSQL's default already; YugabyteDB's, CHANGE, can't be streamed.
+	for _, table := range []string{items, notes, kids} {
+		mustExecDB(t, src, `ALTER TABLE `+table+` REPLICA IDENTITY DEFAULT`)
+	}
 	mustExecDB(t, src, `INSERT INTO `+items+` SELECT (ARRAY['a','b','c'])[i % 3 + 1], i, 'row' || i, NULL, 'e' || i FROM generate_series(0, 2999) i`)
 	mustExecDB(t, src, `INSERT INTO `+notes+` SELECT i, 'note' || i FROM generate_series(0, 2999) i`)
 	mustExecDB(t, src, `INSERT INTO `+kids+` (note_id, label) SELECT i, 'kid' || i FROM generate_series(0, 2999, 3) i`)
@@ -133,7 +199,7 @@ func runLive(t *testing.T, srcDSN string, src *sql.DB, target map[string]any, op
 	}
 	post(t, hs.URL+"/api/v1/projects", map[string]any{
 		"name":          "live-" + suffix,
-		"source_config": map[string]any{"type": "postgres", "dsn": srcDSN},
+		"source_config": map[string]any{"type": srcType, "dsn": srcDSN},
 		"target_config": target,
 	}, http.StatusCreated, &p)
 
@@ -301,7 +367,9 @@ func waitLive(t *testing.T, hs *httptest.Server, id, what string, cond func(live
 // waitMigration waits for a migration to reach status.
 func waitMigration(t *testing.T, hs *httptest.Server, id, status string) {
 	t.Helper()
-	deadline := time.Now().Add(90 * time.Second)
+	// Cutover drops the slot, which YugabyteDB refuses for up to a minute
+	// after the stream stops.
+	deadline := time.Now().Add(180 * time.Second)
 	var l liveMig
 	for time.Now().Before(deadline) {
 		l = liveMig{}
@@ -313,6 +381,9 @@ func waitMigration(t *testing.T, hs *httptest.Server, id, status string) {
 			t.Fatalf("migration %s: %s", l.Status, l.Error)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	if c := l.Live.Cutover; c != nil {
+		t.Fatalf("timed out waiting for %s: %+v; cutover %+v", status, l, *c)
 	}
 	t.Fatalf("timed out waiting for %s: %+v", status, l)
 }
@@ -459,7 +530,7 @@ func TestLiveMigrationResumesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer src.Close()
+	t.Cleanup(func() { src.Close() }) // after the cleanups that use it
 	table := fmt.Sprintf("live_resume_%d", time.Now().UnixNano())
 	mustExecDB(t, src, `CREATE TABLE `+table+` (id int PRIMARY KEY, body text)`)
 	t.Cleanup(func() { src.Exec(`DROP TABLE IF EXISTS ` + table) })
@@ -536,7 +607,7 @@ func TestLiveMigrationResumesSnapshot(t *testing.T) {
 // for a moment after its worker stops, and an active slot can't be dropped.
 func dropStream(src *sql.DB, id string) {
 	name := postgres.SlotName(id)
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 800; i++ { // YugabyteDB holds a slot active for 60s
 		var active sql.NullBool
 		if err := src.QueryRow(`SELECT active FROM pg_replication_slots WHERE slot_name = $1`, name).Scan(&active); err == sql.ErrNoRows {
 			break
@@ -548,4 +619,7 @@ func dropStream(src *sql.DB, id string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	src.Exec(`DROP PUBLICATION IF EXISTS ` + name)
+	// A YugabyteDB source's heartbeat row, and the table once it's empty.
+	src.Exec(`DELETE FROM xferdb_heartbeat WHERE stream = $1`, name)
+	src.Exec(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM xferdb_heartbeat) THEN DROP TABLE xferdb_heartbeat; END IF; END $$`)
 }
