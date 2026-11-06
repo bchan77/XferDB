@@ -81,6 +81,11 @@ How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `
   metrics `xferdb_cdc_source_retained_bytes` and `xferdb_cdc_schema_change_paused`.
 
 ### Fixed
+- **A YugabyteDB target gets its primary keys before the copy, not after.** The pg_dump schema copy
+  added primary keys with the rest of post-data, after the rows were in. YugabyteDB stores a
+  table's rows in primary key order, so adding one to a loaded table rewrites the whole table (a
+  1M-row table spent minutes in *post-schema*). On a `yugabyte` target the primary keys now go in
+  right after the tables are created, while they are empty; the later post-data step skips them.
 - **The live readiness check no longer hangs or hides results (#158).** Each check runs on its own
   with a 15-second limit per query: one the source fails or doesn't answer fails that check, and
   the others are still reported (before, the first failing query replaced every result with a
