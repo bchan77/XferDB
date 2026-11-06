@@ -8,6 +8,14 @@ Live migration (#102) ships as a **beta**: labelled so in the web UI, the CLI an
 How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `xferdb migrate --preflight --live` runs the live readiness checks from the CLI.
 
 ### Added
+- **Leftover live migration streams are found and can be dropped.** A replication slot or
+  publication named like a live migration's that no migration still running on this server owns
+  (its cancel couldn't reach the source, the server stopped mid-teardown, or the migration was
+  deleted) is a warning in the live readiness check and is listed under *Settings → Live
+  Migration* with a *Drop* button; `xferdb leftovers [drop NAME]` and
+  `GET`/`DELETE /api/v1/projects/:id/live-streams[/:name]` do the same. Never dropped
+  automatically, since another XferDB server on the same source owns streams this one doesn't
+  know, and never while a running migration owns it or its slot is in use.
 - **Live migration from YugabyteDB (#158; beta).** A `yugabyte` source can now be migrated live, to
   any target. XferDB creates its replication slot with hybrid-time positions
   (`yb_lsn_type = HYBRID_TIME`), compares them with `yb_get_current_hybrid_time_lsn()` to tell

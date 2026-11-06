@@ -345,13 +345,14 @@ xferdb migrate --status
 # View recorded stats history after migration completes
 xferdb migrate --history
 
-# Live migration (beta, PostgreSQL sources): copy, then stream changes until cutover.
+# Live migration (beta, PostgreSQL and YugabyteDB sources): copy, then stream changes until cutover.
 # Guide: docs/LIVE_MIGRATION.md
 xferdb migrate --preflight --live         # check the source and target can do it
 xferdb migrate --live
 xferdb migrate --live --until-streaming   # return once it streams, for scripts
 xferdb cutover                            # stop writes to the source first
 xferdb resume                             # after a pause, e.g. at a schema change
+xferdb leftovers [drop NAME]              # streams left on the source by ended migrations
 
 # Cancel the running migration (keeps history, preserves checkpoints)
 xferdb migrate --cancel

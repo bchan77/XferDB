@@ -796,7 +796,54 @@ function renderLiveChecks(live) {
         : `Not ready for live migration: ${failing} check${failing === 1 ? '' : 's'} failing.`}</span>
     </div>
     <div class="card"><table class="kv live-checks">${rows}</table></div>
+    ${renderLeftovers(live.leftovers)}
   `;
+}
+
+// renderLeftovers lists live migration streams on the source that no running
+// migration owns, each with a Drop button. Never dropped automatically:
+// another XferDB server using the same source would own streams this one
+// doesn't know.
+function renderLeftovers(leftovers) {
+  if (!leftovers || !leftovers.length) return '';
+  const rows = leftovers.map((s) => {
+    const parts = [s.slot && 'replication slot', s.publication && 'publication', s.heartbeat && 'heartbeat row'].filter(Boolean);
+    const held = s.retained_bytes != null ? ` · holds ${fmtBytes(s.retained_bytes)} of WAL` : '';
+    const drop = s.active
+      ? '<span class="hint">in use: can\'t drop</span>'
+      : `<button class="btn danger" data-drop-stream="${esc(s.name)}">Drop</button>`;
+    return `<tr data-leftover="${esc(s.name)}">
+      <td><strong>${esc(s.name)}</strong>
+        <div class="hint">${esc(parts.join(', '))}${esc(held)}</div>
+        <div class="hint">${esc(s.reason)}${s.project_name ? ` (project ${esc(s.project_name)})` : ''}</div></td>
+      <td style="text-align:right">${drop}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <h3 style="margin-top:16px">Leftover streams on the source</h3>
+    <p class="hint">The source keeps every change for a replication slot until it is dropped. Drop one only if no other XferDB server uses it.</p>
+    <div class="card"><table class="kv live-leftovers">${rows}</table></div>
+  `;
+}
+
+async function dropLeftover(id, name) {
+  const ok = await confirmModal({
+    title: `Drop ${name}?`,
+    body: `This drops the replication slot, publication and heartbeat named ${name} from the source. A migration still using them (on another XferDB server) can't go on afterwards.`,
+    confirmLabel: 'Drop',
+    danger: true,
+  });
+  if (!ok) return;
+  const area = document.getElementById('liveCheckArea');
+  area.querySelectorAll('[data-drop-stream]').forEach((b) => { b.disabled = true; });
+  try {
+    await api.dropLiveStream(id, name);
+  } catch (err) {
+    area.insertAdjacentHTML('afterbegin', errorBanner(`Couldn't drop ${name}: ${err.message}`));
+    area.querySelectorAll('[data-drop-stream]').forEach((b) => { b.disabled = false; });
+    return;
+  }
+  runLiveCheck(id);
 }
 
 async function runLiveCheck(id) {
@@ -809,6 +856,9 @@ async function runLiveCheck(id) {
     area.innerHTML = result.live
       ? renderLiveChecks(result.live)
       : errorBanner('The server did not return live migration checks; it may be older than this page.');
+    area.querySelectorAll('[data-drop-stream]').forEach((b) => {
+      b.addEventListener('click', () => dropLeftover(id, b.dataset.dropStream));
+    });
   } catch (err) {
     area.innerHTML = errorBanner('Live migration check failed: ' + err.message, { retry: () => runLiveCheck(id) });
   }

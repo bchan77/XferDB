@@ -47,6 +47,9 @@ export const api = {
   createDatabase: (body) => req('POST', '/api/v1/connections/create-database', body),
 
   createTargetDatabase: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/target-database`),
+  listLiveStreams: (id) => req('GET', `/api/v1/projects/${encodeURIComponent(id)}/live-streams`),
+  dropLiveStream: (id, name) =>
+    req('DELETE', `/api/v1/projects/${encodeURIComponent(id)}/live-streams/${encodeURIComponent(name)}`),
   // mode 'live' adds the live-migration checks (#102).
   preflight: (id, mode) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/preflight`, mode ? { mode } : undefined),
   analyze: (id, body) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/analyze`, body || {}),
