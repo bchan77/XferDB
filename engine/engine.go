@@ -125,13 +125,15 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	// Register every source table in the project registry (INSERT OR IGNORE) so
 	// --status always shows the full DB picture regardless of which tables this
-	// specific migration touches.
+	// specific migration touches, and drop the records of tables the source no
+	// longer has.
 	{
 		names := make([]string, len(allTables))
 		for i, t := range allTables {
 			names[i] = t.Name
 		}
 		e.db.RegisterProjectTables(ctx, e.project.ID, names) //nolint:errcheck
+		e.db.PruneProjectTables(ctx, e.project.ID, names)    //nolint:errcheck
 	}
 
 	tables := allTables

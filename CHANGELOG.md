@@ -86,6 +86,13 @@ How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `
   table's rows in primary key order, so adding one to a loaded table rewrites the whole table (a
   1M-row table spent minutes in *post-schema*). On a `yugabyte` target the primary keys now go in
   right after the tables are created, while they are empty; the later post-data step skips them.
+- **Tables gone from the source no longer stay in a project's table list, or in a run's total.** A
+  project keeps a record of every source table with its last result; a table dropped from the
+  source (or a project pointed at a new database) stayed listed forever, as *pending* in every
+  later migration, and its rows were added to the migration's total, so progress stopped short of
+  100% (48% for a fully copied run) and the ETA was too long. Each run now drops the records of
+  tables the source no longer has, and a migration's row total counts only its own tables: those
+  outside its scope are still listed, but no longer counted, so a `--tables` run also reaches 100%.
 - **The live readiness check no longer hangs or hides results (#158).** Each check runs on its own
   with a 15-second limit per query: one the source fails or doesn't answer fails that check, and
   the others are still reported (before, the first failing query replaced every result with a

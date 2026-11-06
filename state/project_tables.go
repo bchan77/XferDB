@@ -33,6 +33,30 @@ func (m *MetaDB) RegisterProjectTables(ctx context.Context, projectID string, ta
 	return nil
 }
 
+// PruneProjectTables removes the project's table records for tables not in
+// tableNames, the source's tables as just listed: a table dropped from the
+// source, or a project pointed at a different database, would otherwise
+// stay listed (and counted) forever.
+func (m *MetaDB) PruneProjectTables(ctx context.Context, projectID string, tableNames []string) error {
+	existing, err := m.GetProjectTables(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	keep := make(map[string]bool, len(tableNames))
+	for _, n := range tableNames {
+		keep[n] = true
+	}
+	for _, t := range existing {
+		if keep[t.TableName] {
+			continue
+		}
+		if _, err := m.db.ExecContext(ctx, `DELETE FROM project_tables WHERE project_id = ? AND table_name = ?`, projectID, t.TableName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // UpdateProjectTableStatus upserts the status for a single table in the project
 // registry. Called when a migration starts, completes, or fails a table.
 func (m *MetaDB) UpdateProjectTableStatus(ctx context.Context, projectID, tableName, status, migrationID string, rowsTransferred, rowsTotal int64) error {
