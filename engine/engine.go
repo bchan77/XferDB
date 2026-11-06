@@ -195,6 +195,15 @@ func (e *Engine) Run(ctx context.Context) error {
 				return e.fail(ctx, fmt.Errorf("pg_dump pre-data: %w", err))
 			}
 			nativeSchema = ok
+			// YugabyteDB stores a table's rows in primary key order, so a key
+			// added after the copy rewrites the whole table; added now, to
+			// the empty tables, it costs nothing. Post-data later skips the
+			// keys that are already there.
+			if ok && e.project.TargetConfig.Type == adapters.TypeYugabyte {
+				if _, err := e.pgDumpPostData(ctx, e.project.SourceConfig, e.project.TargetConfig, isPrimaryKey); err != nil {
+					return e.fail(ctx, fmt.Errorf("primary keys before the copy: %w", err))
+				}
+			}
 		}
 
 		if !nativeSchema {

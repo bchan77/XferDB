@@ -149,6 +149,11 @@ func (e *Engine) pgDumpPostData(ctx context.Context, src, tgt adapters.Connectio
 	return true, execErr
 }
 
+// isPrimaryKey reports whether a post-data block adds a primary key.
+func isPrimaryKey(b ddlBlock) bool {
+	return b.Type == "CONSTRAINT" && strings.Contains(strings.ToUpper(b.SQL), "PRIMARY KEY")
+}
+
 // alreadyExists reports a PostgreSQL error for creating an object that is
 // already there: a relation or index (42P07), a constraint or trigger
 // (42710), or a second primary key (42P16).
