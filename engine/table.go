@@ -13,8 +13,15 @@ import (
 
 const defaultBatchSize = 1000
 
-// transferTable is the dispatcher: sequential for SegmentWorkers<=1, parallel otherwise.
+// transferTable is the dispatcher: by hash ranges for a hash-sharded
+// YugabyteDB table, by key for a live snapshot, otherwise sequential for
+// SegmentWorkers<=1 and parallel above.
 func (e *Engine) transferTable(ctx context.Context, sourceSchema adapters.TableSchema) error {
+	// A hash-sharded YugabyteDB table: by hash-code ranges, in parallel
+	// (hashrange.go), for a live snapshot as for any other.
+	if cols, hrs := e.hashRangeColumns(ctx, sourceSchema.Name); hrs != nil {
+		return e.transferTableHashRanges(ctx, sourceSchema, hrs, cols)
+	}
 	if e.live != nil {
 		return e.transferTableKeyset(ctx, sourceSchema)
 	}

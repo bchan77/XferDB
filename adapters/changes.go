@@ -304,3 +304,20 @@ type LiveStreamLister interface {
 	LiveStreams(ctx context.Context) ([]LiveStream, error)
 	DropLiveStream(ctx context.Context, name string) error
 }
+
+// HashSpace is the range of YugabyteDB's yb_hash_code(): [0, HashSpace).
+const HashSpace = 65536
+
+// HashRangeSource is implemented by sources whose tables may be
+// hash-sharded (YugabyteDB). A hash-sharded table has no cheap key order:
+// paging it by key scans and sorts the rest of the table for every page.
+// Read by ranges of its hash code instead, each range is an index range
+// read, and ranges can be read in parallel.
+type HashRangeSource interface {
+	// HashColumns returns the hash columns of table's primary key, or nil
+	// when it isn't hash-sharded.
+	HashColumns(ctx context.Context, table string) ([]string, error)
+	// ReadHashRange returns every row whose hash code over cols is in
+	// [lo, hi), with values as ReadBatch returns them.
+	ReadHashRange(ctx context.Context, table string, cols []string, lo, hi int) (*Batch, error)
+}
