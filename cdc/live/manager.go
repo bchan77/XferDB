@@ -63,6 +63,8 @@ type Status struct {
 	LagBytes   int64    `json:"lag_bytes"`
 	LagChanges uint64   `json:"lag_changes"`
 	LagSeconds *float64 `json:"lag_seconds,omitempty"`
+	// ChangesPerSec is the rate apply wrote changes over the last minute.
+	ChangesPerSec *float64 `json:"changes_per_sec,omitempty"`
 	// BehindSeconds replaces LagBytes for a source whose positions are
 	// times (YugabyteDB): how far capture is behind the source, in time.
 	BehindSeconds *float64 `json:"behind_seconds,omitempty"`
@@ -139,6 +141,38 @@ type run struct {
 	cutoverCancel context.CancelFunc
 	// captureDown is when capture was first seen not running, if it isn't.
 	captureDown time.Time
+	// applied is apply's ChangesApplied over the last rateWindow, for the
+	// change rate.
+	applied []appliedSample
+}
+
+type appliedSample struct {
+	at    time.Time
+	total int64
+}
+
+// rateWindow is how far back the change rate looks.
+const rateWindow = time.Minute
+
+// changeRate records apply's total so far and returns the changes applied
+// per second over the last rateWindow, or nil until it has two samples.
+func (r *run) changeRate(now time.Time, total int64) *float64 {
+	r.applied = append(r.applied, appliedSample{now, total})
+	cut := 0
+	for cut < len(r.applied)-1 && now.Sub(r.applied[cut].at) > rateWindow {
+		cut++
+	}
+	r.applied = r.applied[cut:]
+	first := r.applied[0]
+	secs := now.Sub(first.at).Seconds()
+	if len(r.applied) < 2 || secs <= 0 {
+		return nil
+	}
+	rate := float64(total-first.total) / secs
+	if rate < 0 { // apply restarted without its saved counts
+		rate = 0
+	}
+	return &rate
 }
 
 type backoff struct {
@@ -595,6 +629,9 @@ func (m *Manager) check(ctx context.Context, r *run, src cdc.ChangeSource, log *
 		r.lastApply = st.Apply
 	}
 	applied := r.lastApply
+	if applied != nil {
+		st.ChangesPerSec = r.changeRate(time.Now(), applied.ChangesApplied)
+	}
 	r.mu.Unlock()
 	if st.Capture != nil && applied != nil {
 		if st.Capture.QueuedSeq > applied.AppliedSeq {

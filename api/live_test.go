@@ -255,11 +255,17 @@ func runLive(t *testing.T, srcType, srcDSN string, src *sql.DB, target map[strin
 	mustExecDB(t, src, `INSERT INTO `+items+` VALUES ('zz', -1, 'done', NULL, 'marker')`)
 	tgt := openTarget(t)
 	defer tgt.Close()
-	waitLive(t, hs, m.ID, "the last change to apply", func(l liveMig) bool {
+	streamed := waitLive(t, hs, m.ID, "the last change to apply", func(l liveMig) bool {
 		var n int
 		tgt.QueryRow(`SELECT count(*) FROM ` + items + ` WHERE email = 'marker'`).Scan(&n)
 		return n == 1 && l.Live.LagChanges == 0
 	})
+	// What the stream applied, per table and kind (the writer inserts,
+	// updates and deletes items), and its rate.
+	if a := streamed.Live.Apply; a == nil || a.Tables[items].Inserts == 0 || a.Tables[items].Updates == 0 ||
+		a.Tables[items].Deletes == 0 || a.Tables[items].LastAt == "" || streamed.Live.ChangesPerSec == nil {
+		t.Errorf("stream activity = %+v, rate %v", streamed.Live.Apply, streamed.Live.ChangesPerSec)
+	}
 
 	compare := func(table, q string) {
 		t.Helper()
@@ -334,7 +340,16 @@ type liveMig struct {
 	Phase  string `json:"phase"`
 	Error  string `json:"error"`
 	Live   struct {
-		LagChanges   uint64 `json:"lag_changes"`
+		LagChanges    uint64   `json:"lag_changes"`
+		ChangesPerSec *float64 `json:"changes_per_sec"`
+		Apply         *struct {
+			Tables map[string]struct {
+				Inserts int64  `json:"inserts"`
+				Updates int64  `json:"updates"`
+				Deletes int64  `json:"deletes"`
+				LastAt  string `json:"last_applied_at"`
+			} `json:"tables"`
+		} `json:"apply"`
 		CaptureError string `json:"capture_error"`
 		ApplyError   string `json:"apply_error"`
 		Cutover      *struct {

@@ -50,6 +50,8 @@ type ApplyStatus struct {
 	ChangesApplied int64     `json:"changes_applied"`
 	Batches        int64     `json:"batches"`
 	LastBatchAt    time.Time `json:"last_batch_at,omitempty"`
+	// Tables is what apply has done to each table (activity.go).
+	Tables map[string]TableActivity `json:"tables,omitempty"`
 	// Blocked is the schema change apply has stopped at, waiting for it to
 	// be accepted: every change before it is applied, none after it.
 	Blocked *SchemaChange `json:"blocked,omitempty"`
@@ -123,14 +125,17 @@ type Applier struct {
 	// accepted, to be applied past. Apply stops at any later one until it
 	// is; without SchemaAccepted it stops at every one.
 	SchemaAccepted func() uint64
+	// ActivityFile, when set, keeps the per-table counts across restarts.
+	ActivityFile string
 
 	// held is a change read ahead of a batch: a schema change, which goes
 	// in a batch of its own.
 	held *Change
 
-	mu     sync.Mutex
-	status ApplyStatus
-	total  atomic.Int64
+	mu       sync.Mutex
+	status   ApplyStatus
+	activity map[string]TableActivity
+	total    atomic.Int64
 }
 
 // Status returns a snapshot of the loop's progress.
@@ -139,6 +144,12 @@ func (a *Applier) Status() ApplyStatus {
 	defer a.mu.Unlock()
 	s := a.status
 	s.ChangesApplied = a.total.Load()
+	if len(a.activity) > 0 {
+		s.Tables = make(map[string]TableActivity, len(a.activity))
+		for t, act := range a.activity {
+			s.Tables[t] = act
+		}
+	}
 	return s
 }
 
@@ -146,6 +157,9 @@ func (a *Applier) Status() ApplyStatus {
 func (a *Applier) Run(ctx context.Context) error {
 	a.Opts.defaults()
 	if err := a.Target.PrepareChangeState(ctx); err != nil {
+		return err
+	}
+	if err := a.loadActivity(); err != nil {
 		return err
 	}
 	applied, err := a.Target.AppliedSeqs(ctx, a.Stream)
@@ -327,7 +341,7 @@ func (a *Applier) applyBatch(ctx context.Context, batch []Change, applied map[st
 	a.status.Batches++
 	a.status.LastBatchAt = time.Now()
 	a.mu.Unlock()
-	return nil
+	return a.saveActivity()
 }
 
 // applyTable applies one table's changes, in order, in one transaction with
@@ -436,6 +450,7 @@ func (a *Applier) applyTable(ctx context.Context, table string, changes []Change
 		return fmt.Errorf("%s: commit: %w", table, err)
 	}
 	a.total.Add(int64(len(changes)))
+	a.noteActivity(table, changes)
 	return nil
 }
 
