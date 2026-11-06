@@ -13,14 +13,17 @@ package validate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/adapters/mongo"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"gitea.homelab.local/nextdevops/XferDB/state"
+	"github.com/lib/pq"
 )
 
 // Levels, cheapest first. L1 and L2 each run only on a table that passed the
@@ -208,19 +211,56 @@ func (s *Session) Close() {
 	s.tgt.Close()
 }
 
+// validateTable validates one table, trying again when a read failed on an
+// error the database says is worth retrying: YugabyteDB reports a table whose
+// schema changed under a connection's cache (just after its indexes were
+// created) as SQLSTATE 40001, "schema version mismatch". The whole table is
+// validated again, as a fingerprint can't resume halfway.
 func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string, tr *tracker) state.ValidationTable {
+	var res state.ValidationTable
+	for attempt := 0; ; attempt++ {
+		var transient bool
+		res, transient = validateAttempt(ctx, src, tgt, table, level, batchSize, sample, plan, isMongo, targetType, tr)
+		if !transient || attempt >= len(retryDelays) {
+			return res
+		}
+		select {
+		case <-ctx.Done():
+			return res
+		case <-time.After(retryDelays[attempt]):
+		}
+	}
+}
+
+// retryDelays are the waits before each retry of a table that failed on a
+// transient error.
+var retryDelays = []time.Duration{time.Second, 3 * time.Second, 10 * time.Second}
+
+// isTransient reports an error a retry may not hit: SQLSTATE 40001
+// (serialization failure, YugabyteDB's schema version mismatch and restart
+// read) or 40P01 (deadlock).
+func isTransient(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "40001" || pqErr.Code == "40P01"
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "(40001)") || strings.Contains(msg, "schema version mismatch")
+}
+
+func validateAttempt(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string, tr *tracker) (res state.ValidationTable, transient bool) {
 	tr.step(StepCounting)
 	// LevelRun starts at what L1/L2 reach; L3 raises it only if it runs.
 	runLevel := level
 	if level == LevelL3 {
 		runLevel = LevelL2
 	}
-	res := state.ValidationTable{TableName: table, LevelRun: runLevel, Result: state.ValidationFail}
+	res = state.ValidationTable{TableName: table, LevelRun: runLevel, Result: state.ValidationFail}
 
 	srcSchema, err := src.GetSchema(ctx, table)
 	if err != nil {
 		res.Detail = fmt.Sprintf("read source schema: %v", err)
-		return res
+		return res, isTransient(err)
 	}
 	// The source's own types, before the plan's overrides replace them: a
 	// narrowing override is converted by the target as it stores each value.
@@ -239,7 +279,7 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 			err = fmt.Errorf("table not found")
 		}
 		res.Detail = fmt.Sprintf("read target schema: %v", err)
-		return res
+		return res, isTransient(err)
 	}
 
 	cols, problems := align(srcSchema, tgtSchema)
@@ -258,18 +298,18 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 	srcRows, err := src.GetRowCount(ctx, table)
 	if err != nil {
 		res.Detail = fmt.Sprintf("count source rows: %v", err)
-		return res
+		return res, isTransient(err)
 	}
 	tgtRows, err := tgt.GetRowCount(ctx, table)
 	if err != nil {
 		res.Detail = fmt.Sprintf("count target rows: %v", err)
-		return res
+		return res, isTransient(err)
 	}
 	res.SourceRows, res.TargetRows = &srcRows, &tgtRows
 
 	if len(problems) > 0 {
 		res.Detail = strings.Join(problems, "; ")
-		return res
+		return res, false
 	}
 	if srcRows != tgtRows {
 		res.Detail = fmt.Sprintf("row counts differ: source has %d, target has %d", srcRows, tgtRows)
@@ -279,11 +319,11 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 			tr.step(StepRowDiff)
 			rowDiff(ctx, src, tgt, srcSchema, tgtSchema, cols, batchSize, sample, isMongo, &res)
 		}
-		return res
+		return res, false
 	}
 	if level == LevelL1 {
 		res.Result = state.ValidationPass
-		return res
+		return res, false
 	}
 
 	// L2: fingerprint every row on both sides.
@@ -298,7 +338,7 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		tr.row()
 	}); err != nil {
 		res.Detail = fmt.Sprintf("read source rows: %v", err)
-		return res
+		return res, isTransient(err)
 	}
 	tr.step(StepReadingTarget)
 	if err := scan(ctx, tgt, tgtSchema, batchSize, false, func(rec map[string]interface{}) {
@@ -306,7 +346,7 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		tr.row()
 	}); err != nil {
 		res.Detail = fmt.Sprintf("read target rows: %v", err)
-		return res
+		return res, isTransient(err)
 	}
 	res.SourceHash, res.TargetHash = srcFP.String(), tgtFP.String()
 	res.RowsChecked = srcFP.rows
@@ -336,7 +376,7 @@ func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, 
 		tr.step(StepRowDiff)
 		rowDiff(ctx, src, tgt, srcSchema, tgtSchema, cols, batchSize, sample, isMongo, &res)
 	}
-	return res
+	return res, false
 }
 
 // rowDiff runs L3 on a table that failed L1 or L2 and rewrites res with what

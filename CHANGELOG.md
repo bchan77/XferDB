@@ -90,6 +90,12 @@ How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `
   metrics `xferdb_cdc_source_retained_bytes` and `xferdb_cdc_schema_change_paused`.
 
 ### Fixed
+- **Validation retries a table that failed on a transient database error.** YugabyteDB reports a
+  read on a table whose schema just changed under the connection's cache (its indexes and
+  constraints had just been added) as SQLSTATE 40001, *schema version mismatch*, an error to retry.
+  The validator took it for a verdict: a YugabyteDB → YugabyteDB migration whose every row had
+  copied failed validation on one table. A table that fails on 40001 (or a 40P01 deadlock) is now
+  validated again, up to three more times, 1, 3 and 10 seconds apart.
 - **A YugabyteDB target gets its primary keys before the copy, not after.** The pg_dump schema copy
   added primary keys with the rest of post-data, after the rows were in. YugabyteDB stores a
   table's rows in primary key order, so adding one to a loaded table rewrites the whole table (a
