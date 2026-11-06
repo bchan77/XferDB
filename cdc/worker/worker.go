@@ -193,7 +193,8 @@ func runApply(ctx context.Context, dir string, spec *Spec, st Status) error {
 	opts := spec.Apply
 	opts.RemoveApplied = true
 	a := &cdc.Applier{Stream: spec.MigrationID, Dir: QueueDir(dir), Target: ap, Opts: opts,
-		SchemaAccepted: func() uint64 { return schemaAccepted(dir) }}
+		SchemaAccepted: func() uint64 { return schemaAccepted(dir) },
+		ActivityFile:   filepath.Join(dir, "activity.json")}
 	refetch, closeSrc, err := sourceRefetch(ctx, spec.Source)
 	if err != nil {
 		return err

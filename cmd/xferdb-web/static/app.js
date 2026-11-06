@@ -2006,15 +2006,28 @@ function liveStatusHTML(mig) {
   }
   const secs = l.lag_seconds == null ? '—' : (l.lag_seconds < 1 ? '< 1s' : fmtDuration(l.lag_seconds));
   const applied = l.apply ? fmtInt(l.apply.changes_applied) : '—';
+  const rate = l.changes_per_sec == null ? '' : `<div class="hint" data-stat="rate">${l.changes_per_sec < 0.05 ? '0' : l.changes_per_sec < 10 ? l.changes_per_sec.toFixed(1) : fmtInt(Math.round(l.changes_per_sec))}/s over the last minute</div>`;
+  // The table the stream last wrote to, with what it applied there.
+  let lastTable = null;
+  for (const [name, a] of Object.entries((l.apply && l.apply.tables) || {})) {
+    if (!lastTable || Date.parse(a.last_applied_at) > Date.parse(lastTable[1].last_applied_at)) lastTable = [name, a];
+  }
   body += `
     <div class="stat-grid live-lag">
       <div class="stat-box" data-stat="lag-changes"><div class="label">Changes to apply</div><div class="value">${fmtInt(l.lag_changes)}</div></div>
       <div class="stat-box" data-stat="lag-seconds"><div class="label">Apply lag</div><div class="value">${esc(secs)}</div></div>
       <div class="stat-box" data-stat="lag-bytes"><div class="label">Behind source</div><div class="value">${esc(l.behind_seconds != null ? (l.behind_seconds < 1 ? '< 1s' : fmtDuration(l.behind_seconds)) : fmtBytes(l.lag_bytes))}</div></div>
-      <div class="stat-box" data-stat="applied"><div class="label">Applied</div><div class="value">${applied}</div></div>
+      <div class="stat-box" data-stat="applied"><div class="label">Applied</div><div class="value">${applied}</div>${rate}</div>
       <div class="stat-box" data-stat="queue"><div class="label">Queue on disk</div><div class="value">${esc(fmtBytes(l.queue_bytes))}</div></div>
       ${l.retention ? `<div class="stat-box" data-stat="retained" title="WAL the source keeps for this migration's replication slot"><div class="label">WAL held on source</div><div class="value">${esc(fmtBytes(l.retention.retained_bytes))}</div></div>` : ''}
     </div>`;
+  if (lastTable) {
+    const [name, a] = lastTable;
+    const commit = a.last_commit_at ? ` (committed on the source at ${new Date(a.last_commit_at).toLocaleTimeString()})` : '';
+    body += `<div class="hint" data-last-change>Last change applied: ${esc(name)}, ${esc(fmtAgo(a.last_applied_at))}${esc(commit)}.</div>`;
+  } else if (!['setup', 'snapshot'].includes(phase)) {
+    body += `<div class="hint" data-last-change>No changes from the source yet: writes to the migrated tables show up here within a second or two.</div>`;
+  }
   if (phase === 'catch_up') {
     body += `<div class="hint">Catching up: replaying what was written during the copy, up to ${esc(l.catch_up_pos || 'the position recorded when it ended')}. Unique indexes are added once it is done.</div>`;
   } else if (phase === 'streaming' && mig.status !== 'paused' && !(l.cutover && l.cutover.running)) {
@@ -2555,7 +2568,29 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
 // Migration progress
 // ---------------------------------------------------------------------------
 
-function tableProgressRow(t) {
+// fmtAgo renders how long ago an ISO time was: "12s ago", "3m ago".
+function fmtAgo(iso) {
+  const t = Date.parse(iso);
+  if (!iso || Number.isNaN(t) || t <= 0) return '';
+  const secs = Math.max(0, (Date.now() - t) / 1000);
+  return secs < 1 ? 'just now' : `${fmtDuration(secs)} ago`;
+}
+
+// streamActivityHTML is what a live migration's stream has applied to one
+// table since the copy (cdc.TableActivity), for its row in the table list.
+function streamActivityHTML(a) {
+  if (!a) return '<div class="hint" data-stream>Streamed: no changes yet</div>';
+  const parts = [`${fmtInt(a.inserts)} insert${a.inserts === 1 ? '' : 's'}`,
+    `${fmtInt(a.updates)} update${a.updates === 1 ? '' : 's'}`,
+    `${fmtInt(a.deletes)} delete${a.deletes === 1 ? '' : 's'}`];
+  if (a.truncates) parts.push(`${fmtInt(a.truncates)} truncate${a.truncates === 1 ? '' : 's'}`);
+  const when = a.last_applied_at ? ` · last change ${fmtAgo(a.last_applied_at)}` : '';
+  return `<div class="hint" data-stream>Streamed: ${parts.join(' · ')}${esc(when)}</div>`;
+}
+
+// tableProgressRow renders one table of the copy; activity, for a live
+// migration, adds what its stream has applied since (undefined otherwise).
+function tableProgressRow(t, activity) {
   const pct = t.Total > 0 ? Math.round((t.Transferred * 100) / t.Total) : 0;
   const icons = { done: '✓', in_progress: '●', failed: '✗', cancelled: '–', pending: '·' };
   const icon = icons[t.Status] || '○';
@@ -2564,6 +2599,7 @@ function tableProgressRow(t) {
     <div class="table-progress-row">
       <div class="top"><span><span class="status-icon">${icon}</span>${esc(t.Name)}</span><span>${fmtInt(t.Transferred)} / ${fmtInt(t.Total)} (${pct}%)</span></div>
       <div class="progress-bar"><div class="fill ${fillClass}" style="width:${pct}%"></div></div>
+      ${activity !== undefined ? streamActivityHTML(activity) : ''}
       ${t.Error ? `<div class="err">${esc(t.Error)}</div>` : ''}
     </div>
   `;
@@ -2590,6 +2626,8 @@ async function renderMigrationProgress(migId) {
     <div id="validationArea"></div>
   `;
   const isLive = mig.mode === 'live';
+  // A live migration's latest state, refreshed on every tick (renderLive).
+  let liveMig = mig;
 
   let stopped = false;
   let timer = null;
@@ -2624,15 +2662,18 @@ async function renderMigrationProgress(migId) {
     const phaseLabel = snap.Phase === 'snapshot_done' ? 'copy done' : snap.Phase;
     const area = document.getElementById('progressArea');
     if (!area) return;
+    // Past the copy, each table also shows what the stream has applied.
+    const streaming = isLive && liveMig && !['setup', 'snapshot'].includes(liveMig.phase);
+    const streamTables = (streaming && liveMig.live && liveMig.live.apply && liveMig.live.apply.tables) || {};
     area.innerHTML = `
       ${snap.Phase === 'complete' ? '<div class="banner ok"><span>Migration complete.</span></div>' : ''}
       ${snap.Phase === 'failed' ? `<div class="banner error"><span>Migration failed.${snap.Errors && snap.Errors.length ? ' ' + esc(snap.Errors.join('; ')) : ''}</span></div>` : ''}
       ${snap.Phase === 'cancelled' ? '<div class="banner info"><span>Migration cancelled.</span></div>' : ''}
       <div class="stat-grid">
-        <div class="stat-box"><div class="label">${isLive ? 'Copy' : 'Phase'}</div><div class="value"><span class="badge ${phaseBadge}">${esc(phaseLabel)}</span></div></div>
-        <div class="stat-box"><div class="label">Elapsed</div><div class="value">${fmtDuration(snap.ElapsedSeconds)}</div></div>
-        <div class="stat-box"><div class="label">ETA</div><div class="value">${snap.ETASeconds ? fmtDuration(snap.ETASeconds) : '—'}</div></div>
-        <div class="stat-box"><div class="label">Rate</div><div class="value">${Math.round(rows.RatePerSecond || 0)}/s</div></div>
+        <div class="stat-box"><div class="label">${isLive ? 'Initial copy' : 'Phase'}</div><div class="value"><span class="badge ${phaseBadge}">${esc(phaseLabel)}</span></div></div>
+        <div class="stat-box"><div class="label">${isLive ? 'Copy elapsed' : 'Elapsed'}</div><div class="value">${fmtDuration(snap.ElapsedSeconds)}</div></div>
+        <div class="stat-box"><div class="label">${isLive ? 'Copy ETA' : 'ETA'}</div><div class="value">${snap.ETASeconds ? fmtDuration(snap.ETASeconds) : '—'}</div></div>
+        <div class="stat-box"><div class="label">${isLive ? 'Copy rate' : 'Rate'}</div><div class="value">${Math.round(rows.RatePerSecond || 0)}/s</div></div>
       </div>
       <div class="card">
         <strong>Resource Usage</strong>
@@ -2644,12 +2685,13 @@ async function renderMigrationProgress(migId) {
         </div>
       </div>
       <div class="card">
-        <strong>Rows: ${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</strong>
+        <strong>${isLive ? 'Rows copied' : 'Rows'}: ${fmtInt(rows.Transferred)} / ${fmtInt(rows.Total)} (${pct}%)</strong>
         <div class="progress-bar"><div class="fill ${snap.Phase === 'complete' || snap.Phase === 'snapshot_done' ? 'done' : snap.Phase === 'failed' ? 'failed' : snap.Phase === 'cancelled' ? 'cancelled' : ''}" style="width:${pct}%"></div></div>
       </div>
       <div class="card">
         <strong>Tables</strong>
-        ${(snap.TableDetails || []).map(tableProgressRow).join('') || '<div class="hint">No tables yet.</div>'}
+        ${streaming ? '<div class="hint">Rows copied by the initial copy; under each table, the changes the stream has applied to it since.</div>' : ''}
+        ${(snap.TableDetails || []).map((t) => tableProgressRow(t, streaming ? (streamTables[t.Name] || null) : undefined)).join('') || '<div class="hint">No tables yet.</div>'}
       </div>
       <details class="advanced" id="statsHistoryDetails" ${historyOpen ? 'open' : ''}>
         <summary>Stats History</summary>
@@ -2726,7 +2768,6 @@ async function renderMigrationProgress(migId) {
 
   // A live migration's stream, refreshed on every tick. Once the copy is
   // done its controls act on the stream, so they replace the copy's.
-  let liveMig = mig;
   function renderLive() {
     const el = document.getElementById('liveArea');
     if (el) el.innerHTML = `<strong>Live migration</strong> ${betaBadge()}${liveStatusHTML(liveMig)}`;

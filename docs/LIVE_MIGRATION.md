@@ -153,6 +153,12 @@ While it streams, the page shows:
 - **Behind source**: how far capture is behind the source's WAL.
 - **WAL held on source**: the WAL the source keeps for this migration.
 - **Queue on disk**: changes captured but not yet applied, on the XferDB server.
+- **Applied**: changes the stream has written to the target, with the rate over
+  the last minute, and the table it last wrote to and when.
+- Under each table in the table list: the inserts, updates and deletes the
+  stream has applied to it, and how long ago the last one was. The rows and
+  progress bars above them count the initial copy only, which is why the copy
+  cards are labelled *Initial copy*, *Copy elapsed* and *Copy rate*.
 
 If the XferDB server restarts, the workers keep running and the server picks
 the migration up again when it starts. A worker that crashes is restarted

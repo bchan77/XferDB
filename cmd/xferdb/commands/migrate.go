@@ -810,6 +810,7 @@ type liveMigration struct {
 		LagSeconds *float64 `json:"lag_seconds"`
 		// BehindSeconds replaces LagBytes for a YugabyteDB source.
 		BehindSeconds *float64 `json:"behind_seconds"`
+		ChangesPerSec *float64 `json:"changes_per_sec"`
 		QueueBytes    int64    `json:"queue_bytes"`
 		Apply         *struct {
 			ChangesApplied int64 `json:"changes_applied"`
@@ -939,6 +940,9 @@ func liveLine(m *liveMigration) string {
 	}
 	if l.Apply != nil {
 		line += fmt.Sprintf("  Applied: %s", fmtInt(l.Apply.ChangesApplied))
+		if l.ChangesPerSec != nil {
+			line += fmt.Sprintf(" (%.1f/s)", *l.ChangesPerSec)
+		}
 	}
 	if l.CaptureError != "" {
 		line += "  capture: " + l.CaptureError

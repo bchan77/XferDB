@@ -54,3 +54,21 @@ func TestWarnings(t *testing.T) {
 		t.Fatal("captureDown not reset once capture runs")
 	}
 }
+
+// The change rate is over the last minute, and nil until there are two
+// samples.
+func TestChangeRate(t *testing.T) {
+	r := &run{}
+	t0 := time.Now()
+	if got := r.changeRate(t0, 100); got != nil {
+		t.Fatalf("one sample: %v", *got)
+	}
+	if got := r.changeRate(t0.Add(10*time.Second), 150); got == nil || *got != 5 {
+		t.Fatalf("10s, 50 changes: %v", got)
+	}
+	// Two minutes later only the last minute counts.
+	r.changeRate(t0.Add(70*time.Second), 400)
+	if got := r.changeRate(t0.Add(130*time.Second), 400); got == nil || *got != 0 {
+		t.Fatalf("idle minute: %v", *got)
+	}
+}

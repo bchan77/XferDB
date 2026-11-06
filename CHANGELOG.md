@@ -8,6 +8,14 @@ Live migration (#102) ships as a **beta**: labelled so in the web UI, the CLI an
 How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `xferdb migrate --preflight --live` runs the live readiness checks from the CLI.
 
 ### Added
+- **A live migration shows what its stream is doing.** Once the copy is done, each table in the
+  migration page's list shows the inserts, updates and deletes the stream has applied to it and how
+  long ago the last one was; *Applied* shows the rate over the last minute, and a line names the
+  table last written to. The copy's cards are labelled *Initial copy*, *Copy elapsed*, *Copy rate*
+  and *Rows copied*, so they aren't read as the stream's. The counts survive an apply restart
+  (`activity.json` in the worker directory), so *Applied* no longer drops to 0 when apply is
+  restarted. API: `live.apply.tables` and `live.changes_per_sec` in `GET /migrations/:id`; the CLI
+  status line shows the rate.
 - **Leftover live migration streams are found and can be dropped.** A replication slot or
   publication named like a live migration's that no migration still running on this server owns
   (its cancel couldn't reach the source, the server stopped mid-teardown, or the migration was
