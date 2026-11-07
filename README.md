@@ -9,7 +9,7 @@
 | Database | Source | Target | Tested Versions |
 |----------|--------|--------|-----------------|
 | PostgreSQL | ✅ | ✅ | 14, 15, 16, 17 |
-| YugabyteDB | ✅ | ✅ | 2025.2.5.2 (manually verified as source and target; type `yugabyte`, or `postgres`) |
+| YugabyteDB | ✅ | ✅ | 2025.2, 2026.1 (type `yugabyte`; live migration source too) |
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
@@ -19,8 +19,8 @@
 
 ### Tested Migration Paths
 
-Most of these are the pairs covered by the automated compatibility matrix (53 cases against real
-Postgres/MySQL/MongoDB instances in Kubernetes, run on every push/PR touching Go code — see
+Most of these are the pairs covered by the automated compatibility matrix (71 cases against real
+Postgres/MySQL/MongoDB/YugabyteDB instances in Kubernetes, run on every push/PR touching Go code — see
 [`XferDB-jenkins`](https://gitea.homelab.local/nextdevops/XferDB-jenkins)). Every case also
 validates the result (L2, below), and each target has at least one case exercising
 `--bulk-copy`'s write path, not just the default one. Rows noted "manually verified" aren't
@@ -29,13 +29,16 @@ automated yet.
 | Source | Target | Status |
 |--------|--------|--------|
 | MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 24 cases (incl. polymorphic/compound `_id` and nested documents) |
-| MySQL (8.0, 8.4, 9.7, 26.7) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 17 cases |
-| PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 7 cases |
-| PostgreSQL 17 | MySQL 8.4 | ✅ Tested — 2 cases |
-| PostgreSQL 17 | SQLite | ✅ Tested — 2 cases |
-| MySQL 26.7 | SQLite | ✅ Tested — 1 case |
-| YugabyteDB 2025.2.5.2 | YugabyteDB 2025.2.5.2 | ✅ Manually verified (incl. a 1.2M-row table validated at L2) |
-| PostgreSQL | YugabyteDB 2025.2.5.2 | ✅ Manually verified. The automated case (pinned to the older 2024.2.11.0-b36) is disabled — it hangs during execution (`config/matrix.yaml`) — so this pairing isn't yet covered by CI |
+| MySQL (8.0, 8.4, 9.7, 26.7) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 18 cases |
+| PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 10 cases |
+| PostgreSQL (14, 17) | MySQL 8.4 | ✅ Tested — 4 cases |
+| PostgreSQL (15, 17) | SQLite | ✅ Tested — 4 cases |
+| MySQL 26.7 | SQLite | ✅ Tested — 2 cases |
+| MySQL 26.7 | MySQL 8.4 | ✅ Tested — 1 case |
+| YugabyteDB (2025.2, 2026.1) | PostgreSQL 17 | ✅ Tested — 2 cases |
+| YugabyteDB (2025.2, 2026.1) | SQLite | ✅ Tested — 2 cases (incl. a live migration from 2026.1) |
+| YugabyteDB (2025.2, 2026.1) | YugabyteDB 2026.1 | ✅ Tested — 2 cases (incl. a live migration from 2025.2); also manually verified with a 1.2M-row table validated at L2 |
+| PostgreSQL (16, 17) | YugabyteDB (2025.2, 2026.1) | ✅ Tested — 2 cases |
 | SQLite | PostgreSQL | Implemented; not yet covered by the automated compatibility matrix or an e2e test |
 
 ---
