@@ -4,10 +4,22 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
+Live migration (beta) and YugabyteDB as a database type of its own: copy a PostgreSQL or
+YugabyteDB source and keep the target following it until a guided cutover. Upgrading from 1.1.0
+needs no changes; projects that reach YugabyteDB as `postgres` keep working.
+
 Live migration (#102) ships as a **beta**: labelled so in the web UI, the CLI and the README until it has run against real workloads.
 How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `xferdb migrate --preflight --live` runs the live readiness checks from the CLI.
 
 ### Added
+- **Hash-sharded YugabyteDB tables are copied by hash range, in parallel.** A table whose primary
+  key starts with a `HASH` column was paged in key order, which YugabyteDB answers with a full scan
+  and sort per page, so a large table copied slowly and one at a time. Such a table is now split
+  into ranges of `yb_hash_code()` (which YugabyteDB reads efficiently), copied by the run's segment
+  workers in parallel, each range checkpointed, so a resumed migration skips the ranges already
+  done.
 - **A live migration shows what its stream is doing.** Once the copy is done, each table in the
   migration page's list shows the inserts, updates and deletes the stream has applied to it and how
   long ago the last one was; *Applied* shows the rate over the last minute, and a line names the
@@ -36,6 +48,12 @@ How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `
   active window. The readiness check adds hybrid-time slot support and `CREATE` on the schema for
   the heartbeat table. The pg_dump schema copy now covers `yugabyte` sources and targets too
   (leaving out the heartbeat table), as it did for YugabyteDB reached as `postgres`.
+- **YugabyteDB live migration: rows changed twice in one transaction.** The guide
+  ([docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md)) lists the tserver gflag
+  `cdc_enable_intra_transactional_before_image=true` (2025.2.4+) as a requirement when the
+  application updates or deletes a row it already changed in the same transaction; without it
+  capture stops at *Failed to get the beforeimage for tablet_id*. Readiness can't check it (SQL
+  can't read gflags).
 - **YugabyteDB adapter type (#158).** `yugabyte` is a source and target type of its own (web UI,
   `yugabyte://` DSNs, default port 5433), running the postgres adapter. Projects that reach
   YugabyteDB as `postgres` keep working unchanged. Its live readiness check shows what the source
@@ -90,6 +108,11 @@ How to use it, step by step: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md). `
   metrics `xferdb_cdc_source_retained_bytes` and `xferdb_cdc_schema_change_paused`.
 
 ### Fixed
+- **Negative workers or batch size are refused.** A project's transfer settings accepted negative
+  table workers, segment workers or batch size (the web UI's number fields also changed when
+  scrolled over, which is how a `-75` got saved; a run treated it as the default). Creating or
+  updating a project now rejects them, and a focused number field no longer changes when the page
+  is scrolled.
 - **Validation retries a table that failed on a transient database error.** YugabyteDB reports a
   read on a table whose schema just changed under the connection's cache (its indexes and
   constraints had just been added) as SQLSTATE 40001, *schema version mismatch*, an error to retry.
