@@ -28,10 +28,19 @@ For every value a config file can supply, highest wins:
 1. CLI flag (e.g. `--table-workers=4`), only when explicitly passed
 2. Environment variable (e.g. `XFERDB_TABLE_WORKERS=4`)
 3. Config file value
-4. Built-in default
+4. For `xferdb migrate`: the project's saved transfer settings (what
+   `project create --table-workers`/`--batch-size`, a config file's
+   `transfer.*` block or the web UI's run form saved for it)
+5. Built-in default
 
 This applies to `defaults.*` (consumed by `migrate` and `project create`) and
 to a project's own `transfer.*` block.
+
+`xferdb migrate` sends a project setting (table workers, segment workers, batch
+size, async pipeline, tables, OFFSET segments, accurate counts) only when one of
+1–3 gives it, and the server uses the project's saved value otherwise. Schema
+mode (`--recreate-schema`, `--truncate`) and `--bulk-copy` are chosen per run,
+as on the web UI's run form, and are never taken from the project.
 
 ## Environment variable expansion
 
