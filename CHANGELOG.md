@@ -4,6 +4,17 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Live migration readiness fails a table with a `DEFERRABLE` primary key (#176).** PostgreSQL
+  can't identify a row by a deferrable key, so such a table has no usable replica identity, and
+  once XferDB's publication included it every `UPDATE` and `DELETE` on it failed on the source
+  (*cannot update table … because it does not have a replica identity and publishes updates*)
+  until the live migration was cancelled. The readiness check passed it, since it read only the
+  replica identity setting. A new check, *a primary key that isn't DEFERRABLE*, now fails it and
+  names the key, so a live migration can't start with one. `REPLICA IDENTITY FULL` isn't offered
+  as the fix: XferDB's upserts can't use the deferrable key the schema copy gives a PostgreSQL
+  target either.
+
 ## [1.2.0] - 2026-11-09
 
 Live migration (beta) and YugabyteDB as a database type of its own: copy a PostgreSQL or

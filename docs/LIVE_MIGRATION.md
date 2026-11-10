@@ -34,6 +34,7 @@ writes, *cut over*, and point the applications at the target.
 | A login with the replication privilege | `ALTER ROLE xferdb REPLICATION;` (on RDS: `GRANT rds_replication TO xferdb;`) |
 | A free replication slot and WAL sender | XferDB uses one of each for the whole migration. Raise `max_replication_slots` / `max_wal_senders` (restart needed) if none are free. |
 | A primary key on every migrated table | Changes are applied by key. Leave tables without one out with `--tables`. |
+| A primary key that isn't `DEFERRABLE` | PostgreSQL can't identify rows by a deferrable key, so once the table is published its updates and deletes fail **on the source**, and XferDB's upserts can't use the key on a PostgreSQL target. Recreate it as an ordinary key: `ALTER TABLE <table> DROP CONSTRAINT <key>, ADD PRIMARY KEY (<columns>);` (drop and re-add any foreign keys that reference it), or leave the table out with `--tables`. A `DEFERRABLE` unique constraint on other columns is fine. |
 | A replica identity other than `NOTHING` | `DEFAULT` (the primary key, PostgreSQL's default) or `FULL`. Under `NOTHING`, updates and deletes on a published table fail on the source. Fix: `ALTER TABLE <table> REPLICA IDENTITY DEFAULT;` |
 | Permission to create a publication | `CREATE` on the database, and the login must own the migrated tables (or be a member of the owning role). |
 | Recommended: a WAL limit for slots | `ALTER SYSTEM SET max_slot_wal_keep_size = '50GB'; SELECT pg_reload_conf();` (PostgreSQL 13+). See [WAL and disk space](#wal-and-disk-space). |

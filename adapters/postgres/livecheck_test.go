@@ -143,26 +143,36 @@ func TestLiveChecksStuckServer(t *testing.T) {
 }
 
 // TestLiveChecksPostgres runs the checks on XFERDB_TEST_CDC_PG: a table
-// without a key and one with REPLICA IDENTITY NOTHING each fail their own
-// check, and a yugabyte-typed project there is told it's PostgreSQL.
+// without a key, one with REPLICA IDENTITY NOTHING and one with a DEFERRABLE
+// primary key (#176) each fail their own check, and a yugabyte-typed project
+// there is told it's PostgreSQL.
 func TestLiveChecksPostgres(t *testing.T) {
 	cfg, db := cdcSource(t)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	keyed, nothing, nokey := "xferdb_lc_keyed_"+suffix, "xferdb_lc_nothing_"+suffix, "xferdb_lc_nokey_"+suffix
+	deferred := "xferdb_lc_deferred_" + suffix
 	mustExec(t, db, `CREATE TABLE `+keyed+` (id int PRIMARY KEY)`)
 	mustExec(t, db, `CREATE TABLE `+nothing+` (id int PRIMARY KEY)`)
 	mustExec(t, db, `ALTER TABLE `+nothing+` REPLICA IDENTITY NOTHING`)
 	mustExec(t, db, `CREATE TABLE `+nokey+` (id int)`)
-	defer mustExec(t, db, `DROP TABLE IF EXISTS `+keyed+`, `+nothing+`, `+nokey)
+	// Its replica identity is DEFAULT, which the identity check alone passes.
+	mustExec(t, db, `CREATE TABLE `+deferred+` (id int PRIMARY KEY DEFERRABLE INITIALLY DEFERRED)`)
+	defer mustExec(t, db, `DROP TABLE IF EXISTS `+keyed+`, `+nothing+`, `+nokey+`, `+deferred)
 
 	src := &Source{db: db, config: cfg}
-	checks, err := src.LiveChecks(context.Background(), []string{keyed, nothing, nokey})
+	checks, err := src.LiveChecks(context.Background(), []string{keyed, nothing, nokey, deferred})
 	if err != nil {
 		t.Fatal(err)
 	}
 	byName := checkNames(checks)
 	if c := byName["a primary key on every table"]; c.OK || !strings.Contains(c.Detail, nokey) || strings.Contains(c.Detail, nothing) {
 		t.Errorf("primary key check: %+v", c)
+	}
+	// The deferrable key fails its own check, naming the constraint; the
+	// table without a key isn't counted, and the others pass.
+	if c := byName["a primary key that isn't DEFERRABLE"]; c.OK || c.Detail != "1 of 3 tables with a DEFERRABLE key: "+deferred+" ("+deferred+"_pkey)" ||
+		!strings.Contains(c.Fix, "DROP CONSTRAINT") || strings.Contains(c.Fix, "REPLICA IDENTITY FULL") {
+		t.Errorf("deferrable key check: %+v", c)
 	}
 	c := byName["a replica identity logical replication can use"]
 	if c.OK || !strings.Contains(c.Detail, nothing+" (NOTHING)") || strings.Contains(c.Detail, keyed) || !strings.Contains(c.Fix, "REPLICA IDENTITY DEFAULT") {

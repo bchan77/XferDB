@@ -273,8 +273,8 @@ func (s *Source) LiveChecks(ctx context.Context, tables []string) ([]adapters.Li
 	return checks, nil
 }
 
-// tableChecks adds the per-table checks: a primary key, and a replica
-// identity pgoutput can stream. It returns a description of the tables the
+// tableChecks adds the per-table checks: a primary key, one that isn't
+// DEFERRABLE, and a replica identity pgoutput can stream. It returns a description of the tables the
 // login doesn't own ("" when it owns them all or is a superuser), for the
 // publication check, and whether the tables could be checked at all.
 func (s *Source) tableChecks(ctx context.Context, tables []string, yb, superuser bool, add func(adapters.LiveCheck)) (notOwned string, ok bool) {
@@ -308,16 +308,19 @@ func (s *Source) tableChecks(ctx context.Context, tables []string, yb, superuser
 		}
 	}
 
-	var noKey, others, badIdentity []string
+	var noKey, deferrable, others, badIdentity []string
 	identities := map[string]bool{}
 	for _, t := range tables {
 		schema, table := splitName(t)
 		var hasKey, owns bool
-		var identity string
-		err := queryRow(ctx, s.db, []any{&hasKey, &owns, &identity}, `
+		var identity, deferredKey string
+		// deferredKey names a DEFERRABLE primary key ("" for an immediate one).
+		err := queryRow(ctx, s.db, []any{&hasKey, &owns, &identity, &deferredKey}, `
 			SELECT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary),
 			       pg_has_role(current_user, c.relowner, 'USAGE'),
-			       c.relreplident::text
+			       c.relreplident::text,
+			       COALESCE((SELECT k.conname::text FROM pg_constraint k
+			                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND k.condeferrable), '')
 			FROM pg_class c
 			WHERE c.oid = format('%I.%I', `+schemaExpr(2)+`, $1::text)::regclass`, table, schema)
 		if err != nil {
@@ -326,6 +329,9 @@ func (s *Source) tableChecks(ctx context.Context, tables []string, yb, superuser
 		}
 		if !hasKey {
 			noKey = append(noKey, t)
+		}
+		if deferredKey != "" {
+			deferrable = append(deferrable, fmt.Sprintf("%s (%s)", t, deferredKey))
 		}
 		if !owns && !superuser {
 			others = append(others, t)
@@ -342,9 +348,30 @@ func (s *Source) tableChecks(ctx context.Context, tables []string, yb, superuser
 		Fix:    "add a primary key to each table listed, or leave them out of the migration",
 	})
 
-	// A table without a key has its own failing check above; DEFAULT on it
-	// is that same problem, so only identities that fail in their own right
-	// are listed here.
+	// A DEFERRABLE primary key (#176). PostgreSQL won't identify a row by
+	// one, so under REPLICA IDENTITY DEFAULT the table has no identity, and
+	// once it is published its updates and deletes fail on the source. FULL
+	// would let the source stream it, but the pg_dump schema copy gives a
+	// PostgreSQL target the same deferrable key, which an upsert's
+	// ON CONFLICT can't use, and a key swap only a deferred key allows would
+	// reach the applier, which replays it as delete + upsert and loses a row.
+	// So the key has to be immediate, or the table left out.
+	if len(noKey) < len(tables) {
+		add(adapters.LiveCheck{
+			Name:   "a primary key that isn't DEFERRABLE",
+			OK:     len(deferrable) == 0,
+			Detail: listDetail(len(tables)-len(noKey), deferrable, "with a DEFERRABLE key"),
+			Fix: "PostgreSQL can't identify rows by a DEFERRABLE primary key: once the table is published, updates and deletes on it fail on the source, " +
+				"and XferDB's upserts can't use it on the target. Recreate the key without DEFERRABLE " +
+				"(ALTER TABLE <table> DROP CONSTRAINT <key>, ADD PRIMARY KEY (<columns>); foreign keys referencing it have to be dropped and re-added), " +
+				"or leave the table out of the migration",
+		})
+	}
+
+	// A table without a key has its own failing check above, and one with a
+	// DEFERRABLE key the check before this; DEFAULT on either is that same
+	// problem, so only identities that fail in their own right are listed
+	// here.
 	identity := adapters.LiveCheck{
 		Name:   "a replica identity logical replication can use",
 		OK:     len(badIdentity) == 0,
