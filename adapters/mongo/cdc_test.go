@@ -2,6 +2,7 @@ package mongo
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -175,5 +176,42 @@ func TestTypesBetween(t *testing.T) {
 	}
 	if typesBetween(3, 4) != nil {
 		t.Error("adjacent groups have nothing between them")
+	}
+}
+
+// On a sharded collection a delete carries the shard key it had, so the
+// delete half of a shard key change can't remove the row its insert wrote.
+func TestDeleteKeyHasShardKey(t *testing.T) {
+	s := &ChangeSource{}
+	if err := s.SetPlan([]state.SchemaPlanRow{
+		{Collection: "c", FieldName: "_id", PgColumn: "_id", PgType: "bigint", Strategy: "direct", IsPK: true},
+		{Collection: "c", FieldName: "v", PgColumn: "v", PgType: "bigint", Strategy: "direct"},
+		{Collection: "c", FieldName: "a", Strategy: "flatten"},
+		{Collection: "c", FieldName: "a.b", PgColumn: "a_b", PgType: "text", Strategy: "direct"},
+		{Collection: "c", FieldName: "j", PgColumn: "j", PgType: "jsonb", Strategy: "as_jsonb"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		docKey bson.D
+		want   string
+	}{
+		{bson.D{{Key: "_id", Value: int64(1)}}, "map[_id:1]"},
+		{bson.D{{Key: "v", Value: int64(10)}, {Key: "_id", Value: int64(1)}}, "map[_id:1 v:10]"},
+		// A dotted shard key field, as documentKey names it.
+		{bson.D{{Key: "a.b", Value: "x"}, {Key: "_id", Value: int64(1)}}, "map[_id:1 a_b:x]"},
+		// null matches no row's column: left out.
+		{bson.D{{Key: "v", Value: nil}, {Key: "_id", Value: int64(1)}}, "map[_id:1]"},
+		// Not a plain column (jsonb, or not in the plan): left out.
+		{bson.D{{Key: "j", Value: bson.D{{Key: "k", Value: 1}}}, {Key: "_id", Value: int64(1)}}, "map[_id:1]"},
+		{bson.D{{Key: "zz", Value: int64(5)}, {Key: "_id", Value: int64(1)}}, "map[_id:1]"},
+	} {
+		key, err := s.deleteKey("c", c.docKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprint(key); got != c.want {
+			t.Errorf("deleteKey(%v) = %s, want %s", c.docKey, got, c.want)
+		}
 	}
 }

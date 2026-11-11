@@ -91,9 +91,28 @@ func (s *SQLChangeTx) Upsert(ctx context.Context, table string, rows []map[strin
 }
 
 func (s *SQLChangeTx) Delete(ctx context.Context, table string, keys []map[string]interface{}) error {
-	if len(keys) == 0 {
-		return nil
+	// Keys needn't all have the same columns (a delete's key may carry more
+	// than the primary key, see cdc.Change.Key): one statement per set.
+	for len(keys) > 0 {
+		cols := strings.Join(sortedKeys(keys[0]), "\x00")
+		var same, rest []map[string]interface{}
+		for _, k := range keys {
+			if strings.Join(sortedKeys(k), "\x00") == cols {
+				same = append(same, k)
+			} else {
+				rest = append(rest, k)
+			}
+		}
+		if err := s.deleteKeys(ctx, table, same); err != nil {
+			return err
+		}
+		keys = rest
 	}
+	return nil
+}
+
+// deleteKeys deletes the rows matching keys, which all have the same columns.
+func (s *SQLChangeTx) deleteKeys(ctx context.Context, table string, keys []map[string]interface{}) error {
 	keyCols := sortedKeys(keys[0])
 	if len(keyCols) == 0 {
 		return fmt.Errorf("delete from %s: no key columns", table)

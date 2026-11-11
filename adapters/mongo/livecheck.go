@@ -81,8 +81,9 @@ func oplogRange(ctx context.Context, client *mongo.Client) (oldest, newest bson.
 	}
 	if oldest, err = first(1); err != nil {
 		var se mongo.ServerError
-		if errors.Is(err, mongo.ErrNoDocuments) || (errors.As(err, &se) && (se.HasErrorCode(13) || se.HasErrorCode(26))) {
-			// No oplog here, or no find on local.oplog.rs.
+		if errors.Is(err, mongo.ErrNoDocuments) || (errors.As(err, &se) && (se.HasErrorCode(13) || se.HasErrorCode(26) || se.HasErrorCode(20))) {
+			// No oplog here, no find on local.oplog.rs, or a mongos
+			// (IllegalOperation: no local database through mongos).
 			return oldest, newest, false, nil
 		}
 		return oldest, newest, false, fmt.Errorf("read the oplog: %w", err)
@@ -96,6 +97,17 @@ func oplogRange(ctx context.Context, client *mongo.Client) (oldest, newest bson.
 func oldestOplog(ctx context.Context, client *mongo.Client) (bson.Timestamp, bool, error) {
 	oldest, _, ok, err := oplogRange(ctx, client)
 	return oldest, ok, err
+}
+
+// shardCount returns how many shards a sharded cluster has.
+func shardCount(ctx context.Context, client *mongo.Client) (int, error) {
+	var res struct {
+		Shards []bson.Raw `bson:"shards"`
+	}
+	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "listShards", Value: 1}}).Decode(&res); err != nil {
+		return 0, err
+	}
+	return len(res.Shards), nil
 }
 
 // oplogWarnWindow is the oplog window below which readiness warns: the
@@ -114,12 +126,15 @@ func (s *Source) LiveChecks(ctx context.Context, tables []string) ([]adapters.Li
 	}
 	switch topo {
 	case topoReplicaSet:
-		add(adapters.LiveCheck{Name: "a replica set", OK: true, Detail: "the source is a replica set member"})
+		add(adapters.LiveCheck{Name: "a replica set or sharded cluster", OK: true, Detail: "the source is a replica set member"})
 	case topoSharded:
-		add(adapters.LiveCheck{Name: "a replica set", Detail: "the source is a sharded cluster (mongos)",
-			Fix: "live migration from a sharded cluster isn't supported yet; connect to a replica set"})
+		detail := "the source is a sharded cluster (mongos)"
+		if n, err := shardCount(ctx, s.client); err == nil {
+			detail = fmt.Sprintf("the source is a sharded cluster (mongos) with %d shards", n)
+		}
+		add(adapters.LiveCheck{Name: "a replica set or sharded cluster", OK: true, Detail: detail})
 	default:
-		add(adapters.LiveCheck{Name: "a replica set", Detail: "the source is a standalone server, which keeps no oplog",
+		add(adapters.LiveCheck{Name: "a replica set or sharded cluster", Detail: "the source is a standalone server, which keeps no oplog",
 			Fix: "live migration reads the oplog through a change stream: run the server as a replica set (a single-member one will do)"})
 		return checks, nil
 	}
@@ -146,7 +161,11 @@ func (s *Source) LiveChecks(ctx context.Context, tables []string) ([]adapters.Li
 		add(adapters.LiveCheck{Name: "can open a change stream", OK: true, Detail: "on database " + s.database})
 	}
 
-	if oldest, newest, ok, err := oplogRange(ctx, s.client); err != nil {
+	if topo == topoSharded {
+		add(adapters.LiveCheck{Name: "oplog window", Warning: true,
+			Detail: "each shard keeps its own oplog, which can't be read through mongos",
+			Fix:    "check every shard's oplog window (rs.printReplicationInfo() on each shard): the capture worker can't be down or behind for longer than the shortest one"})
+	} else if oldest, newest, ok, err := oplogRange(ctx, s.client); err != nil {
 		add(adapters.LiveCheck{Name: "oplog window", Warning: true, Detail: err.Error()})
 	} else if !ok {
 		add(adapters.LiveCheck{Name: "oplog window", Warning: true,

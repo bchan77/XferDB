@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -37,18 +38,39 @@ import (
 // the validation after it (which re-reads the source through the plan)
 // passes.
 //
-// Needs XFERDB_TEST_MONGO_RS, a mongodb:// URI of a replica set (any
-// database in it; each run uses a new database, dropped afterwards). The
-// targets are a SQLite file, and a new database on XFERDB_TEST_MONGO_PG (a
-// postgres:// URL) and on XFERDB_TEST_YB when they are set.
+// The sources are XFERDB_TEST_MONGO_RS, a mongodb:// URI of a replica set,
+// and XFERDB_TEST_MONGO_SHARDED, one of a sharded cluster's mongos (any
+// database in it; each run uses a new database, dropped afterwards). On the
+// sharded cluster users is sharded by a hashed _id and things by a range of
+// v split over the shards, so its events carry the shard key too and the
+// writer's replaces move documents between shards. The targets are a SQLite
+// file, and a new database on XFERDB_TEST_MONGO_PG (a postgres:// URL) and
+// on XFERDB_TEST_YB when they are set.
 func TestLiveMigrationMongo(t *testing.T) {
-	uri := os.Getenv("XFERDB_TEST_MONGO_RS")
-	if uri == "" {
-		t.Skip("XFERDB_TEST_MONGO_RS not set; skipping MongoDB live migration test")
+	ran := false
+	for _, src := range []struct {
+		name, env string
+		sharded   bool
+	}{
+		{"replicaset", "XFERDB_TEST_MONGO_RS", false},
+		{"sharded", "XFERDB_TEST_MONGO_SHARDED", true},
+	} {
+		uri := os.Getenv(src.env)
+		if uri == "" {
+			continue
+		}
+		ran = true
+		t.Run(src.name, func(t *testing.T) { liveMongoTargets(t, uri, src.sharded) })
 	}
+	if !ran {
+		t.Skip("XFERDB_TEST_MONGO_RS and XFERDB_TEST_MONGO_SHARDED not set; skipping MongoDB live migration test")
+	}
+}
+
+func liveMongoTargets(t *testing.T, uri string, sharded bool) {
 	t.Run("sqlite", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "target.db")
-		runLiveMongo(t, uri, map[string]any{"type": "sqlite", "dsn": path}, func(t *testing.T) *sql.DB {
+		runLiveMongo(t, uri, sharded, map[string]any{"type": "sqlite", "dsn": path}, func(t *testing.T) *sql.DB {
 			db, err := sql.Open("sqlite3", path)
 			if err != nil {
 				t.Fatal(err)
@@ -74,7 +96,7 @@ func TestLiveMigrationMongo(t *testing.T) {
 			mustExecDB(t, admin, `CREATE DATABASE `+name)
 			t.Cleanup(func() { admin.Exec(`DROP DATABASE IF EXISTS ` + name + ` WITH (FORCE)`) })
 			tgtDSN := withDB(dsn, name)
-			runLiveMongo(t, uri, map[string]any{"type": tc.typ, "dsn": tgtDSN}, func(t *testing.T) *sql.DB {
+			runLiveMongo(t, uri, sharded, map[string]any{"type": tc.typ, "dsn": tgtDSN}, func(t *testing.T) *sql.DB {
 				db, err := sql.Open("postgres", sqlDSNOf(tgtDSN))
 				if err != nil {
 					t.Fatal(err)
@@ -107,7 +129,7 @@ func withDB(dsn, name string) string {
 	return dsn[:scheme+3+path] + "/" + name + query
 }
 
-func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget func(*testing.T) *sql.DB) {
+func runLiveMongo(t *testing.T, uri string, sharded bool, target map[string]any, openTarget func(*testing.T) *sql.DB) {
 	ctx := context.Background()
 	dbName := fmt.Sprintf("xferdb_mlive_%d", time.Now().UnixNano())
 	srcURI := withDB(uri, dbName)
@@ -117,8 +139,10 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 	}
 	mdb := client.Database(dbName)
 	t.Cleanup(func() {
+		t0 := time.Now()
 		mdb.Drop(context.Background()) //nolint:errcheck
 		client.Disconnect(context.Background())
+		t.Logf("dropped the source database in %s", time.Since(t0).Round(time.Millisecond))
 	})
 
 	// users: ObjectId _id, a subdocument the plan flattens, an array it
@@ -130,6 +154,11 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 		mdb.CreateCollection(ctx, "users") //nolint:errcheck
 	}
 	users, things := mdb.Collection("users"), mdb.Collection("things")
+	setupAt := time.Now()
+	if sharded {
+		shardMongo(t, client, dbName)
+		t.Logf("sharded the collections in %s", time.Since(setupAt).Round(time.Millisecond))
+	}
 	var docs []interface{}
 	for i := 0; i < 20000; i++ {
 		docs = append(docs, bson.D{
@@ -141,7 +170,7 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 			{Key: "nick", Value: fmt.Sprint("nick", i)},
 		})
 	}
-	if _, err := users.InsertMany(ctx, docs); err != nil {
+	if _, err := users.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false)); err != nil {
 		t.Fatal(err)
 	}
 	// things: an _id of three types (numbers, strings, ObjectIds), paged a
@@ -157,9 +186,10 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 		}
 		docs = append(docs, bson.D{{Key: "_id", Value: id}, {Key: "v", Value: int64(i)}, {Key: "label", Value: fmt.Sprint("thing", i)}})
 	}
-	if _, err := things.InsertMany(ctx, docs); err != nil {
+	if _, err := things.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false)); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("loaded the source in %s", time.Since(setupAt).Round(time.Millisecond))
 
 	dir := t.TempDir()
 	db, err := state.Open(filepath.Join(dir, "state.db"))
@@ -168,7 +198,11 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 	}
 	defer db.Close()
 	launcher := &live.InProcessLauncher{}
-	defer launcher.StopAll()
+	defer func() {
+		t0 := time.Now()
+		launcher.StopAll()
+		t.Logf("stopped the workers in %s", time.Since(t0).Round(time.Millisecond))
+	}()
 	newServer := func() (*Server, *httptest.Server) {
 		s := NewServer(db, slog.New(slog.DiscardHandler))
 		s.EnableLive(filepath.Join(dir, "cdc"), launcher)
@@ -186,7 +220,10 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 		"source_config": map[string]any{"type": "mongodb", "dsn": srcURI},
 		"target_config": target,
 	}, http.StatusCreated, &p)
+	began := time.Now()
+	step := func(what string) { t.Logf("%6.1fs %s", time.Since(began).Seconds(), what) }
 	analyzeMongo(t, hs, p.ID)
+	step("analyzed")
 
 	var ready struct {
 		Live struct {
@@ -217,7 +254,7 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 	waitLive(t, hs, m.ID, "catch-up", func(l liveMig) bool {
 		return l.Phase == "catch_up" || l.Phase == "streaming"
 	})
-	t.Logf("snapshot done after %d writer operations", ops.Load())
+	step(fmt.Sprintf("snapshot done after %d writer operations", ops.Load()))
 	wdir := filepath.Join(dir, "cdc", m.ID)
 	if err := launcher.Stop(ctx, wdir, worker.RoleApply); err != nil {
 		t.Fatal(err)
@@ -226,10 +263,16 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 	srv.live.Shutdown()
 	hs.Close()
 	srv, hs = newServer()
-	defer func() { srv.live.Shutdown(); hs.Close() }()
+	defer func() {
+		t0 := time.Now()
+		srv.live.Shutdown()
+		hs.Close()
+		t.Logf("shut the server down in %s", time.Since(t0).Round(time.Millisecond))
+	}()
 	srv.ResumeLive(ctx)
 
 	waitLive(t, hs, m.ID, "streaming", func(l liveMig) bool { return l.Phase == "streaming" })
+	step("streaming")
 	time.Sleep(time.Second)
 
 	post(t, hs.URL+"/api/v1/migrations/"+m.ID+"/cutover", map[string]any{}, http.StatusAccepted, nil)
@@ -242,7 +285,7 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 
 	close(stopWriter)
 	<-writerDone
-	t.Logf("writer stopped after %d operations", ops.Load())
+	step(fmt.Sprintf("busy cutover refused; writer stopped after %d operations", ops.Load()))
 	marker := bson.NewObjectID()
 	if _, err := users.InsertOne(ctx, bson.D{{Key: "_id", Value: marker}, {Key: "name", Value: "marker"}, {Key: "late_field", Value: "x"}}); err != nil {
 		t.Fatal(err)
@@ -270,7 +313,9 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 	}
 
 	post(t, hs.URL+"/api/v1/migrations/"+m.ID+"/cutover", map[string]any{}, http.StatusAccepted, nil)
+	step("last change applied")
 	waitMigration(t, hs, m.ID, "completed")
+	step("cut over")
 	if _, err := os.Stat(wdir); !os.IsNotExist(err) {
 		t.Errorf("worker directory still there after cutover: %v", err)
 	}
@@ -283,10 +328,69 @@ func runLiveMongo(t *testing.T, uri string, target map[string]any, openTarget fu
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	step("validated")
 	if len(vs) != 1 || vs[0].Status != "completed" {
 		t.Fatalf("validation after cutover: %+v", vs)
 	}
 	checkValidationPassed(t, hs, vs[0].ID, "users", "things")
+}
+
+// shardMongo shards users by a hashed _id and things by a range of v, split
+// at 300 with the upper half moved to another shard.
+func shardMongo(t *testing.T, client *mongo.Client, db string) {
+	t.Helper()
+	ctx := context.Background()
+	admin := client.Database("admin")
+	run := func(cmd bson.D) error { return admin.RunCommand(ctx, cmd).Err() }
+	if err := run(bson.D{{Key: "enableSharding", Value: db}}); err != nil {
+		t.Fatalf("enableSharding: %v", err)
+	}
+	if err := run(bson.D{{Key: "shardCollection", Value: db + ".users"}, {Key: "key", Value: bson.D{{Key: "_id", Value: "hashed"}}}}); err != nil {
+		t.Fatalf("shard users: %v", err)
+	}
+	if err := run(bson.D{{Key: "shardCollection", Value: db + ".things"}, {Key: "key", Value: bson.D{{Key: "v", Value: 1}}}}); err != nil {
+		t.Fatalf("shard things: %v", err)
+	}
+	if err := run(bson.D{{Key: "split", Value: db + ".things"}, {Key: "middle", Value: bson.D{{Key: "v", Value: 300}}}}); err != nil {
+		t.Fatalf("split things: %v", err)
+	}
+	var shards struct {
+		Shards []struct {
+			ID string `bson:"_id"`
+		} `bson:"shards"`
+	}
+	if err := admin.RunCommand(ctx, bson.D{{Key: "listShards", Value: 1}}).Decode(&shards); err != nil {
+		t.Fatal(err)
+	}
+	// A new sharded collection's one chunk is on the database's primary
+	// shard: move the upper half to another.
+	var dbInfo struct {
+		Primary string `bson:"primary"`
+	}
+	if err := client.Database("config").Collection("databases").FindOne(ctx, bson.D{{Key: "_id", Value: db}}).Decode(&dbInfo); err != nil {
+		t.Fatalf("primary shard of %s: %v", db, err)
+	}
+	for _, sh := range shards.Shards {
+		if sh.ID == dbInfo.Primary {
+			continue
+		}
+		if err := run(bson.D{{Key: "moveChunk", Value: db + ".things"}, {Key: "find", Value: bson.D{{Key: "v", Value: 300}}}, {Key: "to", Value: sh.ID}}); err != nil {
+			t.Fatalf("move things' upper chunk to %s: %v", sh.ID, err)
+		}
+		return
+	}
+	t.Fatalf("no shard but the primary (%s) among %d", dbInfo.Primary, len(shards.Shards))
+}
+
+// transientWrite reports a write that failed only because another writer
+// got there first, as happens on a sharded cluster when an update that
+// moves a document between shards (a distributed transaction) conflicts.
+func transientWrite(err error) bool {
+	var se mongo.ServerError
+	if errors.As(err, &se) && (se.HasErrorLabel("TransientTransactionError") || se.HasErrorCode(112) || se.HasErrorCode(251)) {
+		return true // WriteConflict, NoSuchTransaction
+	}
+	return strings.Contains(err.Error(), "would move shards")
 }
 
 // analyzeMongo builds the project's schema plan, reading the whole
@@ -397,6 +501,9 @@ func mongoWriter(t *testing.T, users, things *mongo.Collection, client *mongo.Cl
 						return nil, nil
 					})
 					sess.EndSession(ctx)
+				}
+				if err != nil && transientWrite(err) {
+					continue // a concurrent writer won; try something else
 				}
 				if err != nil {
 					t.Errorf("writer: %v", err)

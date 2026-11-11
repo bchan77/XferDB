@@ -23,7 +23,11 @@ func mongoRS(t *testing.T) (string, *mongo.Database) {
 	t.Helper()
 	uri := os.Getenv("XFERDB_TEST_MONGO_RS")
 	if uri == "" {
-		t.Skip("XFERDB_TEST_MONGO_RS not set; skipping MongoDB change stream test")
+		// The same tests run through a sharded cluster's mongos.
+		uri = os.Getenv("XFERDB_TEST_MONGO_SHARDED")
+	}
+	if uri == "" {
+		t.Skip("XFERDB_TEST_MONGO_RS / XFERDB_TEST_MONGO_SHARDED not set; skipping MongoDB change stream test")
 	}
 	name := fmt.Sprintf("xferdb_cs_%d", time.Now().UnixNano())
 	scheme := strings.Index(uri, "://") + 3
@@ -150,13 +154,21 @@ func TestStreamResumesFromHighWaterMark(t *testing.T) {
 	if ret, err := src2.RetentionAt(ctx, start); err != nil || ret.Lost {
 		t.Fatalf("retention from the start: %+v %v", ret, err)
 	}
-	if ret, err := src2.RetentionAt(ctx, position{T: 1, I: 1}.encode()); err != nil || !ret.Lost {
-		t.Fatalf("retention from 1970: %+v %v, want lost", ret, err)
+	// Before the oldest entry of a replica set's oplog is lost. Through
+	// mongos it is a stream opened there, which a shard whose oplog was
+	// never truncated still serves: nothing was lost.
+	if topo, err := src2.topology(ctx); err != nil {
+		t.Fatal(err)
+	} else if topo == topoReplicaSet {
+		if ret, err := src2.RetentionAt(ctx, position{T: 1, I: 1}.encode()); err != nil || !ret.Lost {
+			t.Fatalf("retention from 1970: %+v %v, want lost", ret, err)
+		}
 	}
 }
 
-// Readiness on a replica set: every check passes or only warns.
-func TestLiveChecksReplicaSet(t *testing.T) {
+// Readiness on a replica set or through mongos: every check passes or only
+// warns.
+func TestLiveChecksMongo(t *testing.T) {
 	dsn, db := mongoRS(t)
 	ctx := context.Background()
 	if _, err := db.Collection("c").InsertOne(ctx, bson.D{{Key: "a", Value: 1}}); err != nil {
@@ -178,7 +190,7 @@ func TestLiveChecksReplicaSet(t *testing.T) {
 			t.Errorf("check failed: %+v", c)
 		}
 	}
-	for _, want := range []string{"a replica set", "MongoDB 4.2 or later", "can open a change stream", "oplog window"} {
+	for _, want := range []string{"a replica set or sharded cluster", "MongoDB 4.2 or later", "can open a change stream", "oplog window"} {
 		if !names[want] {
 			t.Errorf("no %q check in %+v", want, checks)
 		}

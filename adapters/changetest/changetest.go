@@ -161,6 +161,19 @@ func Run(t *testing.T, target adapters.TargetAdapter, read func(table string) ma
 	})
 	want("bulk delete", map[string]string{"5/c": "five"})
 
+	// A delete's key may carry more columns than the primary key (a
+	// MongoDB shard key): the row goes only if they match too. Keys with
+	// different columns can come in one call.
+	apply(func(tx adapters.ChangeTx) error {
+		if err := tx.Upsert(ctx, table, []map[string]interface{}{row(6, "c", "six"), row(7, "c", "seven")}); err != nil {
+			return err
+		}
+		six, seven := key(6, "c"), key(7, "c")
+		six["name"], seven["name"] = "six", "not seven"
+		return tx.Delete(ctx, table, []map[string]interface{}{six, key(5, "c"), seven})
+	})
+	want("delete with more columns", map[string]string{"7/c": "seven"})
+
 	if err := ap.ClearChangeState(ctx, stream); err != nil {
 		t.Fatal(err)
 	}
