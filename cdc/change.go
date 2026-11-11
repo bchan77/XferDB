@@ -168,6 +168,15 @@ type TimePositions interface {
 	PositionsAreTimes() bool
 }
 
+// PositionRetention is implemented by a source that keeps no log for the
+// stream (MongoDB: the oplog is capped by size or time, not held for any
+// reader), whose stream is lost once its log no longer reaches back to
+// resume, the position capture would restart from. The manager calls it in
+// place of Retention.
+type PositionRetention interface {
+	RetentionAt(ctx context.Context, resume Position) (Retention, error)
+}
+
 // PositionsAreTimes reports whether src's positions are times.
 func PositionsAreTimes(src ChangeSource) bool {
 	tp, ok := src.(TimePositions)

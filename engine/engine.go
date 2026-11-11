@@ -213,6 +213,9 @@ func (e *Engine) Run(ctx context.Context) error {
 				if len(relationalPlan) > 0 {
 					state.ApplyPlanOverrides(&schema, relationalPlan)
 				}
+				if e.live != nil && e.project.SourceConfig.Type == "mongodb" {
+					schema = nullableColumns(schema)
+				}
 				if cfg.RecreateSchema {
 					if err := e.target.DropTable(ctx, schema.Name); err != nil {
 						return e.fail(ctx, fmt.Errorf("drop table %s: %w", schema.Name, err))

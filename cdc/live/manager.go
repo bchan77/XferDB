@@ -219,6 +219,14 @@ func (m *Manager) Setup(ctx context.Context, id string, project *adapters.Projec
 	if err != nil {
 		return err
 	}
+	if stream != nil && stream.StartPos != "" {
+		// Where the stream first started. A source that keeps nothing for
+		// the stream (MongoDB) can only say where it is now, and a rerun
+		// from there would miss what changed while the first run copied.
+		if start, err = src.ParsePosition(stream.StartPos); err != nil {
+			return err
+		}
+	}
 	if stream == nil {
 		slot := id
 		if n, ok := src.(interface{ SlotName() string }); ok {
@@ -238,6 +246,12 @@ func (m *Manager) Setup(ctx context.Context, id string, project *adapters.Projec
 	} else if schema, err = src.Columns(ctx, names); err != nil {
 		return err
 	}
+	var plan []state.SchemaPlanRow
+	if project.SourceConfig.Type == "mongodb" {
+		if plan, err = m.DB.GetPlanForProject(ctx, project.ID); err != nil {
+			return err
+		}
+	}
 	if err := worker.WriteSpec(dir, &worker.Spec{
 		MigrationID: id,
 		Source:      project.SourceConfig,
@@ -246,6 +260,7 @@ func (m *Manager) Setup(ctx context.Context, id string, project *adapters.Projec
 		StartPos:    start,
 		Apply:       cdc.ApplyOptions{Workers: project.TransferConfig.TableWorkers},
 		Schema:      schema,
+		Plan:        plan,
 	}); err != nil {
 		return err
 	}
@@ -612,7 +627,7 @@ func (m *Manager) check(ctx context.Context, r *run, src cdc.ChangeSource, log *
 	}
 
 	if src != nil {
-		ret, err := src.Retention(ctx)
+		ret, err := m.retention(ctx, src, &st, stream)
 		if err != nil {
 			log.Warn("live.retention", "error", err)
 		} else if ret.Lost {
@@ -696,6 +711,37 @@ func (r *run) warnings(st Status) []string {
 		out = append(out, fmt.Sprintf("Only %s more WAL can be written before the source may drop what this migration still needs (max_slot_wal_keep_size).", fmtBytes(*ret.SafeBytes)))
 	}
 	return out
+}
+
+// retention asks src how much log it keeps for the stream. A source that
+// keeps none (cdc.PositionRetention) is asked about the position capture
+// would restart from: what it confirmed or queued last, else where the
+// stream began.
+func (m *Manager) retention(ctx context.Context, src cdc.ChangeSource, st *Status, stream *state.CDCStream) (cdc.Retention, error) {
+	pr, ok := src.(cdc.PositionRetention)
+	if !ok {
+		return src.Retention(ctx)
+	}
+	// Capture restarts from the later of its last queued change and what
+	// it has confirmed (Capturer.ConfirmedFile).
+	text := ""
+	if st.Capture != nil {
+		text = st.Capture.ConfirmedPos
+		if text == "" {
+			text = st.Capture.QueuedPos
+		}
+	}
+	if text == "" && stream != nil {
+		text = stream.StartPos
+	}
+	if text == "" {
+		return cdc.Retention{}, nil
+	}
+	resume, err := src.ParsePosition(text)
+	if err != nil {
+		return cdc.Retention{}, err
+	}
+	return pr.RetentionAt(ctx, resume)
 }
 
 // failLost fails a migration whose source has dropped log the stream still

@@ -238,6 +238,9 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 	if err := s.requirePlan(); err != nil {
 		return nil, err
 	}
+	if opts.Keyset {
+		return s.readKeyset(ctx, table, opts)
+	}
 	collection := s.collectionFor(table)
 	plan := s.planByCollection[collection]
 	extraCol := s.extraColByCollection[collection]

@@ -41,6 +41,12 @@ type Capturer struct {
 	// are.
 	Schema     map[string][]Column
 	SchemaFile string
+	// ConfirmedFile keeps Confirmed for a source that keeps nothing for
+	// the stream (PositionRetention, MongoDB), which can only resume from a
+	// position its log still has: on a quiet stream the last queued change
+	// ages out of it while Confirmed moves on, so a restart resumes from
+	// whichever of the two is later.
+	ConfirmedFile string
 
 	mu     sync.Mutex
 	status CaptureStatus
@@ -83,6 +89,56 @@ func (c *Capturer) saveSchema(known map[string][]Column) error {
 	return os.Rename(tmp, c.SchemaFile)
 }
 
+// loadConfirmed reads what saveConfirmed kept; nil when there is nothing
+// (or the source keeps the stream's position itself).
+func (c *Capturer) loadConfirmed() Position {
+	if c.ConfirmedFile == "" {
+		return nil
+	}
+	if _, ok := c.Source.(PositionRetention); !ok {
+		return nil
+	}
+	b, err := os.ReadFile(c.ConfirmedFile)
+	if err != nil {
+		return nil
+	}
+	p, err := c.Source.ParsePosition(string(b))
+	if err != nil {
+		return nil
+	}
+	return p
+}
+
+// saveConfirmed writes Confirmed to ConfirmedFile when it moved since last
+// (*last). Confirmed only covers changes already synced to the queue.
+func (c *Capturer) saveConfirmed(last *string) error {
+	if c.ConfirmedFile == "" {
+		return nil
+	}
+	if _, ok := c.Source.(PositionRetention); !ok {
+		return nil
+	}
+	c.mu.Lock()
+	p := c.Source.Confirmed()
+	c.mu.Unlock()
+	if len(p) == 0 {
+		return nil
+	}
+	text := c.Source.FormatPosition(p)
+	if text == *last {
+		return nil
+	}
+	tmp := c.ConfirmedFile + ".tmp"
+	if err := os.WriteFile(tmp, []byte(text), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, c.ConfirmedFile); err != nil {
+		return err
+	}
+	*last = text
+	return nil
+}
+
 // Status returns a snapshot of the loop's progress.
 func (c *Capturer) Status() CaptureStatus {
 	c.mu.Lock()
@@ -112,6 +168,10 @@ func (c *Capturer) Run(ctx context.Context) error {
 	if from == nil {
 		from = c.Start
 	}
+	if saved := c.loadConfirmed(); saved != nil && (from == nil || c.Source.Behind(from, saved) > 0) {
+		from = saved
+	}
+	savedConfirmed := ""
 	c.mu.Lock()
 	c.status.QueuedSeq = seq
 	if from != nil {
@@ -184,6 +244,9 @@ func (c *Capturer) Run(ctx context.Context) error {
 			return err
 		case <-tick.C:
 			if err := sync(); err != nil {
+				return err
+			}
+			if err := c.saveConfirmed(&savedConfirmed); err != nil {
 				return err
 			}
 		case ch := <-out:
