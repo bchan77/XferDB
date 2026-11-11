@@ -208,6 +208,43 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 	s.sent, s.idle = s.acked, s.acked
 	s.mu.Unlock()
 
+	// A transaction's changes are sent whole, with Pos on the last: its
+	// events (one session and transaction number; on a sharded cluster the
+	// shards' parts have cluster times of their own) are held until one from
+	// outside it comes, or the stream has nothing more for now. Resuming in
+	// the middle would split a document's move between shards.
+	txn := txnBuffer{recent: newTxnInserts(txnMemory)}
+	send := func(c cdc.Change, pos position) error {
+		select {
+		case out <- c:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		s.mu.Lock()
+		s.sent = pos
+		s.mu.Unlock()
+		return nil
+	}
+	flush := func() error {
+		changes, last, any := txn.take()
+		if !any {
+			return nil
+		}
+		if len(changes) == 0 {
+			s.noteIdle(last) // nothing in it to apply
+			return nil
+		}
+		for i, c := range changes {
+			if i == len(changes)-1 {
+				c.Pos = last.encode()
+			}
+			if err := send(c, last); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	for {
 		if !cs.TryNext(ctx) {
 			if err := cs.Err(); err != nil {
@@ -218,6 +255,9 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if err := flush(); err != nil {
+				return err
 			}
 			// Nothing for us up to the high-water mark: an idle source
 			// still moves it, by the replica set's periodic no-op writes.
@@ -234,9 +274,22 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 		if err != nil {
 			return err
 		}
+		id := ev.txnID()
+		if !txn.part(id) {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
 		c, ok, err := s.change(ctx, &ev)
 		if err != nil {
 			return err
+		}
+		if id != "" {
+			if ok && ev.OperationType == "delete" && txn.moved(&ev) {
+				ok = false // the old copy of a document this transaction moved
+			}
+			txn.add(id, &ev, c, ok, pos)
+			continue
 		}
 		if !ok {
 			// Nothing to apply (an update whose document is gone by now:
@@ -244,19 +297,117 @@ func (s *ChangeSource) Stream(ctx context.Context, from cdc.Position, out chan<-
 			s.noteIdle(pos)
 			continue
 		}
-		// Every event is a resume point. A multi-document transaction's
-		// events each carry their own token, and changes are applied per
-		// row, so one stopped halfway is resumed halfway.
 		c.Pos = pos.encode()
-		select {
-		case out <- c:
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := send(c, pos); err != nil {
+			return err
 		}
-		s.mu.Lock()
-		s.sent = pos
-		s.mu.Unlock()
 	}
+}
+
+// txnMemory is how many recent transactions' inserts are remembered to
+// recognise a move's delete by: the delete may come after an unrelated
+// event has already ended the buffered transaction.
+const txnMemory = 4096
+
+// txnBuffer holds the changes of one transaction until it ends.
+type txnBuffer struct {
+	id      string
+	changes []cdc.Change
+	last    position
+	any     bool
+	recent  *txnInserts
+}
+
+// part reports whether an event of transaction id belongs to the
+// transaction held (none held: it can't).
+func (b *txnBuffer) part(id string) bool {
+	return b.any && id != "" && id == b.id
+}
+
+func (b *txnBuffer) add(id string, ev *changeEvent, c cdc.Change, ok bool, pos position) {
+	b.id, b.last, b.any = id, pos, true
+	if ok {
+		b.changes = append(b.changes, c)
+	}
+	if ev.OperationType == "insert" {
+		b.recent.add(id, ev.DocumentKey)
+	}
+}
+
+// moved reports whether a delete is the old copy of a document its
+// transaction moved between shards: an update that changes a document's
+// shard key is streamed as an insert under the new shard key and a delete
+// under the old one, in one transaction, in either order. Keyed by _id, the
+// delete coming second would remove the row the insert just wrote. A
+// transaction that inserts a document and deletes it again deletes it
+// under the shard key it was inserted with.
+func (b *txnBuffer) moved(ev *changeEvent) bool {
+	ins, ok := b.recent.get(ev.txnID(), ev.DocumentKey)
+	return ok && ins != docKeyString(ev.DocumentKey)
+}
+
+func (b *txnBuffer) take() ([]cdc.Change, position, bool) {
+	changes, last, any := b.changes, b.last, b.any
+	b.id, b.changes, b.last, b.any = "", nil, position{}, false
+	return changes, last, any
+}
+
+// txnInserts remembers, for the last max transactions, the documentKey
+// each _id was inserted with.
+type txnInserts struct {
+	max   int
+	order []string
+	byTxn map[string]map[string]string
+}
+
+func newTxnInserts(max int) *txnInserts {
+	return &txnInserts{max: max, byTxn: map[string]map[string]string{}}
+}
+
+func (t *txnInserts) add(txn string, docKey bson.D) {
+	id, ok := idOf(docKey)
+	if !ok || txn == "" {
+		return
+	}
+	m, seen := t.byTxn[txn]
+	if !seen {
+		if len(t.order) >= t.max {
+			delete(t.byTxn, t.order[0])
+			t.order = t.order[1:]
+		}
+		m = map[string]string{}
+		t.byTxn[txn] = m
+		t.order = append(t.order, txn)
+	}
+	m[id] = docKeyString(docKey)
+}
+
+func (t *txnInserts) get(txn string, docKey bson.D) (string, bool) {
+	id, ok := idOf(docKey)
+	if !ok || txn == "" {
+		return "", false
+	}
+	k, ok := t.byTxn[txn][id]
+	return k, ok
+}
+
+// idOf renders a documentKey's _id, for comparing.
+func idOf(docKey bson.D) (string, bool) {
+	for _, e := range docKey {
+		if e.Key == "_id" {
+			k, err := encodeID(e.Value)
+			return k, err == nil
+		}
+	}
+	return "", false
+}
+
+func docKeyString(docKey bson.D) string {
+	b, err := bson.MarshalExtJSON(docKey, true, false)
+	if err != nil {
+		return fmt.Sprint(docKey)
+	}
+	return string(b)
 }
 
 // changeEvent is the part of a change event Stream reads.
@@ -271,6 +422,17 @@ type changeEvent struct {
 	} `bson:"ns"`
 	DocumentKey  bson.D `bson:"documentKey"`
 	FullDocument bson.D `bson:"fullDocument"`
+	// Set on a multi-document transaction's events.
+	LSID      bson.Raw `bson:"lsid"`
+	TxnNumber *int64   `bson:"txnNumber"`
+}
+
+// txnID identifies the transaction an event belongs to; "" when it is none.
+func (ev *changeEvent) txnID() string {
+	if ev.TxnNumber == nil || len(ev.LSID) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%x/%d", []byte(ev.LSID), *ev.TxnNumber)
 }
 
 // change turns an event into a row change; ok is false when there is none
@@ -300,7 +462,7 @@ func (s *ChangeSource) change(ctx context.Context, ev *changeEvent) (cdc.Change,
 	c := cdc.Change{Table: s.table[coll], CommitAt: at}
 
 	if ev.OperationType == "delete" {
-		key, err := s.deleteKey(coll, ev.DocumentKey)
+		key, err := s.keyOf(coll, ev.DocumentKey)
 		if err != nil {
 			return cdc.Change{}, false, err
 		}
@@ -370,60 +532,35 @@ func (s *ChangeSource) keyOf(coll string, docKey bson.D) (map[string]interface{}
 	return key, nil
 }
 
-// deleteKey is a delete's Key: the row's key, and on a sharded collection
-// the shard key it had, which the target row must still hold to be deleted.
-//
-// An update that changes a document's shard key moves it to another shard,
-// and the stream reports it as a delete on the old shard and an insert on
-// the new one, in one transaction, at one cluster time: the two can come in
-// either order. Keyed by _id alone, a delete after its insert would remove
-// the row the insert just wrote; with the old shard key it matches nothing.
-//
-// Only shard key fields the plan stores as plain columns are matched, and
-// one that is null is left out (no row's column is "= NULL").
-func (s *ChangeSource) deleteKey(coll string, docKey bson.D) (map[string]interface{}, error) {
-	key, err := s.keyOf(coll, docKey)
-	if err != nil {
-		return nil, err
-	}
-	var shardKey bson.D
-	for _, e := range docKey {
-		if e.Key != "_id" {
-			shardKey = append(shardKey, e)
-		}
-	}
-	if len(shardKey) == 0 {
-		return key, nil
-	}
-	direct := map[string]bool{}
-	for _, row := range s.plan[coll] {
-		if row.Strategy == "direct" && !row.IsPK {
-			direct[row.PgColumn] = true
-		}
-	}
-	cols, err := ConvertDocument(shardKey, s.plan[coll], s.extraCol[coll])
-	if err != nil {
-		return nil, fmt.Errorf("%s: shard key: %w", coll, err)
-	}
-	for col, v := range cols {
-		if direct[col] && v != nil {
-			key[col] = v
-		}
-	}
-	return key, nil
-}
-
 // lookup reads a document by its documentKey; nil when it's gone.
+//
+// On a sharded collection the documentKey carries the shard key as it was
+// before the update, so an update that changed the shard key's value finds
+// nothing by it: the document is looked up by _id alone then (across every
+// shard), and is gone only if that finds nothing either.
 func (s *ChangeSource) lookup(ctx context.Context, coll string, docKey bson.D) (bson.D, error) {
-	var doc bson.D
-	err := s.client.Database(s.database).Collection(coll).FindOne(ctx, docKey).Decode(&doc)
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, nil
+	c := s.client.Database(s.database).Collection(coll)
+	find := func(filter bson.D) (bson.D, error) {
+		var doc bson.D
+		err := c.FindOne(ctx, filter).Decode(&doc)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("look up %s %v: %w", coll, filter, err)
+		}
+		return doc, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("look up %s %v: %w", coll, docKey, err)
+	doc, err := find(docKey)
+	if doc != nil || err != nil || len(docKey) < 2 {
+		return doc, err
 	}
-	return doc, nil
+	for _, e := range docKey {
+		if e.Key == "_id" {
+			return find(bson.D{e})
+		}
+	}
+	return nil, nil
 }
 
 // streamError explains the errors that end a stream for good.

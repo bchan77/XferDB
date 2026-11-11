@@ -55,9 +55,6 @@ type Change struct {
 	Table string
 	Op    Op
 	// Key is the row's primary key after the change (before it, for a delete).
-	// A delete's Key may also hold other columns, which the target row must
-	// still have for it to be deleted (MongoDB: a sharded collection's shard
-	// key, see adapters/mongo deleteKey).
 	Key map[string]interface{}
 	// OldKey is set on an update that changed the key: the key it had before.
 	OldKey map[string]interface{}
