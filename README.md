@@ -101,7 +101,8 @@ XferDB now reads a structured config file (YAML or JSON) so projects, server set
 1. CLI flag (e.g. `--table-workers=4`)
 2. Environment variable (`XFERDB_TABLE_WORKERS=4`)
 3. Config file value
-4. Built-in default
+4. The project's saved transfer settings (`xferdb migrate` only; `project create --table-workers`, the web UI's run form)
+5. Built-in default
 
 **DSN safety** — use `${VAR}` or `${VAR:-default}` references in DSN strings; values are expanded from the process environment at load time. Missing variables (no default) cause the load to fail.
 

@@ -14,6 +14,14 @@ All notable changes to XferDB are documented here.
   names the key, so a live migration can't start with one. `REPLICA IDENTITY FULL` isn't offered
   as the fix: XferDB's upserts can't use the deferrable key the schema copy gives a PostgreSQL
   target either.
+- **`xferdb migrate` uses the project's saved transfer settings (#172).** The CLI sent its own
+  defaults for table workers, segment workers, async pipeline, OFFSET segments and accurate counts
+  with every run, and the server takes any value it is sent as an override for that run, so the
+  project's saved settings never applied: after `xferdb project create --table-workers 3` (as in
+  the README's quick start), `xferdb migrate` still ran with 1 table worker. A setting is now sent
+  only when a flag, an `XFERDB_*` environment variable or the config file gives it; otherwise the
+  project's value is used, as the web UI's run form already did. Schema mode (`--recreate-schema`,
+  `--truncate`) and `--bulk-copy` stay per run and are never taken from the project.
 
 ## [1.2.0] - 2026-11-09
 
