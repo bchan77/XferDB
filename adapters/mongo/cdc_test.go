@@ -2,7 +2,6 @@ package mongo
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -179,39 +178,64 @@ func TestTypesBetween(t *testing.T) {
 	}
 }
 
-// On a sharded collection a delete carries the shard key it had, so the
-// delete half of a shard key change can't remove the row its insert wrote.
-func TestDeleteKeyHasShardKey(t *testing.T) {
-	s := &ChangeSource{}
-	if err := s.SetPlan([]state.SchemaPlanRow{
-		{Collection: "c", FieldName: "_id", PgColumn: "_id", PgType: "bigint", Strategy: "direct", IsPK: true},
-		{Collection: "c", FieldName: "v", PgColumn: "v", PgType: "bigint", Strategy: "direct"},
-		{Collection: "c", FieldName: "a", Strategy: "flatten"},
-		{Collection: "c", FieldName: "a.b", PgColumn: "a_b", PgType: "text", Strategy: "direct"},
-		{Collection: "c", FieldName: "j", PgColumn: "j", PgType: "jsonb", Strategy: "as_jsonb"},
-	}); err != nil {
-		t.Fatal(err)
+// A move between shards is an insert under the new shard key and a delete
+// under the old one, in one transaction, in either order and possibly with
+// other events between them. The delete coming second is the old copy and
+// must not remove the row the insert wrote; a transaction that inserts a
+// document and deletes it again still deletes.
+func TestTxnBufferMoves(t *testing.T) {
+	lsid, _ := bson.Marshal(bson.D{{Key: "id", Value: "session"}})
+	ev := func(op string, txn int64, id, v int64) *changeEvent {
+		e := &changeEvent{OperationType: op, DocumentKey: bson.D{{Key: "v", Value: v}, {Key: "_id", Value: id}}}
+		if txn > 0 {
+			e.LSID, e.TxnNumber = lsid, &txn
+		}
+		return e
 	}
-	for _, c := range []struct {
-		docKey bson.D
-		want   string
-	}{
-		{bson.D{{Key: "_id", Value: int64(1)}}, "map[_id:1]"},
-		{bson.D{{Key: "v", Value: int64(10)}, {Key: "_id", Value: int64(1)}}, "map[_id:1 v:10]"},
-		// A dotted shard key field, as documentKey names it.
-		{bson.D{{Key: "a.b", Value: "x"}, {Key: "_id", Value: int64(1)}}, "map[_id:1 a_b:x]"},
-		// null matches no row's column: left out.
-		{bson.D{{Key: "v", Value: nil}, {Key: "_id", Value: int64(1)}}, "map[_id:1]"},
-		// Not a plain column (jsonb, or not in the plan): left out.
-		{bson.D{{Key: "j", Value: bson.D{{Key: "k", Value: 1}}}, {Key: "_id", Value: int64(1)}}, "map[_id:1]"},
-		{bson.D{{Key: "zz", Value: int64(5)}, {Key: "_id", Value: int64(1)}}, "map[_id:1]"},
-	} {
-		key, err := s.deleteKey("c", c.docKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := fmt.Sprint(key); got != c.want {
-			t.Errorf("deleteKey(%v) = %s, want %s", c.docKey, got, c.want)
-		}
+	b := txnBuffer{recent: newTxnInserts(2)}
+	ins := ev("insert", 1, 1, 500)
+	if b.part(ins.txnID()) {
+		t.Fatal("an empty buffer holds no transaction")
+	}
+	b.add(ins.txnID(), ins, cdc.Change{Op: cdc.OpInsert}, true, position{T: 100, I: 6})
+	if !b.part(ins.txnID()) || b.part(ev("insert", 2, 1, 1).txnID()) || b.part("") {
+		t.Fatal("part: wrong transaction membership")
+	}
+	if !b.moved(ev("delete", 1, 1, 10)) {
+		t.Error("the delete of the old copy (v 10, inserted as v 500) isn't a move")
+	}
+	if b.moved(ev("delete", 1, 1, 500)) {
+		t.Error("deleting what the transaction inserted, under the same key, is a delete")
+	}
+	if b.moved(ev("delete", 1, 2, 10)) || b.moved(ev("delete", 2, 1, 10)) || b.moved(ev("delete", 0, 1, 10)) {
+		t.Error("a delete of another document, or in another transaction or none, is a delete")
+	}
+	changes, last, any := b.take()
+	if !any || len(changes) != 1 || last.I != 6 {
+		t.Fatalf("take = %v %v %v", changes, last, any)
+	}
+	// Taken, the transaction's inserts are still known: an unrelated event
+	// between the two halves ends the buffer, not the memory of the move.
+	if b.part(ins.txnID()) || !b.moved(ev("delete", 1, 1, 10)) {
+		t.Error("after take: the move is forgotten")
+	}
+	// Bounded: the oldest transaction is forgotten first.
+	b.recent.add(ev("insert", 2, 9, 1).txnID(), ev("insert", 2, 9, 1).DocumentKey)
+	b.recent.add(ev("insert", 3, 9, 1).txnID(), ev("insert", 3, 9, 1).DocumentKey)
+	if b.moved(ev("delete", 1, 1, 10)) || !b.moved(ev("delete", 3, 9, 2)) {
+		t.Error("the memory isn't bounded oldest-first")
+	}
+}
+
+func TestTxnID(t *testing.T) {
+	n := int64(7)
+	lsid, _ := bson.Marshal(bson.D{{Key: "id", Value: "s"}})
+	if (&changeEvent{}).txnID() != "" || (&changeEvent{TxnNumber: &n}).txnID() != "" {
+		t.Error("an event outside a transaction has an id")
+	}
+	a := (&changeEvent{LSID: lsid, TxnNumber: &n}).txnID()
+	m := int64(8)
+	if a == "" || a == (&changeEvent{LSID: lsid, TxnNumber: &m}).txnID() {
+		t.Errorf("txnID = %q", a)
 	}
 }
