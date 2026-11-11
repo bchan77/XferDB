@@ -26,6 +26,12 @@ import (
 // sharded cluster) keeps anyway, so Prepare only records where to start and
 // Teardown has nothing to drop.
 //
+// On a sharded cluster the stream is opened through mongos, which merges the
+// shards' oplogs in cluster-time order. Chunk migrations between shards
+// aren't reported as changes, and an event's documentKey also carries the
+// shard key, which lookups use as it is. The connection must reach one
+// mongos: a stream's cursor lives on the mongos that opened it.
+//
 // Each document is converted with the frozen schema plan exactly as
 // ReadBatch converts it (ConvertDocument), so a document the snapshot copied
 // and one the stream replays reach the target as the same row. Fields the
@@ -55,6 +61,12 @@ type ChangeSource struct {
 	// mark: read, with nothing of ours in it since sent. While acked has
 	// reached sent, the stream is confirmed up to idle.
 	acked, sent, idle position
+
+	topo      topology
+	topoKnown bool
+	// The last probeRetention result, and when it was taken.
+	probed   cdc.Retention
+	probedAt time.Time
 }
 
 // NewChangeSource connects to the source for a live migration stream.
@@ -288,7 +300,7 @@ func (s *ChangeSource) change(ctx context.Context, ev *changeEvent) (cdc.Change,
 	c := cdc.Change{Table: s.table[coll], CommitAt: at}
 
 	if ev.OperationType == "delete" {
-		key, err := s.keyOf(coll, ev.DocumentKey)
+		key, err := s.deleteKey(coll, ev.DocumentKey)
 		if err != nil {
 			return cdc.Change{}, false, err
 		}
@@ -358,6 +370,49 @@ func (s *ChangeSource) keyOf(coll string, docKey bson.D) (map[string]interface{}
 	return key, nil
 }
 
+// deleteKey is a delete's Key: the row's key, and on a sharded collection
+// the shard key it had, which the target row must still hold to be deleted.
+//
+// An update that changes a document's shard key moves it to another shard,
+// and the stream reports it as a delete on the old shard and an insert on
+// the new one, in one transaction, at one cluster time: the two can come in
+// either order. Keyed by _id alone, a delete after its insert would remove
+// the row the insert just wrote; with the old shard key it matches nothing.
+//
+// Only shard key fields the plan stores as plain columns are matched, and
+// one that is null is left out (no row's column is "= NULL").
+func (s *ChangeSource) deleteKey(coll string, docKey bson.D) (map[string]interface{}, error) {
+	key, err := s.keyOf(coll, docKey)
+	if err != nil {
+		return nil, err
+	}
+	var shardKey bson.D
+	for _, e := range docKey {
+		if e.Key != "_id" {
+			shardKey = append(shardKey, e)
+		}
+	}
+	if len(shardKey) == 0 {
+		return key, nil
+	}
+	direct := map[string]bool{}
+	for _, row := range s.plan[coll] {
+		if row.Strategy == "direct" && !row.IsPK {
+			direct[row.PgColumn] = true
+		}
+	}
+	cols, err := ConvertDocument(shardKey, s.plan[coll], s.extraCol[coll])
+	if err != nil {
+		return nil, fmt.Errorf("%s: shard key: %w", coll, err)
+	}
+	for col, v := range cols {
+		if direct[col] && v != nil {
+			key[col] = v
+		}
+	}
+	return key, nil
+}
+
 // lookup reads a document by its documentKey; nil when it's gone.
 func (s *ChangeSource) lookup(ctx context.Context, coll string, docKey bson.D) (bson.D, error) {
 	var doc bson.D
@@ -373,12 +428,18 @@ func (s *ChangeSource) lookup(ctx context.Context, coll string, docKey bson.D) (
 
 // streamError explains the errors that end a stream for good.
 func streamError(err error) error {
-	var se mongo.ServerError
-	if errors.As(err, &se) && (se.HasErrorCode(286) || se.HasErrorCode(280)) {
-		// ChangeStreamHistoryLost, ChangeStreamFatalError.
+	if historyLost(err) {
 		return fmt.Errorf("the source's oplog no longer has the changes this stream needs (it was down longer than the oplog window): %w", err)
 	}
 	return fmt.Errorf("change stream: %w", err)
+}
+
+// historyLost reports an error from opening a stream at a point the oplog
+// (a shard's, through mongos) no longer has.
+func historyLost(err error) bool {
+	var se mongo.ServerError
+	// ChangeStreamHistoryLost, ChangeStreamFatalError.
+	return errors.As(err, &se) && (se.HasErrorCode(286) || se.HasErrorCode(280))
 }
 
 func (s *ChangeSource) noteIdle(p position) {
@@ -438,12 +499,21 @@ func (s *ChangeSource) Retention(context.Context) (cdc.Retention, error) {
 }
 
 // RetentionAt implements cdc.PositionRetention: the stream is lost when the
-// oldest entry of the oplog is after resume, the position it would restart
-// from.
+// oplog no longer reaches back to resume, the position it would restart
+// from. A replica set's oplog is read directly; a sharded cluster's can't be
+// read through mongos, so a stream is opened at resume instead, as capture
+// would (at most once a minute).
 func (s *ChangeSource) RetentionAt(ctx context.Context, resume cdc.Position) (cdc.Retention, error) {
 	p, err := decodePosition(resume)
 	if err != nil || p.zero() {
 		return cdc.Retention{}, err
+	}
+	topo, err := s.topology(ctx)
+	if err != nil {
+		return cdc.Retention{}, err
+	}
+	if topo == topoSharded {
+		return s.probeRetention(ctx, p)
 	}
 	oldest, ok, err := oldestOplog(ctx, s.client)
 	if err != nil || !ok {
@@ -454,6 +524,63 @@ func (s *ChangeSource) RetentionAt(ctx context.Context, resume cdc.Position) (cd
 		ret.Lost = true
 	}
 	return ret, nil
+}
+
+// probeInterval is how often RetentionAt opens a stream to see whether a
+// sharded cluster still has the changes from a resume point.
+const probeInterval = time.Minute
+
+// probeRetention opens a change stream at p and reads once: one that needs
+// changes a shard's oplog no longer has fails at once.
+func (s *ChangeSource) probeRetention(ctx context.Context, p position) (cdc.Retention, error) {
+	s.mu.Lock()
+	if !s.probedAt.IsZero() && time.Since(s.probedAt) < probeInterval {
+		ret := s.probed
+		s.mu.Unlock()
+		return ret, nil
+	}
+	s.mu.Unlock()
+	opts := options.ChangeStream().SetMaxAwaitTime(time.Millisecond)
+	if p.Token != "" {
+		opts.SetResumeAfter(bson.D{{Key: "_data", Value: p.Token}})
+	} else {
+		opts.SetStartAtOperationTime(&bson.Timestamp{T: p.T, I: p.I})
+	}
+	ret := cdc.Retention{}
+	cs, err := s.client.Database(s.database).Watch(ctx, mongo.Pipeline{}, opts)
+	if err == nil {
+		cs.TryNext(ctx)
+		err = cs.Err()
+		cs.Close(context.Background()) //nolint:errcheck
+	}
+	if err != nil {
+		if !historyLost(err) {
+			return cdc.Retention{}, fmt.Errorf("open a change stream at %s: %w", p.encode(), err)
+		}
+		ret.Lost, ret.State = true, err.Error()
+	}
+	s.mu.Lock()
+	s.probed, s.probedAt = ret, time.Now()
+	s.mu.Unlock()
+	return ret, nil
+}
+
+// topology is the source's topology, asked once.
+func (s *ChangeSource) topology(ctx context.Context) (topology, error) {
+	s.mu.Lock()
+	known, topo := s.topoKnown, s.topo
+	s.mu.Unlock()
+	if known {
+		return topo, nil
+	}
+	topo, err := topologyOf(ctx, s.client)
+	if err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	s.topo, s.topoKnown = topo, true
+	s.mu.Unlock()
+	return topo, nil
 }
 
 // PositionsAreTimes implements cdc.TimePositions: positions are cluster times.

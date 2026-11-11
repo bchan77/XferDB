@@ -194,6 +194,15 @@ func (m *Manager) runCutover(ctx context.Context, r *run, opts CutoverOptions) {
 		return
 	case <-time.After(m.quietWait()):
 	}
+	// A write made while waiting may not have reached capture yet (a
+	// sharded MongoDB cluster's mongos only passes a change on once every
+	// shard is past it): count only once capture has confirmed the source's
+	// position after the wait.
+	r.step(StepQuiet, "running", "making sure every write made while waiting has been captured")
+	if err := m.awaitCaptured(ctx, r, src); err != nil {
+		fail(StepQuiet, err)
+		return
+	}
 	if after := m.queuedSince(r, seq); after > 0 {
 		if !opts.IgnoreWrites {
 			r.mu.Lock()
@@ -317,6 +326,30 @@ func (m *Manager) drain(ctx context.Context, r *run, src cdc.ChangeSource) (uint
 		select {
 		case <-ctx.Done():
 			return 0, nil, ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+// awaitCaptured waits until capture has confirmed the source's position
+// now, so every change made before this call is queued.
+func (m *Manager) awaitCaptured(ctx context.Context, r *run, src cdc.ChangeSource) error {
+	pos, err := src.CurrentPosition(ctx)
+	if err != nil {
+		return err
+	}
+	tick := time.NewTicker(m.interval() / 2)
+	defer tick.Stop()
+	for {
+		r.mu.Lock()
+		st := r.status
+		r.mu.Unlock()
+		if st.Capture != nil && len(st.Capture.Confirmed) > 0 && src.Behind(st.Capture.Confirmed, pos) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-tick.C:
 		}
 	}
