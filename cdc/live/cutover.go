@@ -33,7 +33,7 @@ var cutoverSteps = []struct{ name, label string }{
 	{StepQuiet, "Check the source has stopped writing"},
 	{StepSequences, "Set the target's sequences to the source's values"},
 	{StepConstraints, "Add foreign keys, checks and triggers"},
-	{StepFinish, "Stop the stream and drop the replication slot"},
+	{StepFinish, "Stop the stream and remove it from the source"},
 }
 
 // Errors Cutover refuses with.

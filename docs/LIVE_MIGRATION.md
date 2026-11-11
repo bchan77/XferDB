@@ -21,6 +21,7 @@ writes, *cut over*, and point the applications at the target.
 - [6. Cut over](#6-cut-over)
 - [Cancelling](#cancelling)
 - [WAL and disk space](#wal-and-disk-space)
+- [The oplog (MongoDB)](#the-oplog-mongodb)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 
@@ -72,6 +73,45 @@ How it differs from PostgreSQL:
   (`--segment-workers`, 1 by default), and each is checkpointed, so a resumed
   snapshot skips the chunks already done. Range-sharded keys are paged in key
   order, which YugabyteDB reads efficiently.
+
+**Or source: MongoDB 4.2 or later**, as a **replica set** or a **sharded
+cluster**, with:
+
+| Requirement | How to set it |
+|---|---|
+| A replica set or a sharded cluster | A standalone `mongod` keeps no oplog, so there is no change stream to read. A single-member replica set is enough: start `mongod` with `--replSet rs0` and run `rs.initiate()` once. |
+| A login that can open a change stream | The `changeStream` and `find` actions on the migrated database. The built-in `read` role has both. |
+| A schema plan | As for any MongoDB migration: run *Analyze* (`xferdb project analyze`) first. It fixes each collection's columns. |
+| On a sharded cluster: one `mongos` | Connect to a single `mongos`, not a load balancer in front of several: a change stream's cursor lives on the `mongos` that opened it. |
+| Recommended: an oplog window longer than any outage | XferDB keeps nothing on the source, so its stream can only resume from what the oplog still holds. See [The oplog (MongoDB)](#the-oplog-mongodb). |
+| Recommended (6.0+): post-images | `db.runCommand({collMod: '<collection>', changeStreamPreAndPostImages: {enabled: true}})`. With them, each update streams the document as it was after the change; without them, XferDB reads the document back from the primary when it streams the update. Both are correct; post-images save a read per update. |
+
+How it differs from PostgreSQL:
+
+- **Nothing is created on the source.** No slot, no publication: the change
+  stream reads the oplog, which the replica set (or each shard) keeps anyway.
+  Cancelling or cutting over leaves nothing behind, and there are no
+  leftover streams.
+- **Documents go through the schema plan**, exactly as in the copy. A field
+  the plan doesn't know, also one that first appears while the migration
+  streams, goes into the `_extra` column. MongoDB has no schema changes, so a
+  live migration from it never pauses for one. A field removed from a
+  document (`$unset`) becomes `NULL`, so every column but `_id` is created
+  nullable on a live migration's target (the plan's *not null* is only what
+  its sample saw).
+- **Lag in time, not bytes**, as for YugabyteDB.
+- **The copy reads from the primary**, not a secondary: a secondary behind the
+  stream's start would copy a document older than a change the stream never
+  replays.
+- **Transactions** are queued whole, and their changes applied per document,
+  as for every source.
+- **Sharded clusters.** `mongos` merges the shards' changes in cluster-time
+  order, and passes a change on only once every shard is past it. An idle
+  shard moves forward by a no-op write every 10 seconds, so the end of
+  catch-up and the cutover each take up to about 10 seconds longer than on a
+  replica set. An update that changes a document's shard key (and so may move
+  it to another shard) is applied as one change. Chunk migrations between
+  shards aren't changes and are never copied.
 
 **Target:** PostgreSQL, YugabyteDB, MySQL or SQLite.
 
@@ -227,7 +267,8 @@ The cutover runs these steps, shown as they go:
 3. Set the target's sequences to the source's values (PostgreSQL targets), so
    new rows don't collide with copied ones.
 4. Add the foreign keys, checks and triggers held back until now.
-5. Stop the stream and drop the replication slot and publication.
+5. Stop the stream and remove it from the source (the replication slot and
+   publication; nothing on MongoDB).
 
 The migration is then completed and validated by the project's validation
 settings (`xferdb cutover` waits for the result and exits non-zero if a table
@@ -247,7 +288,8 @@ again.
 
 *Cancel* on the migration page, `xferdb migrate --cancel`, or deleting the
 migration stops the stream and drops the replication slot and publication on
-the source (and, on YugabyteDB, its heartbeat row). Rows already on the target
+the source (and, on YugabyteDB, its heartbeat row; on MongoDB there is nothing
+to drop). Rows already on the target
 stay. A cancelled or failed live migration can't be resumed: start a new one.
 
 ### Leftover streams
@@ -300,10 +342,30 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 `xferdb_cdc_queue_bytes`, `xferdb_cdc_source_retained_bytes`,
 `xferdb_cdc_schema_change_paused`.
 
+### The oplog (MongoDB)
+
+A MongoDB source keeps no changes for XferDB: the oplog is a capped log that
+drops its oldest entries as new writes arrive, however far behind a reader
+is. XferDB queues changes on its own disk as it reads them, so the oplog only
+matters while capture isn't running (the XferDB server down, or unable to
+reach the source). If capture is stopped for longer than the oplog's window,
+the changes it would resume from are gone, and XferDB **fails the migration**
+with the reason; start it again.
+
+The readiness check shows a replica set's window (`rs.printReplicationInfo()`
+shows it too) and warns under 24 hours; raise it with `replSetResizeOplog`, or
+set a minimum retention with `oplogMinRetentionHours` (4.4+). Through `mongos`
+the shards' oplogs can't be read, so readiness only reminds you to check each
+shard. On a quiet migration (the migrated collections rarely written while
+the rest of the database is busy) XferDB still moves its resume point forward
+with the oplog, so it doesn't fall out of the window just by waiting.
+
 ## Limitations
 
-- The source must be PostgreSQL or YugabyteDB. MySQL and MongoDB sources are planned.
-- Every migrated table needs a primary key.
+- The source must be PostgreSQL, YugabyteDB or MongoDB (replica set or
+  sharded cluster). MySQL sources are planned.
+- Every migrated table needs a primary key (a MongoDB collection always has
+  one, `_id`).
 - Schema changes are not applied; they pause the migration (step 5).
 - Sequences are set at cutover on PostgreSQL targets only.
 - The cutover doesn't stop the writes for you: you stop the applications.
@@ -320,6 +382,10 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 | `permission denied` creating the publication | Connect as the owner of the tables, or grant the login membership in the owning role; it also needs `CREATE` on the database. |
 | *Capture worker: ... (restarting)* | The worker lost the source; it retries with a growing delay. Check the source is reachable from the XferDB server. |
 | *Capture worker: ... Failed to get the beforeimage for tablet_id ... (SQLSTATE XX000)* (YugabyteDB) | A transaction changed the same row more than once, and the source can't send its old values. Set the tserver gflag `cdc_enable_intra_transactional_before_image=true` on every tserver (2025.2.4+) and restart them. Set it before starting: a transaction the stream has already reached may still fail, in which case cancel and start a new live migration. |
+| Readiness: *the source is a standalone server* (MongoDB) | Run it as a replica set: restart `mongod` with `--replSet rs0` and run `rs.initiate()`. Even one member is enough. |
+| Readiness: *can open a change stream* fails (MongoDB) | Grant the login the `read` role (or the `changeStream` and `find` actions) on the migrated database. |
+| Migration failed: *the source's oplog no longer has the changes this stream needs* (MongoDB) | Capture was stopped for longer than the oplog's window (see [The oplog](#the-oplog-mongodb)). Raise the window and start a new live migration. |
+| *Capture worker: ... dropped / renamed on the source* (MongoDB) | A migrated collection (or the database) was dropped or renamed while streaming. The migration can't go on: start a new one. |
 | *Apply worker: ... (restarting)* | A change couldn't be applied to the target, often a schema difference. The error names the table. |
 | *writes are still happening on the source* at cutover | Something still writes to a migrated table. Stop it and cut over again. |
 | Migration failed: *the source removed WAL ...* | The slot went past `max_slot_wal_keep_size` while capture was down. Start a new live migration. |

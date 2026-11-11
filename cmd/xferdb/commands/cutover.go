@@ -17,7 +17,8 @@ import (
 
 // cutoverCmd ends a live migration (#102): the server drains the stream,
 // checks the source has stopped writing, sets sequences, adds the
-// constraints held back until now, drops the replication slot and marks the
+// constraints held back until now, removes the stream from the source (a
+// PostgreSQL replication slot; nothing on MongoDB) and marks the
 // migration completed, which is then validated.
 var cutoverCmd = &cobra.Command{
 	Use:   "cutover",
@@ -136,7 +137,7 @@ func followCutover(migrationID string) error {
 		}
 		switch {
 		case m.Status == "completed":
-			fmt.Println("Cutover complete: the migration is completed and the replication slot dropped.")
+			fmt.Println("Cutover complete: the migration is completed and the stream removed from the source.")
 			return nil
 		case m.Status == "failed" || m.Status == "cancelled":
 			return fmt.Errorf("live migration %s: %s", m.Status, m.Error)
