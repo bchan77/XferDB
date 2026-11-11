@@ -249,3 +249,19 @@ func DeferredSchema(ctx context.Context, project *adapters.Project, db *state.Me
 	}
 	return e.createPostSchema(ctx, stageSchema(schemas, stage), workers)
 }
+
+// nullableColumns returns t with every column but its key nullable. A
+// MongoDB plan marks a field NOT NULL when every sampled document had it,
+// but while a live migration streams, any document can lose a field ($unset)
+// or be inserted without one, and the row it becomes must still be stored.
+func nullableColumns(t adapters.TableSchema) adapters.TableSchema {
+	cols := make([]adapters.ColumnDef, len(t.Columns))
+	for i, c := range t.Columns {
+		if !c.PrimaryKey {
+			c.Nullable = true
+		}
+		cols[i] = c
+	}
+	t.Columns = cols
+	return t
+}

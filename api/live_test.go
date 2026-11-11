@@ -327,12 +327,28 @@ func runLive(t *testing.T, srcType, srcDSN string, src *sql.DB, target map[strin
 		vs = listValidations(t, hs, m.ID)
 		return len(vs) == 1 && vs[0].Status == "completed"
 	})
-	for _, vt := range vs[0].Tables {
-		if vt.Result != "pass" {
-			t.Errorf("validation after cutover: %s %s", vt.TableName, vt.Result)
+	checkValidationPassed(t, hs, vs[0].ID, items, notes, kids)
+
+}
+
+// checkValidationPassed checks validation id compared every one of tables
+// and found them equal. Its tables come from GET /validations/{id}: the
+// migration's list of validations leaves them out.
+func checkValidationPassed(t *testing.T, hs *httptest.Server, id string, tables ...string) {
+	t.Helper()
+	var v validationResult
+	get(t, hs.URL+"/api/v1/validations/"+id, &v)
+	got := map[string]string{}
+	for _, vt := range v.Tables {
+		got[vt.TableName] = vt.Result
+	}
+	for _, table := range tables {
+		if r, ok := got[table]; !ok {
+			t.Errorf("validation after cutover didn't check %s (checked %v)", table, got)
+		} else if r != "pass" {
+			t.Errorf("validation after cutover: %s %s", table, r)
 		}
 	}
-
 }
 
 type liveMig struct {

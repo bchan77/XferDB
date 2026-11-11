@@ -39,6 +39,7 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/cdc"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
+	"gitea.homelab.local/nextdevops/XferDB/state"
 )
 
 // Roles.
@@ -62,6 +63,9 @@ type Spec struct {
 	// Schema is each table's columns when the stream began, which a schema
 	// change on the source is told from.
 	Schema map[string][]cdc.Column `json:"schema,omitempty"`
+	// Plan is the project's schema plan, for a source that converts
+	// documents by it (MongoDB).
+	Plan []state.SchemaPlanRow `json:"plan,omitempty"`
 }
 
 // QueueDir is the queue inside a worker directory.
@@ -155,13 +159,21 @@ func runCapture(ctx context.Context, dir string, spec *Spec, st Status) error {
 		return err
 	}
 	defer src.Close()
+	if pc, ok := src.(interface {
+		SetPlan([]state.SchemaPlanRow) error
+	}); ok {
+		if err := pc.SetPlan(spec.Plan); err != nil {
+			return err
+		}
+	}
 	q, err := cdc.OpenWriter(QueueDir(dir), spec.SegmentBytes)
 	if err != nil {
 		return err
 	}
 	defer q.Close()
 	c := &cdc.Capturer{Source: src, Queue: q, Start: spec.StartPos,
-		Schema: spec.Schema, SchemaFile: filepath.Join(dir, "schema.json")}
+		Schema: spec.Schema, SchemaFile: filepath.Join(dir, "schema.json"),
+		ConfirmedFile: filepath.Join(dir, "confirmed")}
 	stop, err := serveStatus(dir, RoleCapture, func() Status {
 		s := c.Status()
 		st.Capture = &s
