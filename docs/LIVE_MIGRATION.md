@@ -64,6 +64,13 @@ How it differs from PostgreSQL:
   target may skip up to `cache_size` values: it never reuses one.
 - **Dropping the slot** waits up to a minute after the stream stops, so
   cutover and cancel take that long to finish.
+- **Hash-sharded tables** (a primary key starting with a `HASH` column, as
+  YugabyteDB makes by default) are copied in chunks of their hash space rather
+  than in key order, which would cost a scan of the table for every page. As
+  many chunks are copied at once as the run's segment workers
+  (`--segment-workers`, 1 by default), and each is checkpointed, so a resumed
+  snapshot skips the chunks already done. Range-sharded keys are paged in key
+  order, which YugabyteDB reads efficiently.
 
 **Target:** PostgreSQL, YugabyteDB, MySQL or SQLite.
 
@@ -295,9 +302,6 @@ Prometheus metrics (`GET /metrics`): `xferdb_cdc_phase`,
 ## Limitations
 
 - The source must be PostgreSQL or YugabyteDB. MySQL and MongoDB sources are planned.
-- **YugabyteDB**: the snapshot pages each table by its primary key. On a
-  hash-sharded key, every page costs a scan of the table, so a large table
-  copies slowly; range-sharded keys page efficiently.
 - Every migrated table needs a primary key.
 - Schema changes are not applied; they pause the migration (step 5).
 - Sequences are set at cutover on PostgreSQL targets only.
