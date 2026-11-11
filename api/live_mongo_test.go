@@ -476,10 +476,25 @@ func mongoWriter(t *testing.T, users, things *mongo.Collection, client *mongo.Cl
 					}
 				case k == 8:
 					if id := pick(things); id != nil {
-						if r.Intn(2) == 0 {
+						switch r.Intn(3) {
+						case 0:
 							_, err = things.DeleteOne(ctx, bson.D{{Key: "_id", Value: id}})
-						} else {
+						case 1:
 							_, err = things.UpdateByID(ctx, id, bson.D{{Key: "$set", Value: bson.D{{Key: "label", Value: fmt.Sprint("upd", next)}}}})
+						default:
+							// An update of v, the sharded things' shard key:
+							// things keeps no post-images, and its event's
+							// documentKey has the v from before.
+							var cur struct {
+								V int64 `bson:"v"`
+							}
+							if err = things.FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Decode(&cur); err == nil {
+								_, err = things.UpdateOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "v", Value: cur.V}},
+									bson.D{{Key: "$set", Value: bson.D{{Key: "v", Value: cur.V + 1}, {Key: "label", Value: fmt.Sprint("v+1 ", next)}}}})
+							}
+							if errors.Is(err, mongo.ErrNoDocuments) {
+								err = nil // another writer deleted it first
+							}
 						}
 					}
 				default:
