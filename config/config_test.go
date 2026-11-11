@@ -344,3 +344,52 @@ func TestValidate_EmptyIsOK(t *testing.T) {
 		t.Errorf("empty File should validate, got: %v", err)
 	}
 }
+
+// ResolveTransferConfigSources reports a field as set only when the config
+// file or an env var gave it; the CLI sends only those, so the project's saved
+// settings apply to the rest (#172).
+func TestResolveTransferConfigSources(t *testing.T) {
+	for _, k := range []string{"BATCH_SIZE", "TABLE_WORKERS", "SEGMENT_WORKERS", "BULK_COPY", "ASYNC_PIPELINE"} {
+		t.Setenv("XFERDB_"+k, "")
+	}
+	builtIn := adapters.TransferConfig{TableWorkers: 1, SegmentWorkers: 1}
+
+	// No file, no env: nothing is set, values are the built-in ones.
+	got, set := ResolveTransferConfigSources(nil, builtIn)
+	if set != (TransferSources{}) {
+		t.Errorf("no file, no env: set = %+v, want none", set)
+	}
+	if got.TableWorkers != 1 || got.SegmentWorkers != 1 {
+		t.Errorf("no file, no env: got %+v, want the built-in values", got)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "xferdb.yaml")
+	yaml := "defaults:\n  table_workers: 4\n  async_pipeline: true\n  tables: [orders]\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loader, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, set = ResolveTransferConfigSources(loader, builtIn)
+	want := TransferSources{TableWorkers: true, AsyncPipeline: true, Tables: true}
+	if set != want {
+		t.Errorf("file: set = %+v, want %+v", set, want)
+	}
+	if got.TableWorkers != 4 || !got.AsyncPipeline || len(got.Tables) != 1 {
+		t.Errorf("file: got %+v", got)
+	}
+
+	// An env var sets its field, including a false that turns a file's true off.
+	t.Setenv("XFERDB_SEGMENT_WORKERS", "6")
+	t.Setenv("XFERDB_ASYNC_PIPELINE", "false")
+	got, set = ResolveTransferConfigSources(loader, builtIn)
+	if !set.SegmentWorkers || got.SegmentWorkers != 6 {
+		t.Errorf("env segment workers: set=%v value=%d, want set 6", set.SegmentWorkers, got.SegmentWorkers)
+	}
+	if !set.AsyncPipeline || got.AsyncPipeline {
+		t.Errorf("env async_pipeline=false: set=%v value=%v, want set false", set.AsyncPipeline, got.AsyncPipeline)
+	}
+}

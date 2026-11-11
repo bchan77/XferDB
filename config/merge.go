@@ -45,6 +45,20 @@ func envInt(name string) (int, bool) {
 	return n, true
 }
 
+// TransferSources records which TransferConfig fields a resolution took from
+// the config file or an environment variable rather than the built-in
+// default. A caller that starts a migration sends only these (plus its own
+// flags), so that whatever the user didn't set comes from the project's saved
+// transfer settings instead of a built-in default (#172).
+type TransferSources struct {
+	BatchSize      bool
+	TableWorkers   bool
+	SegmentWorkers bool
+	BulkCopy       bool
+	AsyncPipeline  bool
+	Tables         bool
+}
+
 // ResolveTransferConfig applies the precedence rules:
 //
 //	CLI flag > env var > config file > built-in default
@@ -53,47 +67,57 @@ func envInt(name string) (int, bool) {
 //
 // builtInDefault is the floor used when nothing else provides a value.
 func ResolveTransferConfig(loader *Loader, builtInDefault adapters.TransferConfig) adapters.TransferConfig {
+	out, _ := ResolveTransferConfigSources(loader, builtInDefault)
+	return out
+}
+
+// ResolveTransferConfigSources is ResolveTransferConfig, also reporting which
+// fields came from the config file or an env var.
+func ResolveTransferConfigSources(loader *Loader, builtInDefault adapters.TransferConfig) (adapters.TransferConfig, TransferSources) {
 	out := builtInDefault
+	var set TransferSources
 	if loader != nil {
 		d := loader.Defaults()
 		if d.BatchSize > 0 {
-			out.BatchSize = d.BatchSize
+			out.BatchSize, set.BatchSize = d.BatchSize, true
 		}
 		if d.TableWorkers > 0 {
-			out.TableWorkers = d.TableWorkers
+			out.TableWorkers, set.TableWorkers = d.TableWorkers, true
 		}
 		if d.SegmentWorkers > 0 {
-			out.SegmentWorkers = d.SegmentWorkers
+			out.SegmentWorkers, set.SegmentWorkers = d.SegmentWorkers, true
 		}
+		// A file's false is indistinguishable from an absent key, so only
+		// true counts as set.
 		if d.BulkCopy {
-			out.BulkCopy = true
+			out.BulkCopy, set.BulkCopy = true, true
 		}
 		if d.AsyncPipeline {
-			out.AsyncPipeline = true
+			out.AsyncPipeline, set.AsyncPipeline = true, true
 		}
 		if d.OnError != "" {
 			out.OnError = d.OnError
 		}
 		if len(d.Tables) > 0 {
-			out.Tables = d.Tables
+			out.Tables, set.Tables = d.Tables, true
 		}
 	}
 
 	// Env vars override file/default values. Use tri-state so "false" actually disables.
-	if v, set := envTriState("BULK_COPY"); set {
-		out.BulkCopy = v
+	if v, ok := envTriState("BULK_COPY"); ok {
+		out.BulkCopy, set.BulkCopy = v, true
 	}
-	if v, set := envTriState("ASYNC_PIPELINE"); set {
-		out.AsyncPipeline = v
+	if v, ok := envTriState("ASYNC_PIPELINE"); ok {
+		out.AsyncPipeline, set.AsyncPipeline = v, true
 	}
-	if v, set := envInt("BATCH_SIZE"); set && v > 0 {
-		out.BatchSize = v
+	if v, ok := envInt("BATCH_SIZE"); ok && v > 0 {
+		out.BatchSize, set.BatchSize = v, true
 	}
-	if v, set := envInt("TABLE_WORKERS"); set && v > 0 {
-		out.TableWorkers = v
+	if v, ok := envInt("TABLE_WORKERS"); ok && v > 0 {
+		out.TableWorkers, set.TableWorkers = v, true
 	}
-	if v, set := envInt("SEGMENT_WORKERS"); set && v > 0 {
-		out.SegmentWorkers = v
+	if v, ok := envInt("SEGMENT_WORKERS"); ok && v > 0 {
+		out.SegmentWorkers, set.SegmentWorkers = v, true
 	}
-	return out
+	return out, set
 }

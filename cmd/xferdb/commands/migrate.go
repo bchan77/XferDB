@@ -14,6 +14,7 @@ import (
 	"gitea.homelab.local/nextdevops/XferDB/stats"
 	"gitea.homelab.local/nextdevops/XferDB/validate"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var migrateCmd = &cobra.Command{
@@ -41,11 +42,6 @@ tables that did complete are still validated.`,
 		preflightOnly, _ := cmd.Flags().GetBool("preflight")
 		statusOnly, _ := cmd.Flags().GetBool("status")
 		cancelOnly, _ := cmd.Flags().GetBool("cancel")
-		recreateSchema, _ := cmd.Flags().GetBool("recreate-schema")
-		truncate, _ := cmd.Flags().GetBool("truncate")
-		offsetSegments, _ := cmd.Flags().GetBool("offset-segments")
-		tablesFlag, _ := cmd.Flags().GetString("tables")
-		accurateCounts, _ := cmd.Flags().GetBool("accurate-counts")
 		historyOnly, _ := cmd.Flags().GetBool("history")
 		validationMode, _ := cmd.Flags().GetString("validation")
 		validationLevel, _ := cmd.Flags().GetString("validation-level")
@@ -57,8 +53,10 @@ tables that did complete are still validated.`,
 			return fmt.Errorf("--until-streaming needs --live")
 		}
 
-		if recreateSchema && truncate {
-			return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
+		if r, _ := cmd.Flags().GetBool("recreate-schema"); r {
+			if t, _ := cmd.Flags().GetBool("truncate"); t {
+				return fmt.Errorf("--recreate-schema and --truncate are mutually exclusive")
+			}
 		}
 		if skipValidation {
 			if cmd.Flags().Changed("validation") && validationMode != validate.ModeOff {
@@ -89,50 +87,11 @@ tables that did complete are still validated.`,
 			extra["validation_sample"] = validationSample
 		}
 
-		// table-workers/segment-workers/batch-size/bulk-copy/async-pipeline/tables
-		// resolve with CLI flag > env var > config file > built-in default
-		// precedence. A CLI flag only wins when the user actually passed it --
-		// otherwise the flag's own default (e.g. --table-workers defaults to 1)
-		// would always shadow a config file value.
-		builtIn := adapters.TransferConfig{TableWorkers: 1, SegmentWorkers: 1}
-		resolved := builtIn
-		if loader, cfgErr := config.Load(ConfigPath); cfgErr == nil {
-			resolved = config.ResolveTransferConfig(loader, builtIn)
+		var loader *config.Loader
+		if l, cfgErr := config.Load(ConfigPath); cfgErr == nil {
+			loader = l
 		}
-
-		tableWorkers := resolved.TableWorkers
-		if cmd.Flags().Changed("table-workers") {
-			tableWorkers, _ = cmd.Flags().GetInt("table-workers")
-		}
-		segmentWorkers := resolved.SegmentWorkers
-		if cmd.Flags().Changed("segment-workers") {
-			segmentWorkers, _ = cmd.Flags().GetInt("segment-workers")
-		}
-		batchSize := resolved.BatchSize
-		if cmd.Flags().Changed("batch-size") {
-			batchSize, _ = cmd.Flags().GetInt("batch-size")
-		}
-		bulkCopy := resolved.BulkCopy
-		if cmd.Flags().Changed("bulk-copy") {
-			bulkCopy, _ = cmd.Flags().GetBool("bulk-copy")
-		}
-		asyncPipeline := resolved.AsyncPipeline
-		if cmd.Flags().Changed("async-pipeline") {
-			asyncPipeline, _ = cmd.Flags().GetBool("async-pipeline")
-		}
-
-		// Parse comma-separated table list; strip whitespace. Falls back to the
-		// resolved (env/config) table list when --tables wasn't passed.
-		var tables []string
-		if cmd.Flags().Changed("tables") {
-			for _, t := range strings.Split(tablesFlag, ",") {
-				if t = strings.TrimSpace(t); t != "" {
-					tables = append(tables, t)
-				}
-			}
-		} else {
-			tables = resolved.Tables
-		}
+		req := transferRequest(cmd.Flags(), loader)
 
 		projectName, err := currentProject(projectFlag)
 		if err != nil {
@@ -180,13 +139,13 @@ tables that did complete are still validated.`,
 			return showStatsHistory(migrationID)
 		}
 
-		if liveMode {
-			if extra == nil {
-				extra = map[string]any{}
-			}
-			extra["mode"] = "live"
+		for k, v := range extra {
+			req[k] = v
 		}
-		migrationID, effectiveValidation, err := startMigration(projectID, recreateSchema, truncate, tableWorkers, segmentWorkers, batchSize, offsetSegments, bulkCopy, accurateCounts, asyncPipeline, tables, extra)
+		if liveMode {
+			req["mode"] = "live"
+		}
+		migrationID, effectiveValidation, err := startMigration(projectID, req)
 		if err != nil {
 			return err
 		}
@@ -228,8 +187,8 @@ func init() {
 	migrateCmd.Flags().Bool("cancel", false, "Cancel the currently running migration")
 	migrateCmd.Flags().Bool("recreate-schema", false, "Drop and recreate target tables before migrating")
 	migrateCmd.Flags().Bool("truncate", false, "Truncate target tables before loading data (keeps schema)")
-	migrateCmd.Flags().Int("table-workers", 1, "Number of tables to migrate concurrently")
-	migrateCmd.Flags().Int("segment-workers", 1, "Number of parallel workers per table (splits by PK range; falls back to OFFSET when no integer PK)")
+	migrateCmd.Flags().Int("table-workers", 0, "Number of tables to migrate concurrently (0 = use the project's setting)")
+	migrateCmd.Flags().Int("segment-workers", 0, "Number of parallel workers per table (splits by PK range; falls back to OFFSET when no integer PK; 0 = use the project's setting)")
 	migrateCmd.Flags().Bool("offset-segments", false, "Force OFFSET-based segment splitting even when a PK is available (use with --segment-workers)")
 	migrateCmd.Flags().Int("batch-size", 0, "Rows per batch (overrides the project default; 0 = use project default)")
 	migrateCmd.Flags().Bool("bulk-copy", false, "Use the target's fast bulk-load path for writes — postgres: COPY, mysql: LOAD DATA LOCAL INFILE, sqlite: batched inserts (faster; combine with --truncate or --recreate-schema)")
@@ -487,29 +446,82 @@ func latestMigrationID(projectID string) (string, error) {
 	return migrations[0].ID, nil
 }
 
-// startMigration POSTs to create a new migration and returns its ID and the
-// validation mode the server will apply once it completes. extra carries any
-// further request fields (the validation overrides).
-func startMigration(projectID string, recreateSchema, truncate bool, tableWorkers, segmentWorkers, batchSize int, offsetSegments, bulkCopy, accurateCounts, asyncPipeline bool, tables []string, extra map[string]any) (string, string, error) {
-	req := map[string]any{
-		"recreate_schema": recreateSchema,
-		"truncate":        truncate,
-		"table_workers":   tableWorkers,
-		"segment_workers": segmentWorkers,
-		"offset_fallback": offsetSegments,
-		"bulk_copy":       bulkCopy,
-		"accurate_counts": accurateCounts,
-		"async_pipeline":  asyncPipeline,
+// transferRequest builds the transfer part of a start-migration request from
+// the command's flags and the config file (#172).
+//
+// A project setting -- table workers, segment workers, batch size, async
+// pipeline, the table list, OFFSET segments, accurate counts -- is sent only
+// when the user set it: a flag, else an XFERDB_* env var, else the config
+// file's defaults. Anything else is left out, so the server uses the
+// project's saved transfer_config. (Sending a built-in default instead made
+// `project create --table-workers 3` have no effect on `xferdb migrate`.)
+//
+// Schema mode (recreate_schema / truncate) and bulk_copy are per run, as on
+// the web UI's run form, and always sent: a value saved in the project never
+// turns on a destructive option, or the bulk-copy path, by itself.
+func transferRequest(flags *pflag.FlagSet, loader *config.Loader) map[string]any {
+	resolved, set := config.ResolveTransferConfigSources(loader, adapters.TransferConfig{})
+	req := map[string]any{}
+
+	// 0 (or less) on a flag means "use the project's", as the flags' help says.
+	intSetting := func(flag, key string, fromConfig bool, configValue int) {
+		if flags.Changed(flag) {
+			if v, _ := flags.GetInt(flag); v > 0 {
+				req[key] = v
+			}
+		} else if fromConfig {
+			req[key] = configValue
+		}
 	}
-	if batchSize > 0 {
-		req["batch_size"] = batchSize
+	intSetting("table-workers", "table_workers", set.TableWorkers, resolved.TableWorkers)
+	intSetting("segment-workers", "segment_workers", set.SegmentWorkers, resolved.SegmentWorkers)
+	intSetting("batch-size", "batch_size", set.BatchSize, resolved.BatchSize)
+
+	if flags.Changed("async-pipeline") {
+		req["async_pipeline"], _ = flags.GetBool("async-pipeline")
+	} else if set.AsyncPipeline {
+		req["async_pipeline"] = resolved.AsyncPipeline
 	}
-	if len(tables) > 0 {
-		req["tables"] = tables
+	for _, f := range []struct{ flag, key string }{
+		{"offset-segments", "offset_fallback"},
+		{"accurate-counts", "accurate_counts"},
+	} {
+		if flags.Changed(f.flag) {
+			req[f.key], _ = flags.GetBool(f.flag)
+		}
 	}
-	for k, v := range extra {
-		req[k] = v
+
+	if flags.Changed("tables") {
+		raw, _ := flags.GetString("tables")
+		var tables []string
+		for _, t := range strings.Split(raw, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				tables = append(tables, t)
+			}
+		}
+		if len(tables) > 0 {
+			req["tables"] = tables
+		}
+	} else if set.Tables {
+		req["tables"] = resolved.Tables
 	}
+
+	// Per run, always sent.
+	req["recreate_schema"], _ = flags.GetBool("recreate-schema")
+	req["truncate"], _ = flags.GetBool("truncate")
+	if flags.Changed("bulk-copy") {
+		req["bulk_copy"], _ = flags.GetBool("bulk-copy")
+	} else {
+		req["bulk_copy"] = resolved.BulkCopy
+	}
+	return req
+}
+
+// startMigration POSTs to create a new migration with the given request body
+// (transferRequest's fields, plus the validation overrides and mode) and
+// returns its ID and the validation mode the server will apply once it
+// completes.
+func startMigration(projectID string, req map[string]any) (string, string, error) {
 	body, _ := json.Marshal(req)
 	resp, err := http.Post(
 		ServerAddr+"/api/v1/projects/"+projectID+"/migrations",
