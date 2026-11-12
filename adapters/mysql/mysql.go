@@ -49,6 +49,9 @@ func mapTypeToMySQL(srcType string) string {
 		return "text"
 	case "inet", "cidr":
 		return "varchar(43)"
+	case "interval":
+		// No MySQL interval type: keep the ISO 8601 / PostgreSQL text.
+		return "varchar(64)"
 	case "numeric", "decimal":
 		// An unqualified DECIMAL is DECIMAL(10,0) in MySQL, which would drop
 		// every fractional digit without complaining. Postgres numeric with no

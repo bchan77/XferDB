@@ -233,9 +233,9 @@ projects:
 			name: "unknown adapter",
 			body: `
 projects:
-  - {name: p1, source: {type: oracle, dsn: x}, target: {type: postgres, dsn: y}}
+  - {name: p1, source: {type: db2, dsn: x}, target: {type: postgres, dsn: y}}
 `,
-			want: "oracle",
+			want: "db2",
 		},
 		{
 			name: "invalid log level",

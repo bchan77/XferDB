@@ -31,6 +31,7 @@ const (
 	kindJSON
 	kindBinary
 	kindUUID
+	kindInterval // interval.go
 )
 
 // nullToken stands for SQL NULL (and a field absent from a MongoDB document,
@@ -76,6 +77,9 @@ func kindOf(colType string) kind {
 		return kindUUID
 	case "char", "character", "bpchar":
 		return kindChar
+	}
+	if strings.HasPrefix(base, "interval") {
+		return kindInterval
 	}
 	if strings.HasPrefix(base, "timestamp") {
 		return kindTimestamp
@@ -151,6 +155,8 @@ func canonicalize(v interface{}, c column) string {
 		return canonBinary(v)
 	case kindUUID:
 		return canonUUID(v)
+	case kindInterval:
+		return canonInterval(v)
 	case kindChar:
 		return strings.TrimRight(asString(v), " ")
 	}
