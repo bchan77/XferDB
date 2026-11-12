@@ -4,7 +4,26 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Live migration from MongoDB (beta, #179).** A MongoDB 4.2+ replica set, or a sharded cluster
+  through one `mongos`, can be the source of a live migration to PostgreSQL, YugabyteDB, MySQL or
+  SQLite. Changes are read from a change stream, so nothing is created on the source. Documents
+  go through the project's schema plan exactly as in the copy, and fields the plan doesn't know,
+  also ones that first appear while streaming, land in `_extra`, so the stream never pauses for a
+  schema change. Updates use the collection's post-images where it keeps them (6.0+), and are
+  otherwise read back from the primary. A shard key change that moves a document between shards
+  is applied as the one change it is. Readiness checks the topology, the version, that the login
+  can open a change stream, and the oplog window; a stream whose resume point has left the oplog
+  fails the migration. See `docs/LIVE_MIGRATION.md`.
+
 ### Fixed
+- **The cutover's quiet check could miss writes still on their way (#181).** It waited a few
+  seconds and then counted the changes capture had queued since the cutover point, but a change
+  made during that wait could still be on its way to capture, and the check then passed and the
+  cutover completed while the source was being written, leaving those writes behind. It showed
+  on sharded MongoDB, whose `mongos` holds a change until every shard is past it; any source
+  could do it under a slow enough network. The check now waits until capture has confirmed the
+  source's position after the wait before counting.
 - **Live migration readiness fails a table with a `DEFERRABLE` primary key (#176).** PostgreSQL
   can't identify a row by a deferrable key, so such a table has no usable replica identity, and
   once XferDB's publication included it every `UPDATE` and `DELETE` on it failed on the source

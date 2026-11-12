@@ -60,6 +60,12 @@ function isPgFamily(type) {
   return type === 'postgres' || type === 'yugabyte';
 }
 
+// liveSourceType: the source types a live migration can stream from
+// (registry.SupportsLive on the server; MongoDB since #179).
+function liveSourceType(type) {
+  return isPgFamily(type) || type === 'mongodb';
+}
+
 function defaultPort(type) {
   return { mysql: '3306', yugabyte: '5433' }[type] || '5432';
 }
@@ -1935,7 +1941,7 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea, live = fa
     const ok = await confirmModal({
       title: live ? 'Cancel live migration?' : 'Cancel migration?',
       body: live
-        ? 'This stops streaming changes and drops the replication slot on the source. Rows already written to the target are kept, but the run is marked cancelled and cannot be resumed.'
+        ? 'This stops streaming changes and removes the stream from the source (on PostgreSQL and YugabyteDB it drops the replication slot). Rows already written to the target are kept, but the run is marked cancelled and cannot be resumed.'
         : 'This stops the migration. Rows already written are kept, but the run is marked cancelled and cannot be resumed.',
       confirmLabel: 'Cancel Migration',
       danger: true,
@@ -2031,7 +2037,7 @@ function liveStatusHTML(mig) {
   if (phase === 'catch_up') {
     body += `<div class="hint">Catching up: replaying what was written during the copy, up to ${esc(l.catch_up_pos || 'the position recorded when it ended')}. Unique indexes are added once it is done.</div>`;
   } else if (phase === 'streaming' && mig.status !== 'paused' && !(l.cutover && l.cutover.running)) {
-    body += `<div class="hint">The target follows the source. To switch over, stop every application writing to the source, then cut over: the rest of the changes are applied, sequences set, foreign keys and checks added, and the replication slot dropped.</div>`;
+    body += `<div class="hint">The target follows the source. To switch over, stop every application writing to the source, then cut over: the rest of the changes are applied, sequences set, foreign keys and checks added, and the stream removed from the source.</div>`;
   }
   if (l.cutover) body += cutoverHTML(l.cutover);
   if (l.capture_error) body += errorBanner('Capture worker: ' + l.capture_error + ' (restarting)');
@@ -2111,7 +2117,7 @@ function mountLiveActions(actionsEl, area, migId, mig, onDone) {
     actionsEl.querySelector('#cutoverBtn').addEventListener('click', async () => {
       const ok = await confirmModal({
         title: 'Cut over to the target?',
-        body: 'Stop every application writing to the source first. The cutover applies the remaining changes, checks for a few seconds that no more arrive, sets the target\'s sequences, adds foreign keys and checks, drops the replication slot and completes the migration, which is then validated.',
+        body: 'Stop every application writing to the source first. The cutover applies the remaining changes, checks for a few seconds that no more arrive, sets the target\'s sequences, adds foreign keys and checks, removes the stream from the source (a PostgreSQL replication slot) and completes the migration, which is then validated.',
         confirmLabel: 'Cut over',
       });
       if (ok) doCutover(false);
@@ -2372,7 +2378,7 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeNone" value="none" checked><label for="modeNone">Keep existing target schema/data</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeTruncate" value="truncate"><label for="modeTruncate">Truncate target tables first (keep schema)</label></div>
         <div class="checkbox-row"><input type="radio" name="schemaMode" id="modeRecreate" value="recreate"><label for="modeRecreate">Drop &amp; recreate target tables</label></div>
-        ${isPgFamily(sourceType) ? `
+        ${liveSourceType(sourceType) ? `
         <div class="checkbox-row" id="m-live-row"><input type="checkbox" id="m-live"><label for="m-live" style="white-space:nowrap;">Live migration ${betaBadge()}</label><span class="hint" style="margin-left:8px;">Copy the tables, then keep streaming the source's changes to the target. Run the live readiness check in Settings first. In beta: try it on a copy of your data first.</span></div>` : ''}
         <div class="field-row">
           <div><label>Table workers</label><input type="number" id="m-workers" min="1" value="${esc(tc.table_workers > 0 ? tc.table_workers : 1)}"><div class="hint">Parallel tables to migrate</div></div>

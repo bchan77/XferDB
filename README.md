@@ -12,14 +12,14 @@
 | YugabyteDB | ✅ | ✅ | 2025.2, 2026.1 (type `yugabyte`; live migration source too) |
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
-| MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 |
+| MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 (live migration source too: replica set or sharded cluster) |
 | Cassandra | 🔜 | 🔜 | — |
 
 > ✅ = Working &nbsp;|&nbsp; 🔜 = Planned
 
 ### Tested Migration Paths
 
-Most of these are the pairs covered by the automated compatibility matrix (71 cases against real
+Most of these are the pairs covered by the automated compatibility matrix (75 cases against real
 Postgres/MySQL/MongoDB/YugabyteDB instances in Kubernetes, run on every push/PR touching Go code — see
 [`XferDB-jenkins`](https://gitea.homelab.local/nextdevops/XferDB-jenkins)). Every case also
 validates the result (L2, below), and each target has at least one case exercising
@@ -28,7 +28,8 @@ automated yet.
 
 | Source | Target | Status |
 |--------|--------|--------|
-| MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 24 cases (incl. polymorphic/compound `_id` and nested documents) |
+| MongoDB (6.0, 7.0, 8.0, 8.2, 8.3) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 26 cases (incl. polymorphic/compound `_id`, nested documents, and live migrations from an 8.0 replica set and a 7.0 sharded cluster) |
+| MongoDB (7.0, 8.0) | YugabyteDB 2026.1 | ✅ Tested — 2 cases (live migrations from a 7.0 replica set and an 8.0 sharded cluster) |
 | MySQL (8.0, 8.4, 9.7, 26.7) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 18 cases |
 | PostgreSQL (14, 15, 16, 17) | PostgreSQL (14, 15, 16, 17) | ✅ Tested — 10 cases |
 | PostgreSQL (14, 17) | MySQL 8.4 | ✅ Tested — 4 cases |
@@ -54,7 +55,7 @@ automated yet.
 - **Data validation** — after a migration, compare source and target: row counts (L1), every row's content (L2, the default), or L2 plus a primary-key diff listing the differing rows (L3); for every source, MongoDB included. See [Validation](#validation)
 - **All PostgreSQL schemas** — a PostgreSQL source migrates every non-system schema by default; the optional *Schema* setting narrows it to one
 - **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration; a missing target database can be created from the web UI
-- **Live migration (beta)** — from a PostgreSQL source, copy the tables and then keep streaming the source's changes to the target until you cut over, so applications keep running during the copy. See [Live migration (beta)](#live-migration-beta)
+- **Live migration (beta)** — from a PostgreSQL, YugabyteDB or MongoDB source, copy the tables and then keep streaming the source's changes to the target until you cut over, so applications keep running during the copy. See [Live migration (beta)](#live-migration-beta)
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
 - **Live progress display** — per-table status, rows/s, read/write rates, ETA, and live resource usage (goroutines, heap, CPU%)
 - **Detailed table status** — shows "counting rows...", "waiting for schema", "waiting for indexes" so you always know what's happening
@@ -349,7 +350,7 @@ xferdb migrate --status
 # View recorded stats history after migration completes
 xferdb migrate --history
 
-# Live migration (beta, PostgreSQL and YugabyteDB sources): copy, then stream changes until cutover.
+# Live migration (beta, PostgreSQL, YugabyteDB and MongoDB sources): copy, then stream changes until cutover.
 # Guide: docs/LIVE_MIGRATION.md
 xferdb migrate --preflight --live         # check the source and target can do it
 xferdb migrate --live
@@ -457,16 +458,16 @@ xferdb list
 
 **Step-by-step guide: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md)**: requirements and how to set them, the UI, CLI and API for each step, schema changes, cutover, WAL, and troubleshooting.
 
-A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical`, or **YugabyteDB** (source type `yugabyte`, see the guide for its requirements); the target can be PostgreSQL, YugabyteDB, MySQL or SQLite. Every migrated table needs a primary key.
+A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical`, **YugabyteDB** (source type `yugabyte`), or **MongoDB** 4.2+ as a replica set or a sharded cluster (through one `mongos`; documents go through the schema plan as in the copy, and fields it doesn't know land in `_extra`); see the guide for each one's requirements. The target can be PostgreSQL, YugabyteDB, MySQL or SQLite. Every migrated table needs a primary key.
 
-1. **Readiness.** *Settings → Check live migration readiness*, `xferdb migrate --preflight --live`, or `POST /projects/:id/preflight` with `{"mode":"live"}`; checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication.
-2. **Start.** Tick *Live migration* on the migration form, or run `xferdb migrate --live`. XferDB creates a replication slot and publication, copies the tables, catches up on what was written meanwhile, then streams. The capture and apply workers run as their own processes and survive a server restart.
+1. **Readiness.** *Settings → Check live migration readiness*, `xferdb migrate --preflight --live`, or `POST /projects/:id/preflight` with `{"mode":"live"}`; checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication (MongoDB: a replica set or sharded cluster, 4.2+, that the login can open a change stream, and the oplog window).
+2. **Start.** Tick *Live migration* on the migration form, or run `xferdb migrate --live`. XferDB creates a replication slot and publication (nothing on MongoDB, whose change stream reads the oplog), copies the tables, catches up on what was written meanwhile, then streams. The capture and apply workers run as their own processes and survive a server restart.
 3. **Stream.** The migration page shows the lag and the WAL the source keeps for the slot. *Pause* stops applying changes; they are still captured.
 4. **Cut over.** Stop every application writing to the source, then *Cut over* (`xferdb cutover`). The remaining changes are applied, sequences set (PostgreSQL targets), and foreign keys, checks and triggers added; then the slot is dropped and the migration validated. If writes are still arriving, the cutover stops and streaming goes on.
 
 **Schema changes.** XferDB doesn't apply DDL. When a table's columns change on the source, the migration pauses at that point and shows what changed. Make the same change on the target, then *Resume* (`xferdb resume`).
 
-**WAL.** The source keeps WAL for the slot until XferDB has captured it. The migration page warns when capture has stopped, the slot nears `max_slot_wal_keep_size`, or the server's queue disk runs low; a slot the source has invalidated fails the migration. Cancelling or deleting a live migration drops the slot.
+**WAL.** The source keeps WAL for the slot until XferDB has captured it. The migration page warns when capture has stopped, the slot nears `max_slot_wal_keep_size`, or the server's queue disk runs low; a slot the source has invalidated fails the migration. Cancelling or deleting a live migration drops the slot. A MongoDB source keeps nothing for XferDB: if capture is stopped longer than the oplog's window, the migration fails, so keep the window longer than any outage you expect.
 
 ---
 
