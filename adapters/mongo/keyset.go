@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -47,12 +48,17 @@ func (s *Source) MaxKey(ctx context.Context, table string) ([]string, error) {
 	return []string{key}, nil
 }
 
-// primary is table's collection, read from the primary. A live snapshot
-// must not read from a secondary: one behind the stream's start would copy
-// a document as it was before a change the stream never replays.
+// primary is table's collection, read from the primary with read concern
+// majority. A live snapshot must not read from a secondary: one behind the
+// stream's start would copy a document as it was before a change the
+// stream never replays. Nor may it copy a write a failover could still roll
+// back: the stream only carries majority-committed changes, so nothing
+// would ever remove it from the target. The stream starts at the majority
+// commit point (ChangeSource.Prepare), so it replays whatever a majority
+// read here doesn't see yet.
 func (s *Source) primary(table string) *mongo.Collection {
 	return s.client.Database(s.database).Collection(s.collectionFor(table),
-		options.Collection().SetReadPreference(readpref.Primary()))
+		options.Collection().SetReadPreference(readpref.Primary()).SetReadConcern(readconcern.Majority()))
 }
 
 // readKeyset is ReadBatch for a live snapshot (BatchOptions.Keyset): the
