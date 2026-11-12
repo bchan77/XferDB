@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -127,8 +128,14 @@ func (s *ChangeSource) Close() error {
 }
 
 // Prepare implements cdc.ChangeSource: it checks the source can stream
-// changes and returns its cluster time now. Nothing is kept on the source,
-// so there is no existing start point to return; the manager keeps it.
+// changes and returns where to start, the cluster time of the source's
+// majority commit point. Nothing is kept on the source, so there is no
+// existing start point to return; the manager keeps it.
+//
+// The majority commit point, not the last write: the snapshot reads with
+// read concern majority (a write a failover could still roll back is never
+// copied), so it may not see writes after that point, and the stream must
+// replay them.
 func (s *ChangeSource) Prepare(ctx context.Context, _ []string) (cdc.Position, error) {
 	topo, err := topologyOf(ctx, s.client)
 	if err != nil {
@@ -137,7 +144,28 @@ func (s *ChangeSource) Prepare(ctx context.Context, _ []string) (cdc.Position, e
 	if topo == topoStandalone {
 		return nil, errStandalone
 	}
-	return s.CurrentPosition(ctx)
+	return s.majorityPosition(ctx)
+}
+
+// majorityPosition is the cluster time a read with read concern majority
+// sees: the source's majority commit point (through mongos, the cluster's).
+func (s *ChangeSource) majorityPosition(ctx context.Context) (cdc.Position, error) {
+	raw, err := s.client.Database(s.database).RunCommand(ctx, bson.D{
+		{Key: "find", Value: "xferdb_majority_probe"}, {Key: "filter", Value: bson.D{}}, {Key: "limit", Value: 1},
+		{Key: "readConcern", Value: bson.D{{Key: "level", Value: "majority"}}},
+	}).Raw()
+	if err != nil {
+		return nil, fmt.Errorf("majority commit point: %w", err)
+	}
+	v, err := raw.LookupErr("operationTime")
+	if err != nil {
+		return nil, errors.New("majority commit point: the server reports no operationTime")
+	}
+	t, i, ok := v.TimestampOK()
+	if !ok {
+		return nil, fmt.Errorf("majority commit point: operationTime is %s", v.Type)
+	}
+	return position{T: t, I: i}.encode(), nil
 }
 
 var errStandalone = errors.New("a standalone MongoDB server keeps no oplog, so it has no change stream: live migration needs a replica set or a sharded cluster")
@@ -539,7 +567,9 @@ func (s *ChangeSource) keyOf(coll string, docKey bson.D) (map[string]interface{}
 // nothing by it: the document is looked up by _id alone then (across every
 // shard), and is gone only if that finds nothing either.
 func (s *ChangeSource) lookup(ctx context.Context, coll string, docKey bson.D) (bson.D, error) {
-	c := s.client.Database(s.database).Collection(coll)
+	// Majority: a version a failover could roll back would never be undone
+	// by the stream, which only carries majority-committed changes.
+	c := s.client.Database(s.database).Collection(coll, options.Collection().SetReadConcern(readconcern.Majority()))
 	find := func(filter bson.D) (bson.D, error) {
 		var doc bson.D
 		err := c.FindOne(ctx, filter).Decode(&doc)
