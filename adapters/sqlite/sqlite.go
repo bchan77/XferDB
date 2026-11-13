@@ -196,6 +196,27 @@ func getSchema(ctx context.Context, db queryer, table string) (*adapters.TableSc
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
+	if i := rowidAlias(schema.Columns); i >= 0 {
+		// A lone INTEGER PRIMARY KEY is the rowid: SQLite gives a row that
+		// leaves it out the largest key plus one (#194). Not in a WITHOUT
+		// ROWID table, which has no rowid.
+		var ddl sql.NullString
+		ddlRows, err := db.QueryContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table)
+		if err != nil {
+			return nil, err
+		}
+		if ddlRows.Next() {
+			err = ddlRows.Scan(&ddl)
+		}
+		ddlRows.Close()
+		if err != nil {
+			return nil, err
+		}
+		if !withoutRowid(ddl.String) {
+			schema.Columns[i].Identity = true
+		}
+	}
 
 	indexes, err := getIndexes(ctx, db, table)
 	if err != nil {
@@ -210,6 +231,31 @@ func getSchema(ctx context.Context, db queryer, table string) (*adapters.TableSc
 	schema.ForeignKeys = fks
 
 	return schema, nil
+}
+
+// withoutRowid reports whether a CREATE TABLE statement makes a WITHOUT
+// ROWID table: the options after its closing parenthesis say so.
+func withoutRowid(ddl string) bool {
+	opts := strings.ToUpper(ddl[strings.LastIndexByte(ddl, ')')+1:])
+	return strings.Contains(strings.Join(strings.Fields(opts), " "), "WITHOUT ROWID")
+}
+
+// rowidAlias returns the index of a table's only primary key column when
+// it is declared INTEGER, or -1.
+func rowidAlias(cols []adapters.ColumnDef) int {
+	found := -1
+	for i, c := range cols {
+		if c.PrimaryKey {
+			if found >= 0 {
+				return -1
+			}
+			found = i
+		}
+	}
+	if found >= 0 && strings.EqualFold(strings.TrimSpace(cols[found].Type), "INTEGER") {
+		return found
+	}
+	return -1
 }
 
 // getIndexes returns non-primary-key indexes for a table.

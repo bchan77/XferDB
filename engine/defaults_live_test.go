@@ -78,41 +78,7 @@ func TestColumnDefaultsLive(t *testing.T) {
 			seq INTEGER NOT NULL)`,
 	}
 
-	open := func(typ, db string) (*sql.DB, adapters.ConnectionConfig) {
-		switch typ {
-		case "postgres":
-			host, port := hostPort(t, pgAddr)
-			dsn := func(db string) string {
-				return fmt.Sprintf("host=%s port=%d user=postgres dbname=%s sslmode=disable", host, port, db)
-			}
-			admin := openDB(t, "postgres", dsn("postgres"))
-			admin.Exec("DROP DATABASE IF EXISTS " + db)
-			execDB(t, admin, "CREATE DATABASE "+db)
-			admin.Close()
-			t.Cleanup(func() {
-				a := openDB(t, "postgres", dsn("postgres"))
-				a.Exec("DROP DATABASE IF EXISTS " + db + " WITH (FORCE)")
-				a.Close()
-			})
-			return openDB(t, "postgres", dsn(db)),
-				adapters.ConnectionConfig{Type: "postgres", Host: host, Port: port, Username: "postgres", Password: "x", Database: db, SSLMode: "disable"}
-		case "mysql":
-			host, port := hostPort(t, myAddr)
-			admin := openDB(t, "mysql", fmt.Sprintf("root@tcp(%s:%d)/", host, port))
-			admin.Exec("DROP DATABASE IF EXISTS " + db)
-			execDB(t, admin, "CREATE DATABASE "+db)
-			admin.Close()
-			t.Cleanup(func() {
-				a := openDB(t, "mysql", fmt.Sprintf("root@tcp(%s:%d)/", host, port))
-				a.Exec("DROP DATABASE IF EXISTS " + db)
-				a.Close()
-			})
-			return openDB(t, "mysql", fmt.Sprintf("root@tcp(%s:%d)/%s", host, port, db)),
-				adapters.ConnectionConfig{Type: "mysql", Host: host, Port: port, Username: "root", Database: db}
-		}
-		path := filepath.Join(dir, db+".db")
-		return openDB(t, "sqlite3", path), adapters.ConnectionConfig{Type: "sqlite", DSN: path}
-	}
+	open := pairOpener(t, dir, pgAddr, myAddr)
 
 	types := []string{"postgres", "mysql", "sqlite"}
 	for _, sn := range types {
@@ -178,6 +144,48 @@ func TestColumnDefaultsLive(t *testing.T) {
 				check("uid", uid, uid.Valid == wantUUID && (!wantUUID || len(uid.String) == 36))
 			})
 		}
+	}
+}
+
+// pairOpener returns a function that creates an empty database named db on
+// the PostgreSQL or MySQL server of the pairs tests, or a SQLite file in
+// dir, dropped when the test ends, and returns a handle to it and its
+// connection config.
+func pairOpener(t *testing.T, dir, pgAddr, myAddr string) func(typ, db string) (*sql.DB, adapters.ConnectionConfig) {
+	return func(typ, db string) (*sql.DB, adapters.ConnectionConfig) {
+		switch typ {
+		case "postgres":
+			host, port := hostPort(t, pgAddr)
+			dsn := func(db string) string {
+				return fmt.Sprintf("host=%s port=%d user=postgres dbname=%s sslmode=disable", host, port, db)
+			}
+			admin := openDB(t, "postgres", dsn("postgres"))
+			admin.Exec("DROP DATABASE IF EXISTS " + db)
+			execDB(t, admin, "CREATE DATABASE "+db)
+			admin.Close()
+			t.Cleanup(func() {
+				a := openDB(t, "postgres", dsn("postgres"))
+				a.Exec("DROP DATABASE IF EXISTS " + db + " WITH (FORCE)")
+				a.Close()
+			})
+			return openDB(t, "postgres", dsn(db)),
+				adapters.ConnectionConfig{Type: "postgres", Host: host, Port: port, Username: "postgres", Password: "x", Database: db, SSLMode: "disable"}
+		case "mysql":
+			host, port := hostPort(t, myAddr)
+			admin := openDB(t, "mysql", fmt.Sprintf("root@tcp(%s:%d)/", host, port))
+			admin.Exec("DROP DATABASE IF EXISTS " + db)
+			execDB(t, admin, "CREATE DATABASE "+db)
+			admin.Close()
+			t.Cleanup(func() {
+				a := openDB(t, "mysql", fmt.Sprintf("root@tcp(%s:%d)/", host, port))
+				a.Exec("DROP DATABASE IF EXISTS " + db)
+				a.Close()
+			})
+			return openDB(t, "mysql", fmt.Sprintf("root@tcp(%s:%d)/%s", host, port, db)),
+				adapters.ConnectionConfig{Type: "mysql", Host: host, Port: port, Username: "root", Database: db}
+		}
+		path := filepath.Join(dir, db+".db")
+		return openDB(t, "sqlite3", path), adapters.ConnectionConfig{Type: "sqlite", DSN: path}
 	}
 }
 

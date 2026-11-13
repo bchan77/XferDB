@@ -19,7 +19,7 @@ type ConnectionConfig struct {
 	// Schema is the PostgreSQL schema to read tables from or write them to;
 	// empty means public. Other adapters ignore it.
 	Schema string `json:"schema,omitempty" yaml:"schema,omitempty"`
-	DSN      string `json:"dsn" yaml:"dsn"` // optional raw DSN; overrides individual fields if set
+	DSN    string `json:"dsn" yaml:"dsn"` // optional raw DSN; overrides individual fields if set
 }
 
 // ErrorPolicy defines how transfer errors are handled.
@@ -140,6 +140,12 @@ type ColumnDef struct {
 	// Dialect* constant), set by the source that read it, so a target of
 	// another dialect can translate it (TranslateDefault).
 	DefaultDialect string `json:"-"`
+	// Identity marks a column whose value the database generates when an
+	// insert leaves it out (#194): an Oracle or PostgreSQL identity column,
+	// a PostgreSQL serial, a MySQL AUTO_INCREMENT. A target creates it as
+	// its own kind where it can, so the application's inserts still get a
+	// key after the switch-over; DefaultValue is empty for such a column.
+	Identity bool `json:"identity,omitempty"`
 }
 
 // IndexDef describes an index on a table (excluding the primary key index).
@@ -195,10 +201,10 @@ type BatchOptions struct {
 	Limit  int
 	LastPK interface{} // set on resume to continue from last checkpoint
 	// PK-range fields for intra-table parallel workers (all zero/empty when not in use):
-	PKCol      string // primary key column name; when set, use range query instead of OFFSET
-	PKMin      int64  // inclusive lower bound for the segment range
-	PKMax      int64  // upper bound for the segment range
-	PKMaxIncl  bool   // when true use <= for PKMax (last segment); otherwise use <
+	PKCol     string // primary key column name; when set, use range query instead of OFFSET
+	PKMin     int64  // inclusive lower bound for the segment range
+	PKMax     int64  // upper bound for the segment range
+	PKMaxIncl bool   // when true use <= for PKMax (last segment); otherwise use <
 	// Keyset paging by the whole primary key, for a live migration's
 	// snapshot (#102), where rows change while they are read and OFFSET
 	// would skip or repeat some: rows after KeyAfter (nil: from the first)
@@ -256,21 +262,21 @@ type PermissionCheck struct {
 
 // DatabaseInfo holds metadata about a connected database.
 type DatabaseInfo struct {
-	Type         string `json:"type"`                    // e.g. "PostgreSQL", "MongoDB", "MySQL"
-	Version      string `json:"version"`                 // e.g. "13.23", "8.0.3"
-	Host         string `json:"host"`                    // e.g. "postgres.homelab.local:5432"
-	Database     string `json:"database"`                // database/schema name
-	Schema       string `json:"schema,omitempty"`        // postgres: the one schema configured, empty when migrating all
+	Type     string `json:"type"`             // e.g. "PostgreSQL", "MongoDB", "MySQL"
+	Version  string `json:"version"`          // e.g. "13.23", "8.0.3"
+	Host     string `json:"host"`             // e.g. "postgres.homelab.local:5432"
+	Database string `json:"database"`         // database/schema name
+	Schema   string `json:"schema,omitempty"` // postgres: the one schema configured, empty when migrating all
 	// Schemas (postgres, all-schemas mode) lists the schemas holding tables.
 	Schemas []string `json:"schemas,omitempty"`
 	// OtherSchemas (postgres, only when Tables is 0) lists the schemas that do
 	// hold tables, so a client can point at the Schema setting.
 	OtherSchemas []string `json:"other_schemas,omitempty"`
-	Tables       int    `json:"tables"`                  // number of tables/collections
-	SizeBytes    int64  `json:"size_bytes,omitempty"`    // total size in bytes (0 if unknown)
-	SizeHuman    string `json:"size_human,omitempty"`    // human-readable size e.g. "1.2 GB"
-	SSL          string `json:"ssl,omitempty"`           // "enabled", "disabled", or ""
-	ServerInfo   string `json:"server_info,omitempty"`   // additional server info
+	Tables       int      `json:"tables"`                // number of tables/collections
+	SizeBytes    int64    `json:"size_bytes,omitempty"`  // total size in bytes (0 if unknown)
+	SizeHuman    string   `json:"size_human,omitempty"`  // human-readable size e.g. "1.2 GB"
+	SSL          string   `json:"ssl,omitempty"`         // "enabled", "disabled", or ""
+	ServerInfo   string   `json:"server_info,omitempty"` // additional server info
 }
 
 // SourceAdapter is implemented by any database that can act as a migration source.

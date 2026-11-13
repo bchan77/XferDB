@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -276,6 +277,13 @@ func checkOracleTarget(t *testing.T, kind, dsn string) {
 		}
 	} else if tenure != "P1Y2M" {
 		t.Errorf("tenure = %q, want P1Y2M", tenure)
+	}
+	// The identity column still generates keys on the target, past every
+	// copied one (#194). Validation has already run, so the row is harmless.
+	if _, err := db.Exec(`INSERT INTO xfdb_orders (customer_id, total) VALUES (1, 1)`); err != nil {
+		t.Errorf("insert without a key into the identity column: %v", err)
+	} else if id, _ := strconv.Atoi(one(`SELECT MAX(id) FROM xfdb_orders`)); id <= oracleRows {
+		t.Errorf("new order got key %d, want one past %d", id, oracleRows)
 	}
 }
 

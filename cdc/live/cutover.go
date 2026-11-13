@@ -224,15 +224,17 @@ func (m *Manager) runCutover(ctx context.Context, r *run, opts CutoverOptions) {
 
 	// 3. Sequences: logical replication doesn't carry them.
 	r.step(StepSequences, "running", "")
-	n, err := m.syncSequences(ctx, r, src)
+	n, idents, err := m.syncSequences(ctx, r, src)
 	switch {
 	case err != nil:
 		fail(StepSequences, err)
 		return
-	case n < 0:
+	case n < 0 && idents == 0:
 		r.step(StepSequences, "skipped", fmt.Sprintf("a %s target has no sequences to set", r.project.TargetConfig.Type))
+	case n < 0:
+		r.step(StepSequences, "done", fmt.Sprintf("%d identity column(s) set past the migrated keys", idents))
 	default:
-		r.step(StepSequences, "done", fmt.Sprintf("%d sequence(s) set", n))
+		r.step(StepSequences, "done", fmt.Sprintf("%d sequence(s) set, %d identity column(s) set past the migrated keys", n, idents))
 	}
 
 	// 4. What replay could have broken, now that it is done.
@@ -367,25 +369,54 @@ func (m *Manager) queuedSince(r *run, seq uint64) uint64 {
 }
 
 // syncSequences sets the target's sequences to the source's values, and
-// returns how many it set, or -1 when the target keeps none.
-func (m *Manager) syncSequences(ctx context.Context, r *run, src cdc.ChangeSource) (int, error) {
+// returns how many it set, or -1 when the target keeps none. Then it moves
+// the target's identity columns past the migrated keys (#194), and returns
+// how many of those it set too.
+func (m *Manager) syncSequences(ctx context.Context, r *run, src cdc.ChangeSource) (int, int, error) {
 	tgt, err := registry.NewTarget(r.project.TargetConfig.Type)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	syncer, ok := tgt.(adapters.SequenceSyncer)
-	if !ok {
-		return -1, nil
-	}
-	values, err := src.Sequences(ctx)
-	if err != nil {
-		return 0, err
+	_, syncs := tgt.(adapters.SequenceSyncer)
+	if _, resets := tgt.(adapters.IdentityResetter); !syncs && !resets {
+		return -1, 0, nil
 	}
 	if err := tgt.Connect(ctx, r.project.TargetConfig); err != nil {
-		return 0, fmt.Errorf("connect to target: %w", err)
+		return 0, 0, fmt.Errorf("connect to target: %w", err)
 	}
 	defer tgt.Close()
-	return syncer.SetSequences(ctx, values)
+	n := -1
+	if syncer, ok := tgt.(adapters.SequenceSyncer); ok {
+		values, err := src.Sequences(ctx)
+		if err != nil {
+			return 0, 0, err
+		}
+		if n, err = syncer.SetSequences(ctx, values); err != nil {
+			return n, 0, err
+		}
+	}
+	if _, ok := tgt.(adapters.IdentityResetter); !ok {
+		return n, 0, nil
+	}
+	tables, err := m.tables(r)
+	if err != nil {
+		return n, 0, err
+	}
+	srcAdapter, err := registry.NewSource(r.project.SourceConfig.Type)
+	if err != nil {
+		return n, 0, err
+	}
+	// The source is only asked for its identity columns' next values.
+	if _, ok := srcAdapter.(adapters.IdentitySource); ok {
+		if err := srcAdapter.Connect(ctx, r.project.SourceConfig); err != nil {
+			return n, 0, fmt.Errorf("connect to source: %w", err)
+		}
+		defer srcAdapter.Close()
+	} else {
+		srcAdapter = nil
+	}
+	idents, err := engine.ResetIdentities(ctx, srcAdapter, tgt, tables)
+	return n, idents, err
 }
 
 // remember keeps a finished cutover's status, for the API to show after

@@ -168,7 +168,7 @@ func (s *Source) columns(ctx context.Context, table string) ([]column, string, e
 		return cached, otable, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT column_name, data_type, NVL(char_length, 0), NVL(data_precision, -1), NVL(data_scale, -1)
+SELECT column_name, data_type, NVL(char_length, 0), NVL(data_precision, -1), NVL(data_scale, -1), identity_column
 FROM all_tab_columns
 WHERE owner = :1 AND table_name = :2
 ORDER BY column_id`, s.owner, otable)
@@ -181,10 +181,14 @@ ORDER BY column_id`, s.owner, otable)
 	for rows.Next() {
 		var c column
 		var charLen, prec, scale int
-		if err := rows.Scan(&c.oracleName, &c.dataType, &charLen, &prec, &scale); err != nil {
+		var identity string
+		if err := rows.Scan(&c.oracleName, &c.dataType, &charLen, &prec, &scale, &identity); err != nil {
 			return nil, "", err
 		}
 		c.typ, c.conv = mapType(c.dataType, charLen, prec, scale)
+		if identity == "YES" {
+			c.typ, c.conv = identityType(c.typ, c.conv, scale)
+		}
 		cols = append(cols, c)
 		names = append(names, c.oracleName)
 	}
@@ -274,7 +278,7 @@ WHERE owner = :1 AND table_name = :2`, s.owner, otable)
 	schema := &adapters.TableSchema{Name: table}
 	for _, c := range cols {
 		m := meta[c.oracleName]
-		col := adapters.ColumnDef{Name: c.name, Type: c.typ, Nullable: m.nullable, PrimaryKey: pk[c.oracleName]}
+		col := adapters.ColumnDef{Name: c.name, Type: c.typ, Nullable: m.nullable, PrimaryKey: pk[c.oracleName], Identity: m.identity}
 		if m.def.Valid {
 			if expr, ok := defaultSQL(m.def.String, m.identity); ok {
 				col.DefaultValue = &expr

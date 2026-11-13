@@ -214,6 +214,7 @@ func getSchema(ctx context.Context, db *sql.DB, table string) (*adapters.TableSc
 			Type:       colType,
 			Nullable:   nullable == "YES",
 			PrimaryKey: columnKey == "PRI",
+			Identity:   strings.Contains(strings.ToLower(extra), "auto_increment"),
 		}
 		if dfltVal.Valid {
 			if expr, ok := mysqlDefaultSQL(dfltVal.String, extra, colType); ok {

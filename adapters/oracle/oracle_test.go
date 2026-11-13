@@ -170,3 +170,23 @@ func TestDefaultSQL(t *testing.T) {
 		}
 	}
 }
+
+func TestIdentityType(t *testing.T) {
+	cases := []struct {
+		dataType    string
+		prec, scale int
+		want        string
+	}{
+		{"NUMBER", -1, -1, "bigint"}, // NUMBER GENERATED ... AS IDENTITY
+		{"NUMBER", -1, 0, "bigint"},  // INTEGER
+		{"NUMBER", 22, 0, "bigint"},
+		{"NUMBER", 9, 0, "integer"}, // already an integer type
+		{"NUMBER", 10, 2, "numeric(10,2)"},
+	}
+	for _, c := range cases {
+		typ, conv := mapType(c.dataType, 0, c.prec, c.scale)
+		if got, _ := identityType(typ, conv, c.scale); got != c.want {
+			t.Errorf("identity %s(%d,%d) = %s, want %s", c.dataType, c.prec, c.scale, got, c.want)
+		}
+	}
+}

@@ -264,7 +264,9 @@ The cutover runs these steps, shown as they go:
 1. Apply every change up to the source's current position.
 2. Check, for a few seconds, that no more changes to the migrated tables
    arrive.
-3. Set the target's sequences to the source's values (PostgreSQL targets), so
+3. Set the target's sequences to the source's values (PostgreSQL targets), and
+   move every identity or `AUTO_INCREMENT` column past the migrated keys and
+   the source's own next value (PostgreSQL, YugabyteDB and MySQL targets), so
    new rows don't collide with copied ones.
 4. Add the foreign keys, checks and triggers held back until now.
 5. Stop the stream and remove it from the source (the replication slot and
@@ -367,7 +369,9 @@ with the oplog, so it doesn't fall out of the window just by waiting.
 - Every migrated table needs a primary key (a MongoDB collection always has
   one, `_id`).
 - Schema changes are not applied; they pause the migration (step 5).
-- Sequences are set at cutover on PostgreSQL targets only.
+- Standalone sequences are set at cutover on PostgreSQL targets only; identity
+  and `AUTO_INCREMENT` columns are set on PostgreSQL, YugabyteDB and MySQL
+  targets (SQLite needs nothing: it takes the largest key plus one).
 - The cutover doesn't stop the writes for you: you stop the applications.
 - The tables are fixed when the migration starts.
 

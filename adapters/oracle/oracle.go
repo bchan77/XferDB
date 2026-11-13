@@ -223,6 +223,18 @@ func mapType(dataType string, charLength, precision, scale int) (string, convKin
 	return "unsupported Oracle type " + dt, convNone
 }
 
+// identityType is an identity column's reported type. Its values come from
+// a sequence, so a whole-number NUMBER wider than bigint (NUMBER,
+// NUMBER(*,0), NUMBER(19+)) is reported as bigint, which every target can
+// make an identity column of (#194); PostgreSQL can't make one of numeric.
+// A key past bigint's range then fails the read instead of being rounded.
+func identityType(typ string, conv convKind, scale int) (string, convKind) {
+	if conv == convNone && strings.HasPrefix(typ, "numeric") && scale <= 0 {
+		return "bigint", convInt
+	}
+	return typ, conv
+}
+
 // convert turns a value go-ora scanned into the value the reported type
 // stores. go-ora returns NUMBER as its exact decimal text, LOBs as string or
 // []byte, DATE and TIMESTAMP as time.Time, and ” as NULL (Oracle has no
