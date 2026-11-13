@@ -378,7 +378,14 @@ type liveMig struct {
 
 func waitLive(t *testing.T, hs *httptest.Server, id, what string, cond func(liveMig) bool) liveMig {
 	t.Helper()
-	deadline := time.Now().Add(90 * time.Second)
+	return waitLiveFor(t, hs, id, what, 90*time.Second, cond)
+}
+
+// waitLiveFor is waitLive with its own limit, for a source whose stream
+// runs further behind (Oracle 21c: up to archive_lag_target).
+func waitLiveFor(t *testing.T, hs *httptest.Server, id, what string, limit time.Duration, cond func(liveMig) bool) liveMig {
+	t.Helper()
+	deadline := time.Now().Add(limit)
 	var l liveMig
 	for time.Now().Before(deadline) {
 		l = liveMig{}

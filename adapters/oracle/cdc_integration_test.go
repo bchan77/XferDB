@@ -48,7 +48,7 @@ func TestChangeStream(t *testing.T) {
 		db.ExecContext(ctx, "DROP TABLE "+tbl+" PURGE") //nolint:errcheck // may not exist
 	}
 	exec(
-		`CREATE TABLE xl_items (id NUMBER(10) PRIMARY KEY, name VARCHAR2(40), amt NUMBER(12,2), note CLOB)`,
+		`CREATE TABLE xl_items (id NUMBER(10) PRIMARY KEY, name VARCHAR2(40) UNIQUE, amt NUMBER(12,2), note CLOB)`,
 		`CREATE TABLE xl_comp (k1 VARCHAR2(10), k2 DATE, v NUMBER, PRIMARY KEY (k1, k2))`,
 		`CREATE TABLE "XlMixed" ("Id" NUMBER(5) PRIMARY KEY, "Label" VARCHAR2(20))`,
 		`INSERT INTO xl_items VALUES (1, 'one', 1.5, NULL)`,
@@ -129,6 +129,12 @@ func TestChangeStream(t *testing.T) {
 	// Replacing a LOB stored out of line logs no UPDATE, only LOB
 	// operations without a ROWID.
 	tx(`UPDATE xl_items SET note = TO_CLOB(RPAD('w', 4000, 'w')) || TO_CLOB(RPAD('v', 500, 'v')) WHERE id = 10`)
+	// Two rows swap a unique value through a third: each row read back has
+	// the other's old value, so both are deleted before they're written.
+	tx(`INSERT INTO xl_items VALUES (20, 'twenty', 0, NULL)`)
+	tx(`UPDATE xl_items SET name = 'swap' WHERE id = 10`,
+		`UPDATE xl_items SET name = 'one-c' WHERE id = 20`,
+		`UPDATE xl_items SET name = 'twenty' WHERE id = 10`)
 	tx(`INSERT INTO xl_comp VALUES ('a', DATE '2024-02-03' + 0.5, 7)`,
 		`INSERT INTO "XlMixed" VALUES (1, 'x')`)
 	// Mined before the ALTER TABLE: the online dictionary can't read a
@@ -150,6 +156,8 @@ func TestChangeStream(t *testing.T) {
 		"delete xl_items 1", "upsert xl_items 10 name=one-c",
 		"upsert xl_items 10 note=6000",
 		"upsert xl_items 10 note=4500",
+		"upsert xl_items 20 name=twenty",
+		"delete xl_items 10", "delete xl_items 20", "upsert xl_items 10 note=4500", "upsert xl_items 20 name=one-c",
 		"upsert xl_comp a/2024-02-03 12:00:00", "upsert XlMixed 1",
 		"schema xl_items +extra",
 		"upsert xl_items 10 extra=e",
@@ -171,8 +179,8 @@ func TestChangeStream(t *testing.T) {
 	if strings.Join(have[3:], "\n") != strings.Join(want[3:], "\n") {
 		t.Errorf("changes:\n%s\nwant:\n%s", strings.Join(have[3:], "\n"), strings.Join(want[3:], "\n"))
 	}
-	if transactions != 9 { // the ALTER TABLE carries no Pos
-		t.Errorf("%d transactions with a Pos, want 9", transactions)
+	if transactions != 11 { // the ALTER TABLE carries no Pos
+		t.Errorf("%d transactions with a Pos, want 11", transactions)
 	}
 
 	// Acked up to the last change, the stream confirms past it once idle.

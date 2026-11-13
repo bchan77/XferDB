@@ -34,6 +34,12 @@ import (
 // targets are a SQLite file, and a new database on XFERDB_TEST_ORACLE_PG
 // (postgres://), XFERDB_TEST_ORACLE_MYSQL (mysql://, a login that can
 // create databases) and XFERDB_TEST_YB when they are set.
+// liveWait bounds each wait on an Oracle live migration. On 21c the stream
+// only sees archived logs, up to archive_lag_target (60s on the test server)
+// behind, and a busy cutover's drain waits for one before its quiet check:
+// waitLive's 90s left about half a minute for the rest, and missed it.
+const liveWait = 4 * time.Minute
+
 func TestLiveMigrationOracle(t *testing.T) {
 	dsn := os.Getenv("XFERDB_TEST_ORACLE_LIVE")
 	if dsn == "" {
@@ -197,7 +203,7 @@ func runLiveOracle(t *testing.T, dsn string, target map[string]any, openTarget f
 	if m.Mode != "live" {
 		t.Fatalf("mode = %q", m.Mode)
 	}
-	waitLive(t, hs, m.ID, "catch-up", func(l liveMig) bool { return l.Phase == "catch_up" || l.Phase == "streaming" })
+	waitLiveFor(t, hs, m.ID, "catch-up", liveWait, func(l liveMig) bool { return l.Phase == "catch_up" || l.Phase == "streaming" })
 	step(fmt.Sprintf("snapshot done after %d writer operations", ops.Load()))
 
 	// Apply stopped and the server restarted: the stream picks up again.
@@ -214,12 +220,12 @@ func runLiveOracle(t *testing.T, dsn string, target map[string]any, openTarget f
 		hs.Close()
 	}()
 	srv.ResumeLive(ctx)
-	waitLive(t, hs, m.ID, "streaming", func(l liveMig) bool { return l.Phase == "streaming" })
+	waitLiveFor(t, hs, m.ID, "streaming", liveWait, func(l liveMig) bool { return l.Phase == "streaming" })
 	step("streaming")
 	time.Sleep(time.Second)
 
 	post(t, hs.URL+"/api/v1/migrations/"+m.ID+"/cutover", map[string]any{}, http.StatusAccepted, nil)
-	cut := waitLive(t, hs, m.ID, "the busy cutover to stop", func(l liveMig) bool {
+	cut := waitLiveFor(t, hs, m.ID, "the busy cutover to stop", liveWait, func(l liveMig) bool {
 		return l.Live.Cutover != nil && !l.Live.Cutover.Running
 	})
 	if !strings.Contains(cut.Live.Cutover.Error, "writes are still happening") || cut.Phase != "streaming" {
@@ -239,7 +245,7 @@ func runLiveOracle(t *testing.T, dsn string, target map[string]any, openTarget f
 			t.Logf("migration at failure: %v", raw["live"])
 		}
 	}()
-	streamed := waitLive(t, hs, m.ID, "the marker to apply", func(l liveMig) bool {
+	streamed := waitLiveFor(t, hs, m.ID, "the marker to apply", liveWait, func(l liveMig) bool {
 		return count(tgt, `SELECT count(*) FROM lv_items WHERE name = 'marker'`) == 1 && l.Live.LagChanges == 0
 	})
 	if a := streamed.Live.Apply; a == nil || a.Tables["lv_items"].Updates == 0 || a.Tables["lv_items"].Deletes == 0 {

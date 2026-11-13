@@ -944,6 +944,14 @@ func (c *ChangeSource) collect(rows []minedRow, open map[string]*txn) ([]*txn, e
 // its changes: a schema change for each table whose definition it changed,
 // then per table the deletes (keys with no row) and the rows as they were
 // at its commit.
+//
+// Where a transaction leaves more than one row of a table, those rows are
+// deleted first too. The apply worker writes a table's changes in order,
+// trusting each step to be a state the source had, but rows read back at
+// the commit are only the last state of each: two rows that swapped a
+// unique value through a third would each take the other's value while it
+// still holds it, which the target's unique index refuses. With the rows
+// deleted first, every value is free when its row comes back.
 func (c *ChangeSource) changes(ctx context.Context, conn *sql.Conn, t *txn) ([]cdc.Change, error) {
 	var out []cdc.Change
 	commitAt := time.UnixMicro(t.at).UTC()
@@ -984,13 +992,21 @@ func (c *ChangeSource) changes(ctx context.Context, conn *sql.Conn, t *txn) ([]c
 			}
 			out = append(out, cdc.Change{Table: info.name, Op: cdc.OpDelete, Key: key, CommitAt: commitAt})
 		}
-		for _, id := range sortedKeys(found) {
-			rec := found[id]
-			key := map[string]interface{}{}
+		ids := sortedKeys(found)
+		keys := make([]map[string]interface{}, len(ids))
+		for i, id := range ids {
+			keys[i] = map[string]interface{}{}
 			for _, kc := range info.key {
-				key[kc.name] = rec[kc.name]
+				keys[i][kc.name] = found[id][kc.name]
 			}
-			out = append(out, cdc.Change{Table: info.name, Op: cdc.OpUpdate, Key: key, After: rec, CommitAt: commitAt})
+		}
+		if len(ids) > 1 {
+			for _, key := range keys {
+				out = append(out, cdc.Change{Table: info.name, Op: cdc.OpDelete, Key: key, CommitAt: commitAt})
+			}
+		}
+		for i, id := range ids {
+			out = append(out, cdc.Change{Table: info.name, Op: cdc.OpUpdate, Key: keys[i], After: found[id], CommitAt: commitAt})
 		}
 	}
 	return out, nil
