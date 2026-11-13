@@ -201,7 +201,7 @@ func init() {
 	migrateCmd.Flags().Int("validation-sample", 0, "Percentage of a failing table the L3 row diff checks; 0 checks every row (overrides the project setting)")
 	migrateCmd.Flags().Bool("skip-validation", false, "Do not validate this migration (same as --validation off)")
 	migrateCmd.Flags().Bool("until-streaming", false, "With --live, return once the migration is streaming instead of following its lag (for scripts, before 'xferdb cutover')")
-	migrateCmd.Flags().Bool("live", false, "Live migration, beta (PostgreSQL, YugabyteDB and MongoDB sources): copy the tables, then keep streaming the source's changes to the target until cutover")
+	migrateCmd.Flags().Bool("live", false, "Live migration, beta (PostgreSQL, YugabyteDB, MongoDB and Oracle sources): copy the tables, then keep streaming the source's changes to the target until cutover")
 }
 
 // runPreflight calls the preflight API and prints a human-readable result;

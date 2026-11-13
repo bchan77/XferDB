@@ -61,9 +61,9 @@ function isPgFamily(type) {
 }
 
 // liveSourceType: the source types a live migration can stream from
-// (registry.SupportsLive on the server; MongoDB since #179).
+// (registry.SupportsLive on the server; MongoDB since #179, Oracle #195).
 function liveSourceType(type) {
-  return isPgFamily(type) || type === 'mongodb';
+  return isPgFamily(type) || type === 'mongodb' || type === 'oracle';
 }
 
 function defaultPort(type) {

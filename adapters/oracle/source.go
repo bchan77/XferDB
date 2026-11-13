@@ -185,6 +185,7 @@ ORDER BY column_id`, s.owner, otable)
 		if err := rows.Scan(&c.oracleName, &c.dataType, &charLen, &prec, &scale, &identity); err != nil {
 			return nil, "", err
 		}
+		c.charLen = charLen
 		c.typ, c.conv = mapType(c.dataType, charLen, prec, scale)
 		if identity == "YES" {
 			c.typ, c.conv = identityType(c.typ, c.conv, scale)
@@ -203,6 +204,14 @@ ORDER BY column_id`, s.owner, otable)
 	s.cols[table] = cols
 	s.mu.Unlock()
 	return cols, otable, nil
+}
+
+// forgetColumns drops a table's cached columns, after its definition
+// changed.
+func (s *Source) forgetColumns(table string) {
+	s.mu.Lock()
+	delete(s.cols, table)
+	s.mu.Unlock()
 }
 
 // oracleColumn resolves a reported column name to Oracle's.
@@ -498,6 +507,9 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 		query string
 		args  []interface{}
 	)
+	if opts.Keyset {
+		return s.readKeyset(ctx, table, opts)
+	}
 	if opts.PKCol != "" {
 		pk, err := oracleColumn(cols, opts.PKCol)
 		if err != nil {
@@ -539,13 +551,23 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 }
 
 func (s *Source) orderBy(ctx context.Context, otable string) (string, error) {
-	pk, err := s.primaryKey(ctx, otable)
+	keys, err := s.keyColumns(ctx, otable)
 	if err != nil {
 		return "", err
 	}
-	if len(pk) == 0 {
+	if len(keys) == 0 {
 		return "ROWID", nil
 	}
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = quote(k)
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+// keyColumns returns the enabled primary key's columns by Oracle name, in
+// key order; none for a table without one.
+func (s *Source) keyColumns(ctx context.Context, otable string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT cc.column_name
 FROM all_constraints c
@@ -553,24 +575,30 @@ JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constr
 WHERE c.owner = :1 AND c.table_name = :2 AND c.constraint_type = 'P' AND c.status = 'ENABLED'
 ORDER BY cc.position`, s.owner, otable)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("oracle primary key(%s): %w", otable, err)
 	}
 	defer rows.Close()
-	var parts []string
+	var keys []string
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
-			return "", err
+			return nil, err
 		}
-		parts = append(parts, quote(n))
+		keys = append(keys, n)
 	}
-	return strings.Join(parts, ", "), rows.Err()
+	return keys, rows.Err()
 }
 
 // scanRows converts each row to a record keyed by the reported names.
 func scanRows(rows *sql.Rows, cols []column, fn func(map[string]interface{}) error) error {
-	vals := make([]interface{}, len(cols))
-	ptrs := make([]interface{}, len(cols))
+	return scanRowsWithKey(rows, cols, 0, func(rec map[string]interface{}, _ []string) error { return fn(rec) })
+}
+
+// scanRowsWithKey is scanRows for a query that selects nkey more columns
+// after cols, the key's text forms, which fn gets apart from the record.
+func scanRowsWithKey(rows *sql.Rows, cols []column, nkey int, fn func(map[string]interface{}, []string) error) error {
+	vals := make([]interface{}, len(cols)+nkey)
+	ptrs := make([]interface{}, len(vals))
 	for rows.Next() {
 		for i := range vals {
 			vals[i] = nil
@@ -587,7 +615,14 @@ func scanRows(rows *sql.Rows, cols []column, fn func(map[string]interface{}) err
 			}
 			rec[c.name] = v
 		}
-		if err := fn(rec); err != nil {
+		var key []string
+		if nkey > 0 {
+			key = make([]string, nkey)
+			for i := range key {
+				key[i] = fmt.Sprint(vals[len(cols)+i])
+			}
+		}
+		if err := fn(rec, key); err != nil {
 			return err
 		}
 	}

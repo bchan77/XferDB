@@ -462,7 +462,7 @@ func liveChecks(ctx context.Context, db *state.MetaDB, p *adapters.Project, src 
 		add(adapters.LiveCheck{
 			Name:   "a source live migration supports",
 			Detail: "source is " + p.SourceConfig.Type,
-			Fix:    "live migration streams changes from PostgreSQL, YugabyteDB and MongoDB sources only, for now",
+			Fix:    "live migration streams changes from PostgreSQL, YugabyteDB, MongoDB and Oracle sources only, for now",
 		})
 	}
 	if lp, ok := src.(adapters.LivePreflighter); ok {

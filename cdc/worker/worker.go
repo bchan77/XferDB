@@ -166,6 +166,13 @@ func runCapture(ctx context.Context, dir string, spec *Spec, st Status) error {
 			return err
 		}
 	}
+	// A source that reads changes for the whole database (Oracle's
+	// LogMiner) is told which tables are migrated.
+	if tc, ok := src.(interface{ SetTables([]string) error }); ok {
+		if err := tc.SetTables(spec.Tables); err != nil {
+			return err
+		}
+	}
 	q, err := cdc.OpenWriter(QueueDir(dir), spec.SegmentBytes)
 	if err != nil {
 		return err

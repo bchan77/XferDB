@@ -13,7 +13,7 @@
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 (live migration source too: replica set or sharded cluster) |
-| Oracle | ✅ | — | 21c, 23ai (type `oracle`; 12c+ expected to work; see [Oracle](#oracle)) |
+| Oracle | ✅ | — | 21c, 23ai (type `oracle`; 12c+ expected to work; live migration source too; see [Oracle](#oracle)) |
 | Cassandra | 🔜 | 🔜 | — |
 
 > ✅ = Working &nbsp;|&nbsp; 🔜 = Planned
@@ -57,7 +57,7 @@ automated yet.
 - **Data validation** — after a migration, compare source and target: row counts (L1), every row's content (L2, the default), or L2 plus a primary-key diff listing the differing rows (L3); for every source, MongoDB included. See [Validation](#validation)
 - **All PostgreSQL schemas** — a PostgreSQL source migrates every non-system schema by default; the optional *Schema* setting narrows it to one
 - **Preflight checks** — verify connectivity, SSL, and permissions before committing to a migration; a missing target database can be created from the web UI
-- **Live migration (beta)** — from a PostgreSQL, YugabyteDB or MongoDB source, copy the tables and then keep streaming the source's changes to the target until you cut over, so applications keep running during the copy. See [Live migration (beta)](#live-migration-beta)
+- **Live migration (beta)** — from a PostgreSQL, YugabyteDB, MongoDB or Oracle source, copy the tables and then keep streaming the source's changes to the target until you cut over, so applications keep running during the copy. See [Live migration (beta)](#live-migration-beta)
 - **Pause / resume / cancel** — full lifecycle control; checkpoints survive server restarts
 - **Live progress display** — per-table status, rows/s, read/write rates, ETA, and live resource usage (goroutines, heap, CPU%)
 - **Detailed table status** — shows "counting rows...", "waiting for schema", "waiting for indexes" so you always know what's happening
@@ -352,7 +352,7 @@ xferdb migrate --status
 # View recorded stats history after migration completes
 xferdb migrate --history
 
-# Live migration (beta, PostgreSQL, YugabyteDB and MongoDB sources): copy, then stream changes until cutover.
+# Live migration (beta, PostgreSQL, YugabyteDB, MongoDB and Oracle sources): copy, then stream changes until cutover.
 # Guide: docs/LIVE_MIGRATION.md
 xferdb migrate --preflight --live         # check the source and target can do it
 xferdb migrate --live
@@ -460,9 +460,9 @@ xferdb list
 
 **Step-by-step guide: [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md)**: requirements and how to set them, the UI, CLI and API for each step, schema changes, cutover, WAL, and troubleshooting.
 
-A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical`, **YugabyteDB** (source type `yugabyte`), or **MongoDB** 4.2+ as a replica set or a sharded cluster (through one `mongos`; documents go through the schema plan as in the copy, and fields it doesn't know land in `_extra`); see the guide for each one's requirements. The target can be PostgreSQL, YugabyteDB, MySQL or SQLite. Every migrated table needs a primary key.
+A live migration copies the tables and then keeps streaming the source's changes to the target, so applications keep writing to the source during the copy. When you are ready to switch, stop the writes and cut over. The source must be **PostgreSQL** with `wal_level = logical`, **YugabyteDB** (source type `yugabyte`), **MongoDB** 4.2+ as a replica set or a sharded cluster (through one `mongos`; documents go through the schema plan as in the copy, and fields it doesn't know land in `_extra`), or **Oracle** 21c/23ai in ARCHIVELOG mode with primary key supplemental logging (read with LogMiner); see the guide for each one's requirements. The target can be PostgreSQL, YugabyteDB, MySQL or SQLite. Every migrated table needs a primary key.
 
-1. **Readiness.** *Settings → Check live migration readiness*, `xferdb migrate --preflight --live`, or `POST /projects/:id/preflight` with `{"mode":"live"}`; checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication (MongoDB: a replica set or sharded cluster, 4.2+, that the login can open a change stream, and the oplog window).
+1. **Readiness.** *Settings → Check live migration readiness*, `xferdb migrate --preflight --live`, or `POST /projects/:id/preflight` with `{"mode":"live"}`; checks `wal_level`, the replication privilege, free slots and WAL senders, primary keys, and permission to create the publication (MongoDB: a replica set or sharded cluster, 4.2+, that the login can open a change stream, and the oplog window; Oracle: ARCHIVELOG mode, supplemental logging, the LogMiner and flashback privileges, key types, and on 21c `archive_lag_target`).
 2. **Start.** Tick *Live migration* on the migration form, or run `xferdb migrate --live`. XferDB creates a replication slot and publication (nothing on MongoDB, whose change stream reads the oplog), copies the tables, catches up on what was written meanwhile, then streams. The capture and apply workers run as their own processes and survive a server restart.
 3. **Stream.** The migration page shows the lag and the WAL the source keeps for the slot. *Pause* stops applying changes; they are still captured.
 4. **Cut over.** Stop every application writing to the source, then *Cut over* (`xferdb cutover`). The remaining changes are applied, sequences set (PostgreSQL targets), and foreign keys, checks and triggers added; then the slot is dropped and the migration validated. If writes are still arriving, the cutover stops and streaming goes on.
@@ -551,7 +551,10 @@ driver, so no Oracle client software is needed next to it.
   An identity column arrives as a plain integer column with its values.
 - **Left out of the table list:** the recycle bin, temporary, external and nested tables,
   materialized views' tables and logs.
-- **Live migration** from Oracle isn't supported yet.
+- **Live migration** (beta) from Oracle 21c and 23ai reads changes with LogMiner, which every
+  edition has; nothing is created on the source. It needs ARCHIVELOG mode, primary key
+  supplemental logging and the LogMiner privileges the readiness check lists. See
+  [docs/LIVE_MIGRATION.md](docs/LIVE_MIGRATION.md).
 
 ---
 
@@ -838,7 +841,8 @@ go build -o xferdb ./cmd/xferdb
 - [x] Post-migration data validation (L1 counts, L2 row fingerprint, L3 row diff)
 - [x] All PostgreSQL schemas by default
 - [x] Oracle source adapter (21c, 23ai)
-- [ ] Live migration from Oracle (LogMiner)
+- [x] Live migration from Oracle (LogMiner; 21c, 23ai)
+- [ ] Live migration from Oracle 19c (mining from the root container, #196)
 - [ ] MongoDB target adapter
 - [x] Web UI (projects, live table browser, migration status/controls, schema editor for every adapter pairing)
 - [ ] WebSocket live progress

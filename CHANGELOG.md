@@ -5,6 +5,15 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Live migration from Oracle (beta, #195).** Oracle 21c and 23ai can be the source of a live
+  migration to PostgreSQL, YugabyteDB, MySQL or SQLite. Changes are read with LogMiner from inside
+  the pluggable database (every edition has it), so nothing is created on the source. Each
+  transaction's changed rows are read back as of its commit, so streamed rows arrive exactly as
+  copied ones. Readiness checks ARCHIVELOG mode, supplemental logging, the LogMiner and flashback
+  privileges, primary keys, and on 21c `archive_lag_target` (21c mines archived logs only, so it is
+  that far behind; 23ai streams within seconds). A stream that falls behind across an `ALTER TABLE`
+  fails rather than skip what it can't decode. 19c, which mines from the root container, is #196.
+  See `docs/LIVE_MIGRATION.md`.
 - **Oracle as a migration source (#190).** Oracle 12c and later (tested on 21c XE and 23ai Free)
   can be migrated to PostgreSQL, YugabyteDB, MySQL or SQLite, through a pure-Go driver, so no
   Oracle client software is needed. A project reads one schema (the login's own unless *Schema*
