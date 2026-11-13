@@ -47,6 +47,11 @@ var changeSourceFactories = map[string]func(ctx context.Context, cfg adapters.Co
 	"postgres": newPostgresChangeSource,
 	"yugabyte": newPostgresChangeSource,
 	"mongodb":  newMongoChangeSource,
+	"oracle":   newOracleChangeSource,
+}
+
+func newOracleChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
+	return oracle.NewChangeSource(ctx, cfg, stream)
 }
 
 func newMongoChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
@@ -67,7 +72,7 @@ func SupportsLive(sourceType string) bool {
 func NewChangeSource(ctx context.Context, cfg adapters.ConnectionConfig, stream string) (cdc.ChangeSource, error) {
 	factory, ok := changeSourceFactories[cfg.Type]
 	if !ok {
-		return nil, fmt.Errorf("live migration from %s isn't supported yet (supported: postgres, yugabyte, mongodb)", cfg.Type)
+		return nil, fmt.Errorf("live migration from %s isn't supported yet (supported: postgres, yugabyte, mongodb, oracle)", cfg.Type)
 	}
 	return factory(ctx, cfg, stream)
 }

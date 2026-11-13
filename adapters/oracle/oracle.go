@@ -132,6 +132,7 @@ type column struct {
 	dataType   string // ALL_TAB_COLUMNS.DATA_TYPE
 	typ        string // the PostgreSQL-spelled type XferDB reports
 	conv       convKind
+	charLen    int // CHAR/VARCHAR2 length in characters
 }
 
 // convKind is how ReadBatch turns a go-ora value into the value a target

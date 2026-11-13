@@ -113,6 +113,42 @@ How it differs from PostgreSQL:
   it to another shard) is applied as one change. Chunk migrations between
   shards aren't changes and are never copied.
 
+**Or source: Oracle 21c or 23ai** (12c to 19c need mining from the root
+container, which isn't supported yet: #196), with:
+
+| Requirement | How to set it |
+|---|---|
+| ARCHIVELOG mode | As SYSDBA in the root container: `SHUTDOWN IMMEDIATE; STARTUP MOUNT; ALTER DATABASE ARCHIVELOG; ALTER DATABASE OPEN;` (then `ALTER PLUGGABLE DATABASE ALL OPEN;`). |
+| Supplemental logging: minimal, and the primary key | `ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;` and `ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY) COLUMNS;` (or the latter per table: `ALTER TABLE <table> ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY) COLUMNS;`). |
+| LogMiner privileges, in the pluggable database | `GRANT LOGMINING, SELECT ANY TRANSACTION TO xferdb; GRANT EXECUTE ON DBMS_LOGMNR TO xferdb;` and `SELECT` on `V_$DATABASE`, `V_$LOGMNR_CONTENTS`, `V_$LOGMNR_LOGS`, `V_$ARCHIVED_LOG`, `V_$LOG`, `V_$TRANSACTION` and `V_$PARAMETER`. Readiness prints the full list. |
+| Flashback queries on the migrated tables | Free on the login's own tables; otherwise `GRANT FLASHBACK ON <table> TO xferdb;` (or `FLASHBACK ANY TABLE`). |
+| A primary key on every migrated table, of a type the stream can carry | `NUMBER`, `FLOAT`, `CHAR`, `VARCHAR2`, `DATE`, `TIMESTAMP` (without time zone) or `RAW` key columns. |
+| On 21c: `archive_lag_target` | 21c mines only archived logs from inside a pluggable database, so changes arrive when the current log is archived. `ALTER SYSTEM SET archive_lag_target = 60;` (in the root container) bounds that to a minute. 23ai reads the online log, so changes arrive within seconds. |
+| Recommended: archived logs kept longer than any outage | XferDB keeps nothing on the source, so it can only resume from redo still there. Don't let RMAN delete archived logs the migration hasn't read: readiness and the migration page show how far back the redo goes. |
+
+How it differs from PostgreSQL:
+
+- **Nothing is created on the source.** Changes are read with LogMiner,
+  which every edition has (no GoldenGate licence), from the redo Oracle
+  writes anyway. Cancelling or cutting over leaves nothing behind.
+- **Rows are read back.** LogMiner tells XferDB which rows each transaction
+  changed (by primary key); once the transaction commits, XferDB reads those
+  rows as they were at its commit (a flashback query, `AS OF SCN`), so a
+  streamed row reaches the target exactly as a copied one would, LOBs
+  included. If Oracle's undo no longer goes back that far (`undo_retention`,
+  15 minutes by default), the row is read as it is now instead, and the
+  changes made since are replayed too, so the target still ends up right.
+- **Schema changes need the stream to be caught up.** LogMiner reads the
+  redo with today's dictionary, so it can't decode a table's changes from
+  before an `ALTER TABLE` if the stream hadn't read them yet. XferDB then
+  fails the migration rather than skip them, and it must start over. On 23ai
+  the stream is a few seconds behind; on 21c it is up to `archive_lag_target`
+  behind, so make schema changes when nothing has been written to the table
+  for longer than that.
+- **Lag in time, not bytes**, as for YugabyteDB.
+- **Rows changed while the stream was down** are found again from the redo
+  when capture restarts, as long as the archived logs are still there.
+
 **Target:** PostgreSQL, YugabyteDB, MySQL or SQLite.
 
 **The XferDB server:** the capture and apply workers run as processes on the
@@ -364,8 +400,9 @@ with the oplog, so it doesn't fall out of the window just by waiting.
 
 ## Limitations
 
-- The source must be PostgreSQL, YugabyteDB or MongoDB (replica set or
-  sharded cluster). MySQL and Oracle sources are planned; an Oracle source migrates offline only for now.
+- The source must be PostgreSQL, YugabyteDB, MongoDB (replica set or sharded
+  cluster) or Oracle 21c/23ai (not RAC, and not 19c yet: #196). MySQL sources
+  are planned.
 - Every migrated table needs a primary key (a MongoDB collection always has
   one, `_id`).
 - Schema changes are not applied; they pause the migration (step 5).
