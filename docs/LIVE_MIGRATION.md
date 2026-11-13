@@ -363,7 +363,7 @@ with the oplog, so it doesn't fall out of the window just by waiting.
 ## Limitations
 
 - The source must be PostgreSQL, YugabyteDB or MongoDB (replica set or
-  sharded cluster). MySQL sources are planned.
+  sharded cluster). MySQL and Oracle sources are planned; an Oracle source migrates offline only for now.
 - Every migrated table needs a primary key (a MongoDB collection always has
   one, `_id`).
 - Schema changes are not applied; they pause the migration (step 5).

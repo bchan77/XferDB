@@ -97,6 +97,6 @@ export function inferTypeFromDSN(dsn) {
   const m = lower.match(/^([a-z0-9+.-]+):\/\//);
   if (!m) return '';
   const scheme = m[1];
-  if (['postgres', 'yugabyte', 'mysql', 'sqlite'].includes(scheme)) return scheme;
+  if (['postgres', 'yugabyte', 'mysql', 'sqlite', 'oracle'].includes(scheme)) return scheme;
   return '';
 }

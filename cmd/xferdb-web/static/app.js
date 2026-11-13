@@ -67,11 +67,12 @@ function liveSourceType(type) {
 }
 
 function defaultPort(type) {
-  return { mysql: '3306', yugabyte: '5433' }[type] || '5432';
+  return { mysql: '3306', yugabyte: '5433', oracle: '1521' }[type] || '5432';
 }
 
 function connTypeOptions(isTarget, selected) {
-  const types = isTarget ? ['postgres', 'yugabyte', 'mysql', 'sqlite'] : ['postgres', 'yugabyte', 'mysql', 'sqlite', 'mongodb'];
+  // Oracle is a source only (#190).
+  const types = isTarget ? ['postgres', 'yugabyte', 'mysql', 'sqlite'] : ['postgres', 'yugabyte', 'mysql', 'sqlite', 'mongodb', 'oracle'];
   return types.map((t) => `<option value="${t}" ${t === selected ? 'selected' : ''}>${t}</option>`).join('');
 }
 
@@ -96,6 +97,7 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
       ${hasDSN ? `<div class="hint">Currently ends in "${esc(shortTail(cfg.dsn))}". Leave blank to keep it.</div>` : ''}
     `;
   }
+  if (type === 'oracle') return oracleFieldsHTML(prefix, cfg);
   // Server and login first, then the database: once those are filled in,
   // "Load databases" lists the server's databases to pick from.
   const hasPassword = !!cfg.password;
@@ -139,6 +141,48 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
       </div>
       <div></div>
     </div>` : ''}
+  `;
+}
+
+// oracleFieldsHTML: an Oracle source connects to a service (a PDB such as
+// FREEPDB1, ORCLPDB1) rather than picking a database, and reads one schema:
+// the login's own unless another is named.
+function oracleFieldsHTML(prefix, cfg) {
+  const hasPassword = !!cfg.password;
+  return `
+    <div class="field-row">
+      <div><label>Host</label><input type="text" id="${prefix}-host" value="${esc(cfg.host || '')}" placeholder="localhost"></div>
+      <div><label>Port</label><input type="number" id="${prefix}-port" value="${cfg.port || ''}" placeholder="1521"></div>
+    </div>
+    <div class="field-row">
+      <div><label>Username</label><input type="text" id="${prefix}-username" value="${esc(cfg.username || '')}"></div>
+      <div>
+        <label>Password</label>
+        <input type="password" id="${prefix}-password" placeholder="${hasPassword ? 'leave blank to keep current password' : ''}">
+      </div>
+    </div>
+    <div class="field-row">
+      <div>
+        <label>Service name</label>
+        <input type="text" id="${prefix}-database" value="${esc(cfg.database || '')}" placeholder="FREEPDB1">
+        <div class="hint">The database service (a pluggable database's name), not a SID</div>
+      </div>
+      <div>
+        <label>TLS</label>
+        <select id="${prefix}-sslmode">
+          ${[['', 'off'], ['require', 'on, any certificate'], ['verify-full', 'on, verify the certificate']]
+            .map(([m, l]) => `<option value="${m}" ${(cfg.ssl_mode || '') === m ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="field-row">
+      <div>
+        <label>Schema</label>
+        <input type="text" id="${prefix}-schema" value="${esc(cfg.schema || '')}" placeholder="the login's own schema">
+        <div class="hint">The schema (user) whose tables are migrated. Upper-case table and column names arrive in lower case.</div>
+      </div>
+      <div></div>
+    </div>
   `;
 }
 
@@ -256,7 +300,7 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
       username: g(`${prefix}-username`).trim(),
       password: g(`${prefix}-password`),
       ssl_mode: g(`${prefix}-sslmode`) || '',
-      schema: isPgFamily(t) ? g(`${prefix}-schema`).trim() : '',
+      schema: isPgFamily(t) || t === 'oracle' ? g(`${prefix}-schema`).trim() : '',
       dsn: '',
     };
   };
