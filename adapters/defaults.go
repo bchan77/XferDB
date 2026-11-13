@@ -22,6 +22,7 @@ const (
 	DialectPostgres = "postgres"
 	DialectMySQL    = "mysql"
 	DialectSQLite   = "sqlite"
+	DialectOracle   = "oracle" // a source only: its defaults are always translated
 )
 
 // defaultKind is what a default means, whatever its dialect spelled.
@@ -48,7 +49,7 @@ var (
 	// A PostgreSQL cast suffix: 'x'::text, 'x'::character varying(20), 5::bigint.
 	pgCastRe = regexp.MustCompile(`^(.*?)(::[a-z_][a-z0-9_ ]*(\([0-9, ]*\))?(\[\])?)+$`)
 	// now(), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(6), transaction_timestamp() ...
-	nowRe        = regexp.MustCompile(`^(now\(\)|current_timestamp(\(\d*\))?|localtimestamp(\(\d*\))?|transaction_timestamp\(\)|statement_timestamp\(\)|clock_timestamp\(\)|datetime\('now'\)|strftime\('%[^']*',\s*'now'\))$`)
+	nowRe        = regexp.MustCompile(`^(now\(\)|sysdate|systimestamp(\(\d*\))?|current_timestamp(\(\d*\))?|localtimestamp(\(\d*\))?|transaction_timestamp\(\)|statement_timestamp\(\)|clock_timestamp\(\)|datetime\('now'\)|strftime\('%[^']*',\s*'now'\))$`)
 	todayRe      = regexp.MustCompile(`^(current_date|curdate\(\)|current_date\(\)|date\('now'\)|'now'::date|\('now'::text\)::date)$`)
 	introducerRe = regexp.MustCompile(`^_[A-Za-z0-9]+\s*('.*')$`)
 	uuidRe       = regexp.MustCompile(`^(gen_random_uuid\(\)|uuid_generate_v4\(\)|uuid\(\))$`)
