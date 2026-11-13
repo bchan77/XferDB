@@ -135,9 +135,19 @@ func TestBuildURL(t *testing.T) {
 	if !strings.Contains(got, ":2484/ORCL") || !strings.Contains(got, "SSL=true") || !strings.Contains(got, "SSL+VERIFY=false") {
 		t.Errorf("buildURL with require = %q", got)
 	}
-	raw := "oracle://u:p@h:1521/SVC?TRACE FILE=x"
-	if got := buildURL(adapters.ConnectionConfig{DSN: raw}); got != raw {
-		t.Errorf("buildURL(raw DSN) = %q, want it unchanged", got)
+	// A DSN on its own: fields come from it, schema is XferDB's, other
+	// options pass through to go-ora.
+	cfg := withDSN(adapters.ConnectionConfig{DSN: "oracle://u:p%40w@h:1600/SVC?schema=hr&TRACE+FILE=x"})
+	if cfg.Host != "h" || cfg.Port != 1600 || cfg.Database != "SVC" || cfg.Username != "u" || cfg.Password != "p@w" || cfg.Schema != "hr" {
+		t.Errorf("withDSN = %+v", cfg)
+	}
+	got = buildURL(cfg)
+	if strings.Contains(got, "schema") || !strings.Contains(got, "TRACE+FILE=x") || !strings.Contains(got, "h:1600/SVC") {
+		t.Errorf("buildURL(DSN) = %q", got)
+	}
+	// Fields typed in the UI win over a DSN's.
+	if c := withDSN(adapters.ConnectionConfig{DSN: "oracle://u:p@h/SVC?schema=hr", Schema: "SALES"}); c.Schema != "SALES" {
+		t.Errorf("withDSN overrode the schema field: %q", c.Schema)
 	}
 }
 

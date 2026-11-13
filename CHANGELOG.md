@@ -5,6 +5,15 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Oracle as a migration source (#190).** Oracle 12c and later (tested on 21c XE and 23ai Free)
+  can be migrated to PostgreSQL, YugabyteDB, MySQL or SQLite, through a pure-Go driver, so no
+  Oracle client software is needed. A project reads one schema (the login's own unless *Schema*
+  names another) and connects to a service name: `oracle://user:pass@host:1521/FREEPDB1`.
+  Unquoted upper-case names arrive in lower case. Oracle's types map to their nearest equivalent
+  on each target (`NUMBER(10)` to `bigint`, `DATE` to a timestamp, `CLOB` to text, ...), keeping
+  `NUMBER` values exact; primary keys, plain indexes and foreign keys come along. The web UI offers
+  `oracle` as a source type with a *Service name* field, and `xferdb list` now lists every adapter
+  with what it can be used for. See the README's *Oracle* section.
 - **Live migration from MongoDB (beta, #179).** A MongoDB 4.2+ replica set, or a sharded cluster
   through one `mongos`, can be the source of a live migration to PostgreSQL, YugabyteDB, MySQL or
   SQLite. Changes are read from a change stream, so nothing is created on the source. Documents
@@ -17,6 +26,10 @@ All notable changes to XferDB are documented here.
   fails the migration. See `docs/LIVE_MIGRATION.md`.
 
 ### Fixed
+- **Interval columns failed validation unless both sides spelled them alike.** Validation now
+  compares intervals as months, days and microseconds, so `P1Y2M` and PostgreSQL's
+  `1 year 2 mons` match. A MySQL target, which has no interval type, gets `VARCHAR(64)` instead of
+  a CREATE TABLE that failed.
 - **The cutover's quiet check could miss writes still on their way (#181).** It waited a few
   seconds and then counted the changes capture had queued since the cutover point, but a change
   made during that wait could still be on its way to capture, and the check then passed and the

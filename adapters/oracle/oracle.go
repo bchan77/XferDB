@@ -24,25 +24,57 @@ import (
 
 const defaultPort = 1521
 
-// buildURL makes a go-ora URL from the connection config. A raw oracle://
-// DSN is used as given (go-ora reads that format itself); otherwise host,
-// port, service name (Database) and credentials are assembled, with TLS
-// when SSLMode asks for it.
-func buildURL(cfg adapters.ConnectionConfig) string {
-	if strings.HasPrefix(strings.ToLower(cfg.DSN), "oracle://") && cfg.Host == "" {
-		return cfg.DSN
+// withDSN fills the config's empty fields from an oracle:// DSN
+// (oracle://user:pw@host:1521/SERVICE?schema=HR&SSL=true): a DSN on its own
+// (a config file, the CLI's --source) works like the separate fields, and a
+// schema can ride along in it. Other query options are left in the DSN for
+// buildURL to pass to go-ora.
+func withDSN(cfg adapters.ConnectionConfig) adapters.ConnectionConfig {
+	if !strings.HasPrefix(strings.ToLower(cfg.DSN), "oracle://") {
+		return cfg
 	}
+	u, err := url.Parse(cfg.DSN)
+	if err != nil {
+		return cfg
+	}
+	if cfg.Host == "" {
+		cfg.Host = u.Hostname()
+	}
+	if cfg.Port == 0 {
+		cfg.Port, _ = strconv.Atoi(u.Port())
+	}
+	if cfg.Database == "" {
+		cfg.Database = strings.TrimPrefix(u.Path, "/")
+	}
+	if u.User != nil {
+		if cfg.Username == "" {
+			cfg.Username = u.User.Username()
+		}
+		if pw, ok := u.User.Password(); ok && cfg.Password == "" {
+			cfg.Password = pw
+		}
+	}
+	if cfg.Schema == "" {
+		cfg.Schema = u.Query().Get("schema")
+	}
+	return cfg
+}
+
+// buildURL makes a go-ora URL from the connection config (after withDSN):
+// host, port, service name (Database) and credentials, the DSN's query
+// options other than schema, and TLS when SSLMode asks for it.
+func buildURL(cfg adapters.ConnectionConfig) string {
 	port := cfg.Port
 	if port == 0 {
 		port = defaultPort
 	}
 	q := url.Values{}
 	if cfg.DSN != "" {
-		// Query options of a parsed oracle:// DSN (e.g. ?SSL=true) still apply.
 		if u, err := url.Parse(cfg.DSN); err == nil {
 			q = u.Query()
 		}
 	}
+	q.Del("schema") // XferDB's, not a go-ora option
 	switch strings.ToLower(cfg.SSLMode) {
 	case "", "disable", "disabled", "false":
 	case "verify-ca", "verify-full":

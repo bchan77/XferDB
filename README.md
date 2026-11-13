@@ -13,6 +13,7 @@
 | MySQL | ✅ | ✅ | 8.0, 8.4, 9.7, 26.7 |
 | SQLite | ✅ | ✅ | 3.x |
 | MongoDB | ✅ | 🔜 | 6.0, 7.0, 8.0, 8.2, 8.3 (live migration source too: replica set or sharded cluster) |
+| Oracle | ✅ | — | 21c, 23ai (type `oracle`; 12c+ expected to work; see [Oracle](#oracle)) |
 | Cassandra | 🔜 | 🔜 | — |
 
 > ✅ = Working &nbsp;|&nbsp; 🔜 = Planned
@@ -41,6 +42,7 @@ automated yet.
 | YugabyteDB (2025.2, 2026.1) | YugabyteDB 2026.1 | ✅ Tested — 2 cases (incl. a live migration from 2025.2); also manually verified with a 1.2M-row table validated at L2 |
 | PostgreSQL (16, 17) | YugabyteDB (2025.2, 2026.1) | ✅ Tested — 2 cases |
 | SQLite | PostgreSQL | Implemented; not yet covered by the automated compatibility matrix or an e2e test |
+| Oracle (21c, 23ai) | PostgreSQL 17, MySQL 8.4, SQLite | ✅ Tested by the `e2e` test `TestOracleSource` (L3 validation on every table); matrix cases are on their way |
 
 ---
 
@@ -511,6 +513,48 @@ introspection, which can't recreate custom enum types.
 
 ---
 
+## Oracle
+
+Oracle is a source (12c and later; tested on 21c XE and 23ai Free). XferDB connects with a pure-Go
+driver, so no Oracle client software is needed next to it.
+
+- **Connection:** host, port (1521), the **service name** (e.g. `FREEPDB1`, not a SID) and a login.
+  In the web UI's connection editor that's *Service name*; as a DSN,
+  `oracle://user:pass@host:1521/SERVICE`.
+- **Schema:** a project reads one schema: *Schema* (`?schema=HR` in a DSN) when set, else the
+  login's own. The login needs `SELECT` on the tables (and sees them in `ALL_TABLES`).
+- **Names:** Oracle stores unquoted names in upper case; XferDB folds them to lower case, so
+  `CUSTOMERS.ORDER_ID` arrives as `customers.order_id`. A name created quoted in mixed case keeps
+  its case, and so do two names that would fold into one.
+- **Types:**
+
+  | Oracle | Arrives as (PostgreSQL target) | Notes |
+  |---|---|---|
+  | `NUMBER(p,0)` | `smallint` / `integer` / `bigint` (p ≤ 4 / 9 / 18), else `numeric(p)` | |
+  | `NUMBER(p,s)`, `NUMBER` | `numeric(p,s)`, `numeric` | exact; a MySQL target keeps at most 30 decimals (`DECIMAL(65,30)`) |
+  | `FLOAT`, `BINARY_DOUBLE`, `BINARY_FLOAT` | `double precision`, `real` | |
+  | `VARCHAR2`/`NVARCHAR2(n)`, `CHAR`/`NCHAR(n)` | `varchar(n)`, `char(n)` | lengths in characters |
+  | `CLOB`, `NCLOB`, `LONG` | `text` | |
+  | `BLOB`, `RAW`, `LONG RAW` | `bytea` | |
+  | `DATE` | `timestamp(0)` | an Oracle `DATE` has a time of day |
+  | `TIMESTAMP(n)`, `… WITH [LOCAL] TIME ZONE` | `timestamp(n)`, `timestamp(n) with time zone` | |
+  | `INTERVAL … TO …` | `interval` | ISO 8601 text on targets without an interval type |
+  | `JSON` (21c), `XMLTYPE`, `BOOLEAN` (23ai) | `jsonb`, `xml`, `boolean` | |
+
+  Other targets get these through their usual mapping (MySQL `DATETIME(6)`, `LONGTEXT`, …). The
+  schema editor can override any of them. Object types, `VARRAY`, nested tables, `SDO_GEOMETRY` and
+  `BFILE` aren't supported: the table fails at CREATE TABLE naming the type, so leave it out.
+- **Empty strings:** Oracle stores `''` as NULL, so they arrive as NULL.
+- **What's copied:** tables and their rows, primary keys, plain indexes, and foreign keys between
+  tables of the schema; `SYSDATE`/`SYSTIMESTAMP` defaults become the target's current timestamp.
+  Not copied: function-based indexes, CHECK constraints, views, sequences, triggers and PL/SQL.
+  An identity column arrives as a plain integer column with its values.
+- **Left out of the table list:** the recycle bin, temporary, external and nested tables,
+  materialized views' tables and logs.
+- **Live migration** from Oracle isn't supported yet.
+
+---
+
 ## DSN formats
 
 ```bash
@@ -531,6 +575,11 @@ sqlite://relative/path.db
 mongodb://user:pass@host:27017/dbname
 mongodb://user:pass@host:27017/dbname?authSource=admin
 mongodb+srv://user:pass@cluster.mongodb.net/dbname  # Atlas SRV format
+
+# Oracle (source only): the service name, optionally a schema other than the login's
+oracle://user:pass@host:1521/FREEPDB1
+oracle://user:pass@host:1521/ORCLPDB1?schema=HR
+oracle://user:pass@host:2484/ORCLPDB1?SSL=true      # TLS
 ```
 
 > **Tip:** If your password contains special characters (`!`, `@`, `#`, etc.), URL-encode them: `!` → `%21`, `@` → `%40`. Use single quotes around the DSN to prevent shell expansion — and don't carry shell escapes such as `\!` into the web UI, where they become part of the password.
@@ -550,6 +599,9 @@ XferDB detects common connection problems and gives actionable hints:
 | `authentication failed` | Check username and password |
 | `connection refused` | Check host, port, and that the server is running |
 | `i/o timeout` | Check firewall rules or network connectivity |
+| `ORA-01017` (Oracle) | Check username and password (case-sensitive) |
+| `ORA-12514` / `ORA-12505` (Oracle) | Check the service name (`FREEPDB1`, `ORCLPDB1`, …; a SID won't do) |
+| `ORA-28000` / `ORA-01045` (Oracle) | Unlock the account / grant `CREATE SESSION` |
 
 ---
 
@@ -785,6 +837,8 @@ go build -o xferdb ./cmd/xferdb
 - [x] Prometheus metrics (`GET /metrics`)
 - [x] Post-migration data validation (L1 counts, L2 row fingerprint, L3 row diff)
 - [x] All PostgreSQL schemas by default
+- [x] Oracle source adapter (21c, 23ai)
+- [ ] Live migration from Oracle (LogMiner)
 - [ ] MongoDB target adapter
 - [x] Web UI (projects, live table browser, migration status/controls, schema editor for every adapter pairing)
 - [ ] WebSocket live progress

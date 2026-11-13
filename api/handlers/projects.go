@@ -396,6 +396,14 @@ func friendlyConnectError(err error) string {
 	case strings.Contains(msg, "does not exist") && (strings.Contains(msg, "3D000") || strings.Contains(msg, "database")):
 		// Extract database name from the error if present.
 		return msg + " — create the database first: CREATE DATABASE <name>;"
+	case strings.Contains(msg, "ORA-01017"):
+		return msg + " — check the username and password (Oracle passwords are case-sensitive)"
+	case strings.Contains(msg, "ORA-12514"), strings.Contains(msg, "ORA-12505"):
+		return msg + " — check the service name (e.g. FREEPDB1 or ORCLPDB1; a SID won't do): `lsnrctl services` lists them"
+	case strings.Contains(msg, "ORA-28000"):
+		return msg + " — the account is locked: ALTER USER <name> ACCOUNT UNLOCK"
+	case strings.Contains(msg, "ORA-01045"):
+		return msg + " — the login needs the CREATE SESSION privilege"
 	case strings.Contains(msg, "pg_hba.conf") || strings.Contains(msg, "SSL off"):
 		return msg + " — add ?sslmode=require to the DSN"
 	case strings.Contains(msg, "authentication failed") || strings.Contains(msg, "password authentication"):

@@ -6,11 +6,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gitea.homelab.local/nextdevops/XferDB/api"
 	"gitea.homelab.local/nextdevops/XferDB/cdc/live"
+	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/version"
 )
@@ -73,10 +75,21 @@ var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List supported database adapters",
 	Run: func(cmd *cobra.Command, args []string) {
+		// From the registry, so the list can't fall behind the adapters.
 		fmt.Println("Supported adapters:")
-		fmt.Println("  postgres")
-		fmt.Println("  mysql")
-		fmt.Println("  sqlite")
+		fmt.Printf("  %-10s %s\n", "TYPE", "USE")
+		types := registry.SupportedAdapters()
+		sort.Strings(types)
+		for _, t := range types {
+			uses := []string{"source"}
+			if _, err := registry.NewTarget(t); err == nil {
+				uses = append(uses, "target")
+			}
+			if registry.SupportsLive(t) {
+				uses = append(uses, "live source (beta)")
+			}
+			fmt.Printf("  %-10s %s\n", t, strings.Join(uses, ", "))
+		}
 	},
 }
 

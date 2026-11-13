@@ -30,6 +30,7 @@ func NewSource() adapters.SourceAdapter {
 }
 
 func (s *Source) Connect(ctx context.Context, config adapters.ConnectionConfig) error {
+	config = withDSN(config)
 	db, err := sql.Open("oracle", buildURL(config))
 	if err != nil {
 		return fmt.Errorf("oracle open: %w", err)

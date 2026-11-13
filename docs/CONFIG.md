@@ -122,7 +122,7 @@ An older `validate: true|false` key is ignored: nothing ever read it.
 
 | Field | Notes |
 | --- | --- |
-| `type` | `postgres`, `mysql`, `mongodb`, or `sqlite`. Optional if `dsn` already implies it. |
+| `type` | `postgres`, `yugabyte`, `mysql`, `mongodb`, `sqlite`, or `oracle` (a source only). Optional if `dsn` already implies it. |
 | `dsn` | Full connection string. Supports `${VAR}` expansion. Overrides the individual fields below if set. |
 | `host`, `port`, `database`, `username`, `password`, `ssl_mode` | Used when `dsn` isn't set. `username`/`password` also support `${VAR}` expansion. |
 

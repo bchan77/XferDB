@@ -82,7 +82,7 @@ var projectCreateCmd = &cobra.Command{
 
 func init() {
 	projectCreateCmd.Flags().StringP("name", "n", "", "Project name")
-	projectCreateCmd.Flags().String("source", "", "Source database DSN")
+	projectCreateCmd.Flags().String("source", "", "Source database DSN (postgres://, yugabyte://, mysql://, sqlite://, mongodb://, oracle://user:pw@host:1521/SERVICE[?schema=NAME])")
 	projectCreateCmd.Flags().String("target", "", "Target database DSN")
 	projectCreateCmd.Flags().StringP("description", "d", "", "Project description")
 	projectCreateCmd.Flags().Int("batch-size", 1000, "Rows per batch (higher = faster, more memory)")
