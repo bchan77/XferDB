@@ -39,7 +39,7 @@ func (t *Target) EnableCopy() {
 }
 
 func (t *Target) Connect(ctx context.Context, config adapters.ConnectionConfig) error {
-	db, err := sql.Open("mysql", buildDSN(config))
+	db, err := sql.Open("mysql", targetDSN(buildDSN(config)))
 	if err != nil {
 		return fmt.Errorf("mysql open: %w", err)
 	}
@@ -82,6 +82,7 @@ func (t *Target) GetSchema(ctx context.Context, table string) (*adapters.TableSc
 func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) error {
 	defs := make([]string, 0, len(schema.Columns))
 	var pks []string
+	auto := autoIncrementColumn(schema.Columns)
 	for _, c := range schema.Columns {
 		colType := mapTypeToMySQL(c.Type)
 		if c.PrimaryKey {
@@ -91,7 +92,9 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 		if !c.Nullable {
 			def += " NOT NULL"
 		}
-		if d, ok := adapters.TranslateDefault(c, adapters.DialectMySQL, colType); ok {
+		if c.Name == auto && isIntegerType(colType) {
+			def += " AUTO_INCREMENT"
+		} else if d, ok := adapters.TranslateDefault(c, adapters.DialectMySQL, colType); ok {
 			def += " DEFAULT " + d
 		}
 		defs = append(defs, def)

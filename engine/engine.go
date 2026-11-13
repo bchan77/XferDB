@@ -380,6 +380,24 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}
 
+	if e.live == nil {
+		names := make([]string, len(tables))
+		for i, t := range tables {
+			names[i] = t.Name
+		}
+		n, err := ResetIdentities(ctx, e.source, e.target, names)
+		if err != nil {
+			return e.fail(ctx, err)
+		}
+		if n > 0 {
+			e.emit(ProgressEvent{
+				Kind:          EventPostSchemaItem,
+				PostSchemaMsg: fmt.Sprintf("%-16s %d column(s) set past the copied keys", "identity:", n),
+				Timestamp:     time.Now(),
+			})
+		}
+	}
+
 	if e.live != nil {
 		// The snapshot is done; the stream carries the migration on.
 		e.emit(ProgressEvent{Kind: EventSnapshotDone, Timestamp: time.Now()})

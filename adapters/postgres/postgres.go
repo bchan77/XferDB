@@ -236,7 +236,8 @@ func getSchema(ctx context.Context, db *sql.DB, name string) (*adapters.TableSch
 			a.attname,
 			pg_catalog.format_type(a.atttypid, a.atttypmod),
 			CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END,
-			pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+			pg_catalog.pg_get_expr(d.adbin, d.adrelid),
+			pg_catalog.pg_get_serial_sequence(format('%I.%I', `+schemaExpr(2)+`, $1::text), a.attname) IS NOT NULL
 		FROM pg_catalog.pg_attribute a
 		LEFT JOIN pg_catalog.pg_attrdef d
 			ON d.adrelid = a.attrelid AND d.adnum = a.attnum
@@ -256,8 +257,9 @@ func getSchema(ctx context.Context, db *sql.DB, name string) (*adapters.TableSch
 			dataType string
 			nullable string
 			dfltVal  sql.NullString
+			identity bool
 		)
-		if err := colRows.Scan(&name, &dataType, &nullable, &dfltVal); err != nil {
+		if err := colRows.Scan(&name, &dataType, &nullable, &dfltVal, &identity); err != nil {
 			return nil, err
 		}
 		col := adapters.ColumnDef{
@@ -265,8 +267,12 @@ func getSchema(ctx context.Context, db *sql.DB, name string) (*adapters.TableSch
 			Type:       dataType,
 			Nullable:   nullable == "YES",
 			PrimaryKey: pkCols[name],
+			// An identity column, or a serial: a nextval() default on a
+			// sequence the column owns. The sequence is the generator, so
+			// its default isn't passed on (#194).
+			Identity: identity,
 		}
-		if dfltVal.Valid {
+		if dfltVal.Valid && !identity {
 			col.DefaultValue = &dfltVal.String
 			col.DefaultDialect = adapters.DialectPostgres
 		}
