@@ -90,6 +90,52 @@ type TableStreamer interface {
 	StreamTable(ctx context.Context, table string, fn func(map[string]interface{}) error) error
 }
 
+// KeyRangeReader is an optional interface for adapters that can read part of
+// a table by a range of an integer key, so the validator can split one large
+// table across workers (#200). Rows come in no particular order.
+type KeyRangeReader interface {
+	// IntKeyBounds returns the smallest and largest value of the integer
+	// column col. ok is false when the table is empty, or when a range read
+	// by col could miss rows (a MongoDB _id that isn't a number).
+	IntKeyBounds(ctx context.Context, table, col string) (lo, hi int64, ok bool, err error)
+	// StreamKeyRange calls fn with each row whose col is in [lo, hi); a nil
+	// lo or hi leaves that end open. An error from fn stops it.
+	StreamKeyRange(ctx context.Context, table, col string, lo, hi *int64, fn func(map[string]interface{}) error) error
+}
+
+// KeyRangeWhere returns the WHERE clause (with a leading space, or empty)
+// selecting quotedCol in [lo, hi), and its arguments; placeholder(n) is the
+// dialect's n-th bind parameter (1-based).
+func KeyRangeWhere(quotedCol string, lo, hi *int64, placeholder func(n int) string) (string, []interface{}) {
+	var conds []string
+	var args []interface{}
+	if lo != nil {
+		args = append(args, *lo)
+		conds = append(conds, quotedCol+" >= "+placeholder(len(args)))
+	}
+	if hi != nil {
+		args = append(args, *hi)
+		conds = append(conds, quotedCol+" < "+placeholder(len(args)))
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// QueryIntBounds runs query, which must select MIN and MAX of one integer
+// column, for IntKeyBounds; both NULL (an empty table) is ok == false.
+func QueryIntBounds(ctx context.Context, db *sql.DB, query string) (lo, hi int64, ok bool, err error) {
+	var min, max sql.NullInt64
+	if err := db.QueryRowContext(ctx, query).Scan(&min, &max); err != nil {
+		return 0, 0, false, err
+	}
+	if !min.Valid || !max.Valid {
+		return 0, 0, false, nil
+	}
+	return min.Int64, max.Int64, true, nil
+}
+
 // StreamRecords passes each row of rows to fn as a column -> value map, the
 // way ScanRecords collects them.
 func StreamRecords(rows *sql.Rows, fn func(map[string]interface{}) error) error {

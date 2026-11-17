@@ -71,7 +71,9 @@ func (m *MetaDB) SetMigrationPhase(ctx context.Context, id, phase string) error 
 	return nil
 }
 
-// SetRunConfig saves a live run's effective transfer config.
+// SetRunConfig saves a run's effective transfer config (the project's, with
+// the run's overrides). Every migration saves one; migrations created before
+// that have none.
 func (m *MetaDB) SetRunConfig(ctx context.Context, id string, cfg adapters.TransferConfig) error {
 	b, err := json.Marshal(cfg)
 	if err != nil {

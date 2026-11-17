@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
@@ -94,28 +95,88 @@ type Request struct {
 	// Sample is the percentage of a table an L3 diff checks; 0 means all.
 	Sample int
 	// OnProgress, when set, is called as each table's validation advances
-	// (see Progress), from the goroutine validating it.
+	// (see Progress), from the goroutine validating it: with Workers > 1,
+	// from several at once.
 	OnProgress func(Progress)
+	// Workers is how many tables Run validates at once, each on its own
+	// source and target connections; 0 or 1 is one at a time. Tables are
+	// started in the order given, so put the largest first.
+	Workers int
 }
 
-// Run validates each table in req.Tables and hands every outcome to report as
-// soon as that table is done. It returns early only on a connection failure
-// or when ctx is cancelled; a table that fails validation is a result, not an
-// error.
+// Run validates each table in req.Tables, req.Workers at a time, and hands
+// every outcome to report as soon as that table is done (one call at a time).
+// It returns early only on a connection failure or when ctx is cancelled; a
+// table that fails validation is a result, not an error.
 func Run(ctx context.Context, req Request, report func(state.ValidationTable)) error {
-	s, err := Open(ctx, req)
-	if err != nil {
-		return err
+	workers := req.Workers
+	if workers > len(req.Tables) {
+		workers = len(req.Tables)
 	}
-	defer s.Close()
-	for _, table := range req.Tables {
-		res, err := s.Table(ctx, table)
-		if err != nil {
-			return err
+	if workers < 1 {
+		workers = 1
+	}
+	// Every session is opened before any table starts. The first must open;
+	// a later one that can't (the server's connection limit, say) only means
+	// fewer workers.
+	sessions := make([]*Session, 0, workers)
+	defer func() {
+		for _, s := range sessions {
+			s.Close()
 		}
-		report(res)
+	}()
+	for i := 0; i < workers; i++ {
+		s, err := Open(ctx, req)
+		if err != nil {
+			if i == 0 {
+				return err
+			}
+			break
+		}
+		sessions = append(sessions, s)
 	}
-	return nil
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	p := newPool(req.Tables)
+	if len(sessions) > 1 {
+		// With one worker nobody could take a part: read tables in one pass.
+		for _, s := range sessions {
+			s.pool = p
+		}
+	}
+	go func() { <-ctx.Done(); p.wake() }()
+	var (
+		mu       sync.Mutex // serialises report and guards firstErr
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	for _, s := range sessions {
+		wg.Add(1)
+		go func(s *Session) {
+			defer wg.Done()
+			p.work(ctx, s, func(table string) bool {
+				res, err := s.Table(ctx, table)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					cancel()
+					return false
+				}
+				report(res)
+				return true
+			})
+		}(s)
+	}
+	wg.Wait()
+	if firstErr == nil && ctx.Err() != nil {
+		// Cancelled before every table was handed out.
+		return ctx.Err()
+	}
+	return firstErr
 }
 
 // Session holds open connections to a project's source and target, so many
@@ -128,8 +189,12 @@ type Session struct {
 	batchSize int
 	sample    int
 	plan      []state.SchemaPlanRow
+	srcType   string
 	tgtType   string
 	progress  func(Progress)
+	// pool, set by Run when it has more than one worker, lets this session
+	// split a large table into parts other workers can take.
+	pool *pool
 }
 
 // Open connects to req's source and target. req.Tables is ignored; pass each
@@ -186,7 +251,8 @@ func Open(ctx context.Context, req Request) (*Session, error) {
 	_, isMongo := src.(*mongo.Source)
 	return &Session{
 		src: src, tgt: tgt, isMongo: isMongo, level: level, batchSize: batchSize,
-		sample: req.Sample, plan: req.Plan, tgtType: req.Project.TargetConfig.Type,
+		sample: req.Sample, plan: req.Plan, srcType: req.Project.SourceConfig.Type,
+		tgtType:  req.Project.TargetConfig.Type,
 		progress: req.OnProgress,
 	}, nil
 }
@@ -198,7 +264,13 @@ func (s *Session) Table(ctx context.Context, table string) (state.ValidationTabl
 		return state.ValidationTable{}, err
 	}
 	tr := newTracker(s.progress, table, s.batchSize)
-	res := validateTable(ctx, s.src, s.tgt, table, s.level, s.batchSize, s.sample, s.plan, s.isMongo, s.tgtType, tr)
+	var split func(context.Context, []part) error
+	// Not on YugabyteDB: a range read of its default hash-sharded key scans
+	// the whole table, which is why its tables are streamed in the first place.
+	if s.pool != nil && s.srcType != "yugabyte" && s.tgtType != "yugabyte" {
+		split = func(ctx context.Context, parts []part) error { return s.pool.split(ctx, s, parts) }
+	}
+	res := validateTable(ctx, s.src, s.tgt, table, s.level, s.batchSize, s.sample, s.plan, s.isMongo, s.tgtType, tr, split)
 	if err := ctx.Err(); err != nil {
 		return state.ValidationTable{}, err
 	}
@@ -216,11 +288,11 @@ func (s *Session) Close() {
 // schema changed under a connection's cache (just after its indexes were
 // created) as SQLSTATE 40001, "schema version mismatch". The whole table is
 // validated again, as a fingerprint can't resume halfway.
-func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string, tr *tracker) state.ValidationTable {
+func validateTable(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string, tr *tracker, split func(context.Context, []part) error) state.ValidationTable {
 	var res state.ValidationTable
 	for attempt := 0; ; attempt++ {
 		var transient bool
-		res, transient = validateAttempt(ctx, src, tgt, table, level, batchSize, sample, plan, isMongo, targetType, tr)
+		res, transient = validateAttempt(ctx, src, tgt, table, level, batchSize, sample, plan, isMongo, targetType, tr, split)
 		if !transient || attempt >= len(retryDelays) {
 			return res
 		}
@@ -248,7 +320,9 @@ func isTransient(err error) bool {
 	return strings.Contains(msg, "(40001)") || strings.Contains(msg, "schema version mismatch")
 }
 
-func validateAttempt(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string, tr *tracker) (res state.ValidationTable, transient bool) {
+// split, when set, runs key-range parts of a large table on this and other
+// workers (see split.go); nil reads every table in one pass.
+func validateAttempt(ctx context.Context, src, tgt adapters.SourceAdapter, table, level string, batchSize, sample int, plan []state.SchemaPlanRow, isMongo bool, targetType string, tr *tracker, split func(context.Context, []part) error) (res state.ValidationTable, transient bool) {
 	tr.step(StepCounting)
 	// LevelRun starts at what L1/L2 reach; L3 raises it only if it runs.
 	runLevel := level
@@ -332,21 +406,41 @@ func validateAttempt(ctx context.Context, src, tgt adapters.SourceAdapter, table
 	var srcFP, tgtFP fingerprint
 	planned := newLossyLog(srcSchema, cols)
 	tr.total(srcRows + tgtRows)
-	tr.step(StepReadingSource)
-	if err := scan(ctx, src, srcSchema, batchSize, isMongo, func(rec map[string]interface{}) {
-		planned.add(rec, srcFP.add(rec, cols, false))
-		tr.row()
-	}); err != nil {
-		res.Detail = fmt.Sprintf("read source rows: %v", err)
-		return res, isTransient(err)
+	tr.step(StepReading)
+	// The two sides are read at once: each fingerprint is an
+	// order-independent sum over its own side, and each side has its own
+	// connection, so neither waits for the other (#200). A large table may
+	// instead be read in key-range parts, several workers at once.
+	var srcErr, tgtErr error
+	var key, tgtKey string
+	var bounds [][2]*int64
+	if split != nil {
+		key, tgtKey, bounds = keyRanges(ctx, src, tgt, srcSchema, tgtSchema, cols, srcRows)
 	}
-	tr.step(StepReadingTarget)
-	if err := scan(ctx, tgt, tgtSchema, batchSize, false, func(rec map[string]interface{}) {
-		tgtFP.add(rec, cols, true)
-		tr.row()
-	}); err != nil {
-		res.Detail = fmt.Sprintf("read target rows: %v", err)
-		return res, isTransient(err)
+	if bounds != nil {
+		srcErr, tgtErr = readSplit(ctx, split, table, key, tgtKey, bounds, srcSchema, cols, &srcFP, &tgtFP, planned, tr)
+	} else {
+		srcErr, tgtErr = both(ctx,
+			func(ctx context.Context) error {
+				return scan(ctx, src, srcSchema, batchSize, isMongo, func(rec map[string]interface{}) {
+					planned.add(rec, srcFP.add(rec, cols, false))
+					tr.row()
+				})
+			},
+			func(ctx context.Context) error {
+				return scan(ctx, tgt, tgtSchema, batchSize, false, func(rec map[string]interface{}) {
+					tgtFP.add(rec, cols, true)
+					tr.row()
+				})
+			})
+	}
+	if srcErr != nil {
+		res.Detail = fmt.Sprintf("read source rows: %v", srcErr)
+		return res, isTransient(srcErr)
+	}
+	if tgtErr != nil {
+		res.Detail = fmt.Sprintf("read target rows: %v", tgtErr)
+		return res, isTransient(tgtErr)
 	}
 	res.SourceHash, res.TargetHash = srcFP.String(), tgtFP.String()
 	res.RowsChecked = srcFP.rows
@@ -377,6 +471,40 @@ func validateAttempt(ctx context.Context, src, tgt adapters.SourceAdapter, table
 		rowDiff(ctx, src, tgt, srcSchema, tgtSchema, cols, batchSize, sample, isMongo, &res)
 	}
 	return res, false
+}
+
+// both runs a and b at once and returns their errors. When one fails, the
+// other is cancelled, and its error -- only a consequence, and not always
+// recognisable as one (lib/pq reports a cancelled query as its own error) --
+// is dropped. When ctx itself is cancelled, both errors are returned.
+func both(ctx context.Context, a, b func(context.Context) error) (errA, errB error) {
+	inner, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var once sync.Once
+	first := 0 // 1 when a failed first, 2 when b did
+	fail := func(side int) { once.Do(func() { first = side; cancel() }) }
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if errB = b(inner); errB != nil {
+			fail(2)
+		}
+	}()
+	if errA = a(inner); errA != nil {
+		fail(1)
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return errA, errB
+	}
+	switch first {
+	case 1:
+		errB = nil
+	case 2:
+		errA = nil
+	}
+	return errA, errB
 }
 
 // rowDiff runs L3 on a table that failed L1 or L2 and rewrites res with what
@@ -524,11 +652,19 @@ func align(src, tgt *adapters.TableSchema) ([]column, []string) {
 // adapter that can stream a table (adapters.TableStreamer) reads it in one
 // query; paging cost a full table scan per page on a YugabyteDB table with a
 // hash-sharded key (12s a page for 1.2M rows), and one query also reads a
-// single snapshot. Otherwise it pages by keyset where it can: MongoDB by
-// _id, a relational table by its single integer primary key, and anything
-// else by LIMIT/OFFSET, the same path the engine uses for such tables.
+// single snapshot. Every built-in adapter streams, MongoDB included (one
+// cursor instead of a sorted find per batch, #202). An adapter that can't
+// is paged by keyset where it can: MongoDB by _id, a relational table by its
+// single integer primary key, and anything else by LIMIT/OFFSET, the same
+// path the engine uses for such tables.
 func scan(ctx context.Context, a adapters.SourceAdapter, schema *adapters.TableSchema, batchSize int, isMongo bool, fn func(map[string]interface{})) error {
 	table := schema.Name
+	if st, ok := a.(adapters.TableStreamer); ok {
+		return st.StreamTable(ctx, table, func(r map[string]interface{}) error {
+			fn(r)
+			return ctx.Err()
+		})
+	}
 	if isMongo {
 		var lastKey string
 		for {
@@ -544,13 +680,6 @@ func scan(ctx context.Context, a adapters.SourceAdapter, schema *adapters.TableS
 			}
 			lastKey = b.LastKey
 		}
-	}
-
-	if st, ok := a.(adapters.TableStreamer); ok {
-		return st.StreamTable(ctx, table, func(r map[string]interface{}) error {
-			fn(r)
-			return ctx.Err()
-		})
 	}
 
 	if pk := integerPK(schema); pk != "" {

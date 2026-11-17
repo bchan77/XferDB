@@ -485,10 +485,12 @@ checked; a result becomes *stale* once a later migration copies the table again.
 | L2 (default) | Every row, as an order-independent fingerprint of both sides | Reads both databases in full again |
 | L3 | L2, then for a failing table a primary-key diff: up to 100 example rows (missing, extra, different) | L3 sample % limits the diff |
 
-- **When:** `after` (default) validates once the whole migration completes, one table at a time;
-  `per_table` validates each table as soon as it is copied, with as many workers as the
-  migration's table workers; `off` skips it. *Validate now* in the web UI or `xferdb validate`
-  runs it on demand.
+- **When:** `after` (default) validates once the whole migration completes; `per_table`
+  validates each table as soon as it is copied; `off` skips it. *Validate now* in the web UI or
+  `xferdb validate` runs it on demand. Either way, as many tables are validated at once as the
+  migration's table workers (largest first, each on its own source and target connections), and
+  L2 reads a table's source and target at the same time. When no whole table is left to start,
+  idle workers help with a large one (500k+ rows, one integer key), read in key-range parts.
 - **Any pairing:** the source is re-read through its own adapter and schema plan (so MongoDB
   flattening, renames and `_extra` are reproduced), and values are compared by the column's
   logical type, so e.g. MySQL `DECIMAL` and PostgreSQL `numeric` match.

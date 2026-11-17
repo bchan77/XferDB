@@ -56,13 +56,13 @@ func TestValidateRetriesTransientErrors(t *testing.T) {
 	src := open("src")
 
 	tgt := &flakyCount{SourceAdapter: open("tgt"), failures: 2}
-	if r := validateTable(ctx, src, tgt, "t", LevelL2, 10, 0, nil, false, "yugabyte", newTracker(nil, "t", 0)); r.Result != state.ValidationPass {
+	if r := validateTable(ctx, src, tgt, "t", LevelL2, 10, 0, nil, false, "yugabyte", newTracker(nil, "t", 0), nil); r.Result != state.ValidationPass {
 		t.Fatalf("after two transient errors: %s (%s)", r.Result, r.Detail)
 	}
 
 	// Past the retries it fails, with the error.
 	tgt = &flakyCount{SourceAdapter: open("tgt2"), failures: 10}
-	if r := validateTable(ctx, src, tgt, "t", LevelL2, 10, 0, nil, false, "yugabyte", newTracker(nil, "t", 0)); r.Result != state.ValidationFail || tgt.failures != 6 {
+	if r := validateTable(ctx, src, tgt, "t", LevelL2, 10, 0, nil, false, "yugabyte", newTracker(nil, "t", 0), nil); r.Result != state.ValidationFail || tgt.failures != 6 {
 		t.Fatalf("persistent transient errors: %s (%s), %d failures left", r.Result, r.Detail, tgt.failures)
 	}
 }

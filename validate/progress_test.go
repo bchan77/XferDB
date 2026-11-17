@@ -34,7 +34,7 @@ func TestValidateReportsProgress(t *testing.T) {
 			steps = append(steps, pr.Step)
 		}
 	}
-	if want := []string{StepCounting, StepReadingSource, StepReadingTarget}; !reflect.DeepEqual(steps, want) {
+	if want := []string{StepCounting, StepReading}; !reflect.DeepEqual(steps, want) {
 		t.Errorf("steps %v, want %v", steps, want)
 	}
 	last := got[len(got)-1]
