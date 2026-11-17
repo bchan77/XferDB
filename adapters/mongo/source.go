@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -295,6 +297,135 @@ func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.Batc
 	}, nil
 }
 
+// StreamTable implements adapters.TableStreamer: every document of the
+// collection, converted with its plan exactly as ReadBatch converts it, from
+// one cursor in natural order. ReadBatch's keyset paging runs a new sorted
+// find per batch (a seek and at least one round trip each, ~35 ms a batch on
+// the size-L harness); a reader that doesn't need _id order, such as
+// validation's order-independent fingerprint, has no use for that (#202).
+func (s *Source) StreamTable(ctx context.Context, table string, fn func(map[string]interface{}) error) error {
+	return s.stream(ctx, table, bson.D{}, fn)
+}
+
+// IntKeyBounds implements adapters.KeyRangeReader for the column the plan
+// maps _id to. ok is false unless the smallest and the largest _id are both
+// numbers: numbers sort together in BSON order, so then every _id is one,
+// and a numeric range read sees every document.
+func (s *Source) IntKeyBounds(ctx context.Context, table, col string) (int64, int64, bool, error) {
+	if err := s.requirePlan(); err != nil {
+		return 0, 0, false, err
+	}
+	collection := s.collectionFor(table)
+	if !s.isIDColumn(collection, col) {
+		return 0, 0, false, nil
+	}
+	coll := s.client.Database(s.database).Collection(collection)
+	end := func(dir int) (float64, bool, error) {
+		var doc bson.D
+		err := coll.FindOne(ctx, bson.D{}, options.FindOne().
+			SetSort(bson.D{{Key: "_id", Value: dir}}).
+			SetProjection(bson.D{{Key: "_id", Value: 1}})).Decode(&doc)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return 0, false, nil
+		}
+		if err != nil {
+			return 0, false, fmt.Errorf("read %s _id bounds: %w", collection, err)
+		}
+		for _, e := range doc {
+			if e.Key != "_id" {
+				continue
+			}
+			switch v := e.Value.(type) {
+			case int32:
+				return float64(v), true, nil
+			case int64:
+				return float64(v), true, nil
+			case float64:
+				return v, true, nil
+			}
+		}
+		return 0, false, nil
+	}
+	lo, okLo, err := end(1)
+	if err != nil || !okLo {
+		return 0, 0, false, err
+	}
+	hi, okHi, err := end(-1)
+	if err != nil || !okHi {
+		return 0, 0, false, err
+	}
+	return int64(math.Floor(lo)), int64(math.Floor(hi)), true, nil
+}
+
+// StreamKeyRange implements adapters.KeyRangeReader: the documents whose
+// numeric _id is in [lo, hi), converted as StreamTable converts them.
+func (s *Source) StreamKeyRange(ctx context.Context, table, col string, lo, hi *int64, fn func(map[string]interface{}) error) error {
+	if err := s.requirePlan(); err != nil {
+		return err
+	}
+	if !s.isIDColumn(s.collectionFor(table), col) {
+		return fmt.Errorf("mongo: %s is not the column _id maps to; only _id ranges can be read", col)
+	}
+	cond := bson.D{}
+	if lo != nil {
+		cond = append(cond, bson.E{Key: "$gte", Value: *lo})
+	}
+	if hi != nil {
+		cond = append(cond, bson.E{Key: "$lt", Value: *hi})
+	}
+	if len(cond) == 0 {
+		// Both ends open would include non-numeric _ids, which a range never
+		// does: still only the numbers.
+		cond = bson.D{{Key: "$type", Value: "number"}}
+	}
+	return s.stream(ctx, table, bson.D{{Key: "_id", Value: cond}}, fn)
+}
+
+// isIDColumn reports whether col is the column the collection's plan maps
+// _id to.
+func (s *Source) isIDColumn(collection, col string) bool {
+	for _, r := range s.planByCollection[collection] {
+		if r.FieldName == "_id" {
+			return r.PgColumn == col
+		}
+	}
+	return false
+}
+
+// stream converts and passes on every document matching filter, from one
+// cursor in natural order.
+func (s *Source) stream(ctx context.Context, table string, filter bson.D, fn func(map[string]interface{}) error) error {
+	if err := s.requirePlan(); err != nil {
+		return err
+	}
+	collection := s.collectionFor(table)
+	plan := s.planByCollection[collection]
+	extraCol := s.extraColByCollection[collection]
+	coll := s.client.Database(s.database).Collection(collection)
+	cursor, err := coll.Find(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("find %s: %w", collection, err)
+	}
+	defer cursor.Close(ctx)
+	for cursor.Next(ctx) {
+		var doc bson.D
+		if err := cursor.Decode(&doc); err != nil {
+			return fmt.Errorf("decode document: %w", err)
+		}
+		rec, err := ConvertDocument(doc, plan, extraCol)
+		if err != nil {
+			return fmt.Errorf("convert document: %w", err)
+		}
+		if err := fn(rec); err != nil {
+			return err
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return fmt.Errorf("cursor: %w", err)
+	}
+	return nil
+}
+
 // findBatch reads up to limit documents matching filter in _id order and
 // converts them with the collection's plan. lastDoc is the final raw document.
 func (s *Source) findBatch(ctx context.Context, coll *mongo.Collection, filter bson.D, limit int64, plan []state.SchemaPlanRow, extraCol string) ([]map[string]interface{}, bson.D, error) {
@@ -340,7 +471,7 @@ func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionChec
 	}
 
 	result.CanRead = true
-	result.CanWrite = false      // source adapter — no writes
+	result.CanWrite = false // source adapter — no writes
 	result.CanCreateTable = false
 
 	// Confirm at least one collection is readable.

@@ -1170,8 +1170,7 @@ async function openDiffDrawer(vid, t) {
 
 const VALIDATION_STEPS = {
   counting: 'Counting rows',
-  reading_source: 'Reading source',
-  reading_target: 'Reading target',
+  reading: 'Reading source and target',
   row_diff: 'Diffing rows by key',
 };
 

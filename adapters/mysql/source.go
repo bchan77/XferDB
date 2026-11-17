@@ -292,3 +292,19 @@ func (s *Source) StreamTable(ctx context.Context, table string, fn func(map[stri
 	defer rows.Close()
 	return adapters.StreamRecords(rows, fn)
 }
+
+// IntKeyBounds implements adapters.KeyRangeReader.
+func (s *Source) IntKeyBounds(ctx context.Context, table, col string) (int64, int64, bool, error) {
+	return adapters.QueryIntBounds(ctx, s.db, fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s", quote(col), quote(col), quote(table)))
+}
+
+// StreamKeyRange implements adapters.KeyRangeReader.
+func (s *Source) StreamKeyRange(ctx context.Context, table, col string, lo, hi *int64, fn func(map[string]interface{}) error) error {
+	where, args := adapters.KeyRangeWhere(quote(col), lo, hi, func(int) string { return "?" })
+	rows, err := s.db.QueryContext(ctx, "SELECT * FROM "+quote(table)+where, args...)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", table, err)
+	}
+	defer rows.Close()
+	return adapters.StreamRecords(rows, fn)
+}

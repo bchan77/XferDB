@@ -1,13 +1,16 @@
 package validate
 
-import "time"
+import (
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
 // Steps a table's validation goes through, in Progress.Step.
 const (
-	StepCounting      = "counting"       // L1: counting rows on both sides
-	StepReadingSource = "reading_source" // L2: fingerprinting the source rows
-	StepReadingTarget = "reading_target" // L2: fingerprinting the target rows
-	StepRowDiff       = "row_diff"       // L3: diffing by primary key; no row total
+	StepCounting = "counting" // L1: counting rows on both sides
+	StepReading  = "reading"  // L2: fingerprinting the source and target rows, both at once
+	StepRowDiff  = "row_diff" // L3: diffing by primary key; no row total
 )
 
 // Progress is how far the validation of one table has got. RowsTotal is
@@ -27,9 +30,15 @@ type Progress struct {
 // reading, once per `every` rows rather than per row.
 type tracker struct {
 	fn    func(Progress)
-	p     Progress
 	every int64
-	last  int64
+	// done counts rows read so far and last the count at the latest emit;
+	// both are atomics so the source and target readers, which run at once,
+	// can count without taking mu for every row.
+	done atomic.Int64
+	last atomic.Int64
+
+	mu sync.Mutex // guards p and serialises fn
+	p  Progress
 }
 
 func newTracker(fn func(Progress), table string, every int) *tracker {
@@ -40,21 +49,34 @@ func newTracker(fn func(Progress), table string, every int) *tracker {
 }
 
 func (t *tracker) step(step string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.p.Step = step
-	t.emit()
+	t.emitLocked()
 }
 
-func (t *tracker) total(rows int64) { t.p.RowsTotal = rows }
+func (t *tracker) total(rows int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.p.RowsTotal = rows
+}
 
+// row counts one row read, on either side; safe for concurrent use.
 func (t *tracker) row() {
-	t.p.RowsDone++
-	if t.p.RowsDone-t.last >= t.every {
-		t.emit()
+	n := t.done.Add(1)
+	if n-t.last.Load() < t.every {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done.Load()-t.last.Load() >= t.every { // not emitted by the other side meanwhile
+		t.emitLocked()
 	}
 }
 
-func (t *tracker) emit() {
-	t.last = t.p.RowsDone
+func (t *tracker) emitLocked() {
+	t.p.RowsDone = t.done.Load()
+	t.last.Store(t.p.RowsDone)
 	if t.fn != nil {
 		t.fn(t.p)
 	}

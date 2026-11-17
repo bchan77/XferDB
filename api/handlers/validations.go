@@ -70,9 +70,11 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 		return nil, err
 	}
 	statusOf := make(map[string]adapters.MigrationStatus, len(progress))
+	rowsOf := make(map[string]int64, len(progress))
 	var eligible, skipped []string
 	for _, tp := range progress {
 		statusOf[tp.TableName] = tp.Status
+		rowsOf[tp.TableName] = tp.RowsTotal
 	}
 	wanted := tables
 	if len(wanted) == 0 {
@@ -87,6 +89,9 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 			skipped = append(skipped, t)
 		}
 	}
+
+	// Largest first, so the workers don't end on one big table started last.
+	sort.SliceStable(eligible, func(i, j int) bool { return rowsOf[eligible[i]] > rowsOf[eligible[j]] })
 
 	plan, err := h.migrationPlan(ctx, migrationID, p)
 	if err != nil {
@@ -148,6 +153,9 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 			BatchSize:  p.TransferConfig.BatchSize,
 			Sample:     sample,
 			OnProgress: h.onProgress(v.ID),
+			// As many tables at once as the migration copied at once: the
+			// databases took that load already.
+			Workers: p.TransferConfig.TableWorkers,
 		}, func(t state.ValidationTable) {
 			if h.saveTable(writeCtx, v.ID, t, log) {
 				failed++

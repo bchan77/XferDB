@@ -34,6 +34,17 @@ All notable changes to XferDB are documented here.
   can open a change stream, and the oplog window; a stream whose resume point has left the oplog
   fails the migration. See `docs/LIVE_MIGRATION.md`.
 
+### Changed
+- **Validation runs tables in parallel and reads both sides at once (#200).** `after` mode and
+  *Validate now* validate as many tables at once as the migration's table workers, largest first
+  (`per_table` already did); L2 reads a table's source and target concurrently instead of one
+  after the other; and a MongoDB source is read through one cursor rather than a sorted `find`
+  per batch (#202, validation only). Once no whole table is left to start, idle workers help with
+  a large one (500k+ rows keyed by one integer column, a MongoDB numeric `_id` included): it is
+  read in key-range parts of ~250k rows that any worker can take, and the parts' fingerprints add
+  up to the table's. YugabyteDB tables are always read in one pass. Results are unchanged. The
+  progress step `reading_source` / `reading_target` is now a single `reading` step.
+
 ### Fixed
 - **Identity and auto-increment columns arrived as plain columns (#194).** An Oracle or
   PostgreSQL identity column, a PostgreSQL `serial` and a MySQL `AUTO_INCREMENT` column now
