@@ -197,12 +197,13 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Kept so a server restart can resume a live run as it was started, and
+	// so a later on-demand validation uses as many workers as this run did.
+	if err := h.DB.SetRunConfig(r.Context(), migrationID, p.TransferConfig); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if mode == adapters.MigrationModeLive {
-		// Kept so a server restart can resume the run as it was started.
-		if err := h.DB.SetRunConfig(r.Context(), migrationID, p.TransferConfig); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
 		// A live migration is validated at cutover, against a quiet source:
 		// while it streams, differences would only be lag.
 		validationMode = validate.ModeOff

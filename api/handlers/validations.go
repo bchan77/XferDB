@@ -142,7 +142,7 @@ func (h *ValidationsHandler) start(ctx context.Context, migrationID string, p *a
 		}()
 		writeCtx := context.WithoutCancel(runCtx)
 		h.DB.SetValidationStatus(writeCtx, v.ID, adapters.StatusInProgress, "") //nolint:errcheck
-		log.Info("validation.started", "tables", len(eligible), "skipped", len(skipped))
+		log.Info("validation.started", "tables", len(eligible), "skipped", len(skipped), "workers", p.TransferConfig.TableWorkers)
 
 		var failed int
 		err := validate.Run(runCtx, validate.Request{
@@ -281,6 +281,7 @@ func (h *ValidationsHandler) StartValidation(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	p.TransferConfig.TableWorkers = h.onDemandWorkers(r.Context(), migrationID, p)
 
 	v, err := h.start(r.Context(), migrationID, p, level, sample, body.Tables)
 	if errors.Is(err, errValidationBusy) {
@@ -292,6 +293,20 @@ func (h *ValidationsHandler) StartValidation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusCreated, v)
+}
+
+// onDemandWorkers is how many tables an on-demand validation of migrationID
+// validates at once: the project's table_workers, or, for a project without
+// one, as many as the migration ran with (a per-run --table-workers or a
+// config default), not one: the databases took that load already.
+func (h *ValidationsHandler) onDemandWorkers(ctx context.Context, migrationID string, p *adapters.Project) int {
+	if p.TransferConfig.TableWorkers > 0 {
+		return p.TransferConfig.TableWorkers
+	}
+	if cfg, ok, err := h.DB.GetRunConfig(ctx, migrationID); err == nil && ok {
+		return cfg.TableWorkers
+	}
+	return p.TransferConfig.TableWorkers
 }
 
 // startAfterMigration is called when a migration finishes. It validates the

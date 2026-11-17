@@ -37,7 +37,8 @@ All notable changes to XferDB are documented here.
 ### Changed
 - **Validation runs tables in parallel and reads both sides at once (#200).** `after` mode and
   *Validate now* validate as many tables at once as the migration's table workers, largest first
-  (`per_table` already did); L2 reads a table's source and target concurrently instead of one
+  (`per_table` already did; for *Validate now* / `xferdb validate`, the project's `table_workers`,
+  else the count the migration ran with, now saved with every migration); L2 reads a table's source and target concurrently instead of one
   after the other; and a MongoDB source is read through one cursor rather than a sorted `find`
   per batch (#202, validation only). Once no whole table is left to start, idle workers help with
   a large one (500k+ rows keyed by one integer column, a MongoDB numeric `_id` included): it is
