@@ -81,6 +81,7 @@ var oracleSeed = []string{
 	)`,
 	`CREATE TABLE xfdb_events (payload VARCHAR2(100), at DATE)`, // no primary key
 	`CREATE TABLE "XfdbMixed" ("Id" NUMBER(5) PRIMARY KEY, "Label" VARCHAR2(20))`,
+	`CREATE TABLE xfdb_docs (id NUMBER(6) PRIMARY KEY, doc XMLTYPE)`, // go-ora can't decode XMLTYPE itself
 	fmt.Sprintf(`INSERT INTO xfdb_customers (id, email, full_name, balance, score, ratio, weight, approx, code, notes, photo, token,
 		born, seen_at, local_at, tenure, lag, status, empty_text)
 	SELECT LEVEL, 'user' || LEVEL || '@example.com', N'Zoë Müller ' || LEVEL, LEVEL * 1.25, ROUND(LEVEL / 7, 25), LEVEL / 3, LEVEL / 4, LEVEL / 8,
@@ -96,9 +97,12 @@ var oracleSeed = []string{
 	`INSERT INTO xfdb_events SELECT 'event ' || LEVEL, DATE '2025-01-01' + LEVEL FROM dual CONNECT BY LEVEL <= 300`,
 	`INSERT INTO "XfdbMixed" VALUES (1, 'one')`,
 	`INSERT INTO "XfdbMixed" VALUES (2, 'two')`,
+	`INSERT INTO xfdb_docs SELECT LEVEL, CASE WHEN MOD(LEVEL, 5) > 0 THEN
+		XMLELEMENT("line", XMLATTRIBUTES(LEVEL AS "no"), XMLELEMENT("sku", 'SKU-' || LEVEL), XMLELEMENT("qty", MOD(LEVEL, 50))) END
+	FROM dual CONNECT BY LEVEL <= 50`,
 }
 
-var oracleTables = []string{"xfdb_customers", "xfdb_orders", "xfdb_order_lines", "xfdb_events", "XfdbMixed"}
+var oracleTables = []string{"xfdb_customers", "xfdb_orders", "xfdb_order_lines", "xfdb_events", "XfdbMixed", "xfdb_docs"}
 
 func seedOracle(t *testing.T, ctx context.Context, dsn string) {
 	t.Helper()
@@ -107,7 +111,7 @@ func seedOracle(t *testing.T, ctx context.Context, dsn string) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, tbl := range []string{"XFDB_ORDER_LINES", "XFDB_ORDERS", "XFDB_CUSTOMERS", "XFDB_EVENTS", `"XfdbMixed"`} {
+	for _, tbl := range []string{"XFDB_ORDER_LINES", "XFDB_ORDERS", "XFDB_CUSTOMERS", "XFDB_EVENTS", `"XfdbMixed"`, "XFDB_DOCS"} {
 		db.ExecContext(ctx, "DROP TABLE "+tbl+" CASCADE CONSTRAINTS PURGE") //nolint:errcheck // may not exist
 	}
 	for _, stmt := range oracleSeed {
