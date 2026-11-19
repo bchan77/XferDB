@@ -464,7 +464,12 @@ func (s *Source) findBatch(ctx context.Context, coll *mongo.Collection, filter b
 		return nil, nil, fmt.Errorf("find %s: %w", coll.Name(), err)
 	}
 	defer cursor.Close(ctx)
+	return collectBatch(ctx, cursor, plan, extraCol)
+}
 
+// collectBatch converts a findBatch cursor's documents, in _id order,
+// returning the last one read for the next page's bound.
+func collectBatch(ctx context.Context, cursor *mongo.Cursor, plan []state.SchemaPlanRow, extraCol string) ([]map[string]interface{}, bson.D, error) {
 	var records []map[string]interface{}
 	var lastDoc bson.D
 
@@ -472,6 +477,15 @@ func (s *Source) findBatch(ctx context.Context, coll *mongo.Collection, filter b
 		var doc bson.D
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, nil, fmt.Errorf("decode document: %w", err)
+		}
+		if lastDoc != nil && sameID(lastDoc, doc) {
+			// Through mongos, a document whose shard key changes while the
+			// shards are read can come from both of them (each answers at
+			// its own point in time), the two side by side in _id order.
+			// Keep the first: a live stream started before this read
+			// replays the change, and one batch holding a key twice fails
+			// a PostgreSQL upsert (21000).
+			continue
 		}
 		rec, err := ConvertDocument(doc, plan, extraCol)
 		if err != nil {
@@ -484,6 +498,25 @@ func (s *Source) findBatch(ctx context.Context, coll *mongo.Collection, filter b
 		return nil, nil, fmt.Errorf("cursor: %w", err)
 	}
 	return records, lastDoc, nil
+}
+
+// sameID reports whether two documents have the same _id. Numbers compare
+// by value (relaxed extended JSON): MongoDB's _id index treats 3 and
+// NumberLong(3) as one key, and a target stores both as 3.
+func sameID(a, b bson.D) bool {
+	ka, okA := relaxedID(a)
+	kb, okB := relaxedID(b)
+	return okA && okB && ka == kb
+}
+
+func relaxedID(doc bson.D) (string, bool) {
+	for _, e := range doc {
+		if e.Key == "_id" {
+			b, err := bson.MarshalExtJSON(bson.D{{Key: "_id", Value: e.Value}}, false, false)
+			return string(b), err == nil
+		}
+	}
+	return "", false
 }
 
 func (s *Source) CheckPermissions(ctx context.Context) (*adapters.PermissionCheck, error) {
