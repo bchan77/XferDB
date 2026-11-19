@@ -33,9 +33,10 @@ func TestListDatabasesRejectsBadRequests(t *testing.T) {
 	h, _, cleanup := newTestHandler(t)
 	defer cleanup()
 	cases := map[string]listDatabasesRequest{
-		"sqlite":  {Config: adapters.ConnectionConfig{Type: "sqlite", DSN: "/tmp/x.db"}},
-		"mongodb": {Config: adapters.ConnectionConfig{Type: "mongodb", DSN: "mongodb://h/db"}},
-		"no host": {Config: adapters.ConnectionConfig{Type: "postgres"}},
+		"sqlite":                {Config: adapters.ConnectionConfig{Type: "sqlite", DSN: "/tmp/x.db"}},
+		"oracle":                {Config: adapters.ConnectionConfig{Type: "oracle", Host: "h", Database: "FREEPDB1"}},
+		"mongodb without a URI": {Config: adapters.ConnectionConfig{Type: "mongodb"}},
+		"no host":               {Config: adapters.ConnectionConfig{Type: "postgres"}},
 	}
 	for name, body := range cases {
 		rec, _ := postListDatabases(t, h, body)

@@ -45,6 +45,7 @@ export const api = {
 
   listDatabases: (body) => req('POST', '/api/v1/connections/databases', body),
   createDatabase: (body) => req('POST', '/api/v1/connections/create-database', body),
+  listSchemas: (body) => req('POST', '/api/v1/connections/schemas', body),
 
   createTargetDatabase: (id) => req('POST', `/api/v1/projects/${encodeURIComponent(id)}/target-database`),
   listLiveStreams: (id) => req('GET', `/api/v1/projects/${encodeURIComponent(id)}/live-streams`),

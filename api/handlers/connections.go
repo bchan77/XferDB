@@ -28,9 +28,10 @@ type listDatabasesRequest struct {
 }
 
 // ListDatabases handles POST /api/v1/connections/databases. It connects with
-// the given server settings (the database name may be empty) and returns the
-// databases the login can see. A connection failure is a 422 whose error is
-// the driver's message plus a hint, for the form to show next to the fields.
+// the given server settings (the database name may be empty; MongoDB takes
+// its connection URI) and returns the databases the login can see. A
+// connection failure is a 422 whose error is the driver's message plus a
+// hint, for the form to show next to the fields.
 func (h *ProjectsHandler) ListDatabases(w http.ResponseWriter, r *http.Request) {
 	var body listDatabasesRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -38,19 +39,21 @@ func (h *ProjectsHandler) ListDatabases(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cfg := body.Config
-	if !adapters.PostgresFamily(cfg.Type) && cfg.Type != "mysql" {
-		writeError(w, http.StatusBadRequest, "listing databases is supported for postgres, yugabyte and mysql only")
+	if !adapters.PostgresFamily(cfg.Type) && cfg.Type != "mysql" && cfg.Type != "mongodb" {
+		writeError(w, http.StatusBadRequest, "listing databases is supported for postgres, yugabyte, mysql and mongodb only")
 		return
 	}
-	if strings.TrimSpace(cfg.Host) == "" {
+	if err := h.fillStored(r.Context(), &cfg, body); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	switch {
+	case cfg.Type == "mongodb" && strings.TrimSpace(cfg.DSN) == "":
+		writeError(w, http.StatusBadRequest, "connection URI is required")
+		return
+	case cfg.Type != "mongodb" && strings.TrimSpace(cfg.Host) == "":
 		writeError(w, http.StatusBadRequest, "host is required")
 		return
-	}
-	if cfg.Password == "" && body.ProjectID != "" {
-		if err := h.fillStoredPassword(r.Context(), &cfg, body.ProjectID, body.Side); err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
-			return
-		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), listDatabasesTimeout)
@@ -67,6 +70,84 @@ func (h *ProjectsHandler) ListDatabases(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"databases": names})
 }
 
+// ListSchemas handles POST /api/v1/connections/schemas (same body as
+// ListDatabases): it connects to the database the fields name (postgres,
+// yugabyte; Oracle's service) and returns the schemas the login can use, for
+// the Schema field. The typed schema is ignored, so a wrong one doesn't stop
+// the listing.
+func (h *ProjectsHandler) ListSchemas(w http.ResponseWriter, r *http.Request) {
+	var body listDatabasesRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	cfg := body.Config
+	if !adapters.PostgresFamily(cfg.Type) && cfg.Type != "oracle" {
+		writeError(w, http.StatusBadRequest, "listing schemas is supported for postgres, yugabyte and oracle only")
+		return
+	}
+	if strings.TrimSpace(cfg.Host) == "" {
+		writeError(w, http.StatusBadRequest, "host is required")
+		return
+	}
+	if strings.TrimSpace(cfg.Database) == "" {
+		what := "database"
+		if cfg.Type == "oracle" {
+			what = "service name"
+		}
+		writeError(w, http.StatusBadRequest, "enter the "+what+" first: schemas are listed per "+what)
+		return
+	}
+	if err := h.fillStored(r.Context(), &cfg, body); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), listDatabasesTimeout)
+	defer cancel()
+	names, err := listSchemas(ctx, cfg)
+	if err != nil {
+		h.Log.Info("connection.list_schemas", "type", cfg.Type, "host", cfg.Host, "error", err)
+		writeError(w, http.StatusUnprocessableEntity, friendlyConnectError(err))
+		return
+	}
+	if names == nil {
+		names = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schemas": names})
+}
+
+func listSchemas(ctx context.Context, cfg adapters.ConnectionConfig) ([]string, error) {
+	cfg.DSN, cfg.Schema = "", ""
+	src, err := registry.NewSource(cfg.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer src.Close()
+	if err := src.Connect(ctx, cfg); err != nil {
+		return nil, err
+	}
+	lister, ok := src.(adapters.SchemaLister)
+	if !ok {
+		return nil, fmt.Errorf("%s does not support listing schemas", cfg.Type)
+	}
+	return lister.ListSchemas(ctx)
+}
+
+// fillStored fills what the project settings form leaves blank to keep
+// (the password; a MongoDB connection URI) from the stored project, when the
+// request names one.
+func (h *ProjectsHandler) fillStored(ctx context.Context, cfg *adapters.ConnectionConfig, body listDatabasesRequest) error {
+	blank := cfg.Password == ""
+	if cfg.Type == "mongodb" {
+		blank = cfg.DSN == ""
+	}
+	if body.ProjectID == "" || !blank {
+		return nil
+	}
+	return h.fillStoredPassword(ctx, cfg, body.ProjectID, body.Side)
+}
+
 // fillStoredPassword copies the project's stored password for side into cfg,
 // but only when cfg still points at the same server and login: otherwise an
 // edited host would receive a password meant for another server.
@@ -78,6 +159,14 @@ func (h *ProjectsHandler) fillStoredPassword(ctx context.Context, cfg *adapters.
 	stored := p.SourceConfig
 	if side == "target" {
 		stored = p.TargetConfig
+	}
+	if cfg.Type == "mongodb" {
+		// A MongoDB connection is its URI, credentials included; the form
+		// leaves it blank to keep the stored one.
+		if stored.Type == cfg.Type && cfg.DSN == "" {
+			cfg.DSN = stored.DSN
+		}
+		return nil
 	}
 	if stored.Type == cfg.Type && stored.Host == cfg.Host &&
 		effectivePort(stored) == effectivePort(*cfg) && stored.Username == cfg.Username {
@@ -97,6 +186,8 @@ func effectivePort(c adapters.ConnectionConfig) int {
 		return 3306
 	case adapters.TypeYugabyte:
 		return 5433
+	case "oracle":
+		return 1521
 	}
 	return 5432
 }
@@ -142,6 +233,9 @@ func isMissingDatabase(err error) bool {
 }
 
 func listDatabases(ctx context.Context, cfg adapters.ConnectionConfig) ([]string, error) {
+	if cfg.Type == "mongodb" {
+		return listMongoDatabases(ctx, cfg)
+	}
 	var names []string
 	err := onServer(ctx, cfg, func(cfg adapters.ConnectionConfig) error {
 		src, err := registry.NewSource(cfg.Type)
@@ -160,6 +254,26 @@ func listDatabases(ctx context.Context, cfg adapters.ConnectionConfig) ([]string
 		return err
 	})
 	return names, err
+}
+
+// listMongoDatabases lists a MongoDB server's databases through the URI. The
+// source refuses a connection that names no database, so one without gets
+// admin, used only to connect (the URI's own stays its authSource).
+func listMongoDatabases(ctx context.Context, cfg adapters.ConnectionConfig) ([]string, error) {
+	src, err := registry.NewSource(cfg.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer src.Close()
+	cfg.Database = "admin"
+	if err := src.Connect(ctx, cfg); err != nil {
+		return nil, err
+	}
+	lister, ok := src.(adapters.DatabaseLister)
+	if !ok {
+		return nil, fmt.Errorf("%s does not support listing databases", cfg.Type)
+	}
+	return lister.ListDatabases(ctx)
 }
 
 // CreateTargetDatabase handles POST /api/v1/projects/{id}/target-database:

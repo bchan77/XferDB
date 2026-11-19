@@ -341,6 +341,32 @@ func (s *Source) ListDatabases(ctx context.Context) ([]string, error) {
 	return names, rows.Err()
 }
 
+// ListSchemas implements adapters.SchemaLister: the database's schemas this
+// login may use, minus the system ones and XferDB's own (xferdb_cdc), the
+// connection's own schema first. Empty schemas are included: a target can
+// be pointed at one.
+func (s *Source) ListSchemas(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT nspname FROM pg_namespace
+		WHERE nspname NOT IN ('information_schema', '`+changeStateSchema+`')
+		  AND nspname NOT LIKE 'pg\_%'
+		  AND has_schema_privilege(oid, 'USAGE')
+		ORDER BY nspname IS DISTINCT FROM current_schema(), nspname`)
+	if err != nil {
+		return nil, fmt.Errorf("list schemas: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
 // StreamTable implements adapters.TableStreamer.
 func (s *Source) StreamTable(ctx context.Context, table string, fn func(map[string]interface{}) error) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT * FROM "+qualify(table))

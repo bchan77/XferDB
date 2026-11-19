@@ -297,12 +297,20 @@ type SourceAdapter interface {
 }
 
 // DatabaseLister is an optional interface for source adapters on a server
-// that hosts several databases (postgres, mysql). ListDatabases returns the
+// that hosts several databases (postgres, mysql, mongodb). ListDatabases returns the
 // user databases the connected login can see, so a client can offer them as
 // a choice instead of making the user type the name. System databases
 // (templates, information_schema, ...) are left out.
 type DatabaseLister interface {
 	ListDatabases(ctx context.Context) ([]string, error)
+}
+
+// SchemaLister is an optional interface for source adapters whose database
+// holds several schemas (postgres, yugabyte, oracle). ListSchemas returns the
+// schemas the connected login can use, so a client can offer them as a
+// choice for ConnectionConfig.Schema. System schemas are left out.
+type SchemaLister interface {
+	ListSchemas(ctx context.Context) ([]string, error)
 }
 
 // DatabaseCreator is an optional interface for target adapters that can

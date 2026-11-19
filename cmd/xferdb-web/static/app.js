@@ -95,6 +95,13 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
       <label>Connection URI</label>
       <input type="text" id="${prefix}-dsn" placeholder="${hasDSN ? 'leave blank to keep current connection string' : 'mongodb://user:pass@host:27017/dbname'}">
       ${hasDSN ? `<div class="hint">Currently ends in "${esc(shortTail(cfg.dsn))}". Leave blank to keep it.</div>` : ''}
+      <label>Database</label>
+      <div class="db-picker">
+        <span id="${prefix}-dbslot"><input type="text" id="${prefix}-database" value="${esc(cfg.database || '')}" placeholder="the URI's database"></span>
+        <button type="button" class="btn" id="${prefix}-loaddbs">Load databases</button>
+      </div>
+      <div id="${prefix}-dbstatus"></div>
+      <div class="hint">Leave empty to use the database the URI names; a database chosen here takes its place.</div>
     `;
   }
   if (type === 'oracle') return oracleFieldsHTML(prefix, cfg);
@@ -134,7 +141,7 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
     <div class="field-row">
       <div>
         <label>Schema</label>
-        <input type="text" id="${prefix}-schema" value="${esc(cfg.schema || '')}" placeholder="all schemas">
+        ${schemaPickerHTML(prefix, cfg.schema, 'all schemas')}
         <div class="hint">${isTarget
           ? 'Leave empty to keep each table in its source schema; set one to put tables from the source\'s default schema there'
           : 'Leave empty to migrate every schema; set one to migrate only that schema'}</div>
@@ -178,7 +185,7 @@ function oracleFieldsHTML(prefix, cfg) {
     <div class="field-row">
       <div>
         <label>Schema</label>
-        <input type="text" id="${prefix}-schema" value="${esc(cfg.schema || '')}" placeholder="the login's own schema">
+        ${schemaPickerHTML(prefix, cfg.schema, "the login's own schema")}
         <div class="hint">The schema (user) whose tables are migrated. Upper-case table and column names arrive in lower case.</div>
       </div>
       <div></div>
@@ -186,7 +193,68 @@ function oracleFieldsHTML(prefix, cfg) {
   `;
 }
 
-// Wires the "Load databases" button of a postgres/mysql editor: it sends the
+// schemaPickerHTML: the Schema text box with a "Load schemas" button, which
+// wireSchemaPicker turns into a dropdown of the database's schemas. Empty
+// means `emptyLabel` (every schema, or the login's own).
+function schemaPickerHTML(prefix, value, emptyLabel) {
+  return `
+    <div class="db-picker">
+      <span id="${prefix}-schemaslot"><input type="text" id="${prefix}-schema" value="${esc(value || '')}" placeholder="${esc(emptyLabel)}" data-empty="${esc(emptyLabel)}"></span>
+      <button type="button" class="btn" id="${prefix}-loadschemas">Load schemas</button>
+    </div>
+    <div id="${prefix}-schemastatus"></div>`;
+}
+
+// Wires the "Load schemas" button of a postgres/yugabyte/oracle editor: like
+// "Load databases", it sends the fields typed so far (the database, or
+// Oracle's service, must be filled in) and swaps the Schema text box for a
+// dropdown whose first entry keeps the field empty.
+function wireSchemaPicker(container, prefix, readCfg, opts) {
+  const btn = container.querySelector(`#${prefix}-loadschemas`);
+  if (!btn) return;
+  const slot = container.querySelector(`#${prefix}-schemaslot`);
+  const status = container.querySelector(`#${prefix}-schemastatus`);
+  const emptyLabel = container.querySelector(`#${prefix}-schema`).dataset.empty || '';
+
+  btn.addEventListener('click', async () => {
+    const cfg = readCfg();
+    if (!cfg.host || !cfg.database) {
+      status.innerHTML = errorBanner(cfg.type === 'oracle'
+        ? 'Enter the host and service name first.' : 'Enter the host and database first.');
+      return;
+    }
+    btn.disabled = true;
+    status.innerHTML = '<div class="hint"><span class="spinner"></span> Connecting…</div>';
+    try {
+      const res = await api.listSchemas({ config: cfg, project_id: opts.projectId, side: opts.side });
+      const schemas = res.schemas || [];
+      const current = cfg.schema;
+      const options = current && !schemas.includes(current) ? [current, ...schemas] : schemas;
+      slot.innerHTML = `<select id="${prefix}-schema" data-empty="${esc(emptyLabel)}">
+        <option value="" ${current ? '' : 'selected'}>— ${esc(emptyLabel)} —</option>
+        ${options.map((n) => `<option value="${esc(n)}" ${n === current ? 'selected' : ''}>${esc(n)}</option>`).join('')}
+      </select>`;
+      status.innerHTML = `<div class="hint">Connected · ${schemas.length} schema${schemas.length === 1 ? '' : 's'} found.
+        <a href="#" id="${prefix}-schemamanual">Type a name instead</a></div>`;
+      status.querySelector(`#${prefix}-schemamanual`).addEventListener('click', (e) => {
+        e.preventDefault();
+        const value = container.querySelector(`#${prefix}-schema`).value;
+        slot.innerHTML = `<input type="text" id="${prefix}-schema" value="${esc(value)}" placeholder="${esc(emptyLabel)}" data-empty="${esc(emptyLabel)}">`;
+        status.innerHTML = '';
+      });
+      if (current && !schemas.includes(current)) {
+        status.insertAdjacentHTML('beforeend', `<div class="hint">"${esc(current)}" is not among them${
+          opts.isTarget ? ' — it will be created when the first table is written there' : ''}.</div>`);
+      }
+    } catch (err) {
+      status.innerHTML = errorBanner('Could not list schemas: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+// Wires the "Load databases" button of a postgres/mysql/mongodb editor: it sends the
 // fields typed so far to the API, which connects and lists the server's
 // databases, then swaps the Database text box for a dropdown of them. A
 // connection failure is shown under the field so the user can fix the
@@ -203,8 +271,8 @@ function wireDbPicker(container, prefix, readCfg, opts) {
 
   btn.addEventListener('click', async () => {
     const cfg = readCfg();
-    if (!cfg.host) {
-      status.innerHTML = errorBanner('Enter the host first.');
+    if (cfg.type === 'mongodb' ? !cfg.dsn && !opts.projectId : !cfg.host) {
+      status.innerHTML = errorBanner(cfg.type === 'mongodb' ? 'Enter the connection URI first.' : 'Enter the host first.');
       return;
     }
     btn.disabled = true;
@@ -219,7 +287,7 @@ function wireDbPicker(container, prefix, readCfg, opts) {
       const current = cfg.database;
       const options = current && !dbs.includes(current) ? [current, ...dbs] : dbs;
       slot.innerHTML = `<select id="${prefix}-database">
-        ${current ? '' : '<option value="">— choose a database —</option>'}
+        ${current ? '' : `<option value="">— ${cfg.type === 'mongodb' ? "the URI's database" : 'choose a database'} —</option>`}
         ${options.map((d) => `<option value="${esc(d)}" ${d === current ? 'selected' : ''}>${esc(d)}</option>`).join('')}
       </select>`;
       status.innerHTML = `<div class="hint">Connected · ${dbs.length} database${dbs.length === 1 ? '' : 's'} found. <a href="#" id="${prefix}-dbmanual">Type a name instead</a></div>`;
@@ -282,6 +350,7 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
   typeSel.addEventListener('change', () => {
     container.querySelector(`#${prefix}-sub`).innerHTML = subFieldsHTML(prefix, typeSel.value, {}, isTarget);
     wireDbPicker(container, prefix, container.read, opts);
+    wireSchemaPicker(container, prefix, container.read, opts);
   });
   container.read = () => {
     const t = typeSel.value;
@@ -290,7 +359,8 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
       return el ? el.value : '';
     };
     if (t === 'sqlite' || t === 'mongodb') {
-      return { type: t, dsn: g(`${prefix}-dsn`).trim(), host: '', port: 0, database: '', username: '', password: '', ssl_mode: '' };
+      const database = t === 'mongodb' ? g(`${prefix}-database`).trim() : '';
+      return { type: t, dsn: g(`${prefix}-dsn`).trim(), host: '', port: 0, database, username: '', password: '', ssl_mode: '' };
     }
     return {
       type: t,
@@ -305,6 +375,7 @@ function mountConnEditor(container, prefix, cfg, isTarget, opts = {}) {
     };
   };
   wireDbPicker(container, prefix, container.read, opts);
+  wireSchemaPicker(container, prefix, container.read, opts);
 }
 
 // ---------------------------------------------------------------------------

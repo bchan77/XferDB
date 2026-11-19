@@ -83,6 +83,32 @@ func (s *Source) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// ListSchemas implements adapters.SchemaLister: the schemas (users) that own
+// a table this login can see, minus Oracle's own (ORACLE_MAINTAINED, 12c+),
+// the login's own schema first. An Oracle schema with no tables has nothing
+// to migrate, so it isn't offered.
+func (s *Source) ListSchemas(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT u.username
+FROM all_users u
+WHERE u.oracle_maintained = 'N'
+  AND EXISTS (SELECT 1 FROM all_tables t WHERE t.owner = u.username AND t.dropped = 'NO')
+ORDER BY CASE WHEN u.username = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 0 ELSE 1 END, u.username`)
+	if err != nil {
+		return nil, fmt.Errorf("oracle list schemas: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
 // tableQuery lists the schema's ordinary tables: not dropped (the recycle
 // bin), temporary, nested, secondary (domain index storage), IOT overflow,
 // external, a materialized view's container or a materialized view log.

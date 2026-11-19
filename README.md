@@ -706,6 +706,7 @@ POST   /api/v1/projects/:id/target-database # create the missing target database
 
 # Connections (unsaved form fields)
 POST   /api/v1/connections/databases        # list databases on a server
+POST   /api/v1/connections/schemas          # list schemas in a database
 POST   /api/v1/connections/create-database  # create a target database
 
 # Migrations
