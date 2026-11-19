@@ -8,7 +8,7 @@ func Compare(src, tgt *adapters.TableSchema) []Issue {
 	if tgt == nil || len(tgt.Columns) == 0 {
 		return []Issue{{
 			Type:     "missing_table",
-			Severity: "error",
+			Severity: "info", // the migration creates it
 		}}
 	}
 
