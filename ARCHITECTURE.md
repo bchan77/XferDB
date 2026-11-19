@@ -121,7 +121,8 @@ All clients interact exclusively through the REST API. The CLI and Web UI are th
 | `POST` | `/api/v1/projects/:id/preflight` | Verify connectivity and permissions |
 | `POST` | `/api/v1/projects/:id/target-database` | Create the target database the project names (postgres/mysql), when preflight reported it missing (`target_missing_database`); an existing one is not an error |
 | `POST` | `/api/v1/connections/create-database` | Create `config.database` on a postgres/mysql server from unsaved connection fields (the form's *Create database* offer); same body as `/connections/databases` |
-| `POST` | `/api/v1/connections/databases` | List the databases on a postgres/mysql server from unsaved connection fields (for the project form's database picker); a connection failure is a 422 with the driver error |
+| `POST` | `/api/v1/connections/databases` | List the databases on a postgres/mysql server, or a MongoDB server through `config.dsn`, from unsaved connection fields (for the project form's database picker); a connection failure is a 422 with the driver error |
+| `POST` | `/api/v1/connections/schemas` | List the schemas of a postgres/yugabyte database or an Oracle service (`config.database` required; the typed `config.schema` is ignored) for the Schema field's picker; same body as `/connections/databases` |
 | `POST` | `/api/v1/projects/:id/analyze` | Diff schemas, generate suggestions |
 | `POST` | `/api/v1/projects/:id/migrations` | Start a new migration |
 | `GET` | `/api/v1/projects/:id/migrations` | List migrations for a project |

@@ -5,6 +5,14 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Schema and database pickers for every connection type.** PostgreSQL, YugabyteDB and Oracle
+  connections get a *Load schemas* button that offers the database's schemas as suggestions in
+  the Schema field, which stays free text so a target can name a new schema (Oracle: the schemas
+  holding tables, Oracle's own left out), and MongoDB
+  connections a Database field with *Load databases* (admin, config and local left out; a
+  database chosen there takes the place of the one in the URI). An empty field still means every schema (PostgreSQL source), each table's source schema
+  (PostgreSQL target), the login's own schema (Oracle) or the URI's database (MongoDB). New
+  endpoint `POST /api/v1/connections/schemas`; `/connections/databases` now takes MongoDB.
 - **Live migration from Oracle (beta, #195).** Oracle 21c and 23ai can be the source of a live
   migration to PostgreSQL, YugabyteDB, MySQL or SQLite. Changes are read with LogMiner from inside
   the pluggable database (every edition has it), so nothing is created on the source. Each

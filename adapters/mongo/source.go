@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -144,6 +145,32 @@ func (s *Source) Ping(ctx context.Context) error {
 		return fmt.Errorf("not connected")
 	}
 	return s.client.Ping(ctx, readpref.SecondaryPreferred())
+}
+
+// mongoSystemDatabases are the server's own databases, never a migration's
+// subject.
+var mongoSystemDatabases = map[string]bool{"admin": true, "config": true, "local": true}
+
+// ListDatabases implements adapters.DatabaseLister: the databases this login
+// is authorized for (a login without the listDatabases action sees only
+// those), minus the system ones.
+func (s *Source) ListDatabases(ctx context.Context) ([]string, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+	all, err := s.client.ListDatabaseNames(ctx, bson.D{},
+		options.ListDatabases().SetAuthorizedDatabases(true))
+	if err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	var names []string
+	for _, n := range all {
+		if !mongoSystemDatabases[n] {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func (s *Source) ListTables(ctx context.Context) ([]adapters.TableSchema, error) {
