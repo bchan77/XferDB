@@ -141,7 +141,7 @@ function subFieldsHTML(prefix, type, cfg, isTarget) {
     <div class="field-row">
       <div>
         <label>Schema</label>
-        ${schemaPickerHTML(prefix, cfg.schema, 'all schemas')}
+        ${schemaPickerHTML(prefix, cfg.schema, isTarget ? "each table's source schema" : 'all schemas')}
         <div class="hint">${isTarget
           ? 'Leave empty to keep each table in its source schema; set one to put tables from the source\'s default schema there'
           : 'Leave empty to migrate every schema; set one to migrate only that schema'}</div>
@@ -194,27 +194,30 @@ function oracleFieldsHTML(prefix, cfg) {
 }
 
 // schemaPickerHTML: the Schema text box with a "Load schemas" button, which
-// wireSchemaPicker turns into a dropdown of the database's schemas. Empty
-// means `emptyLabel` (every schema, or the login's own).
+// wireSchemaPicker uses to attach the database's schemas as suggestions. The
+// box stays free text, so a target can name a schema that doesn't exist yet
+// (it is created on the first write). Empty means `emptyLabel`.
 function schemaPickerHTML(prefix, value, emptyLabel) {
   return `
     <div class="db-picker">
-      <span id="${prefix}-schemaslot"><input type="text" id="${prefix}-schema" value="${esc(value || '')}" placeholder="${esc(emptyLabel)}" data-empty="${esc(emptyLabel)}"></span>
+      <span><input type="text" id="${prefix}-schema" value="${esc(value || '')}" placeholder="${esc(emptyLabel)}" autocomplete="off"></span>
       <button type="button" class="btn" id="${prefix}-loadschemas">Load schemas</button>
     </div>
+    <datalist id="${prefix}-schemalist"></datalist>
     <div id="${prefix}-schemastatus"></div>`;
 }
 
 // Wires the "Load schemas" button of a postgres/yugabyte/oracle editor: like
 // "Load databases", it sends the fields typed so far (the database, or
-// Oracle's service, must be filled in) and swaps the Schema text box for a
-// dropdown whose first entry keeps the field empty.
+// Oracle's service, must be filled in), but fills a datalist for the Schema
+// box instead of replacing it, so a listed schema can be picked or any name
+// typed.
 function wireSchemaPicker(container, prefix, readCfg, opts) {
   const btn = container.querySelector(`#${prefix}-loadschemas`);
   if (!btn) return;
-  const slot = container.querySelector(`#${prefix}-schemaslot`);
+  const input = container.querySelector(`#${prefix}-schema`);
+  const list = container.querySelector(`#${prefix}-schemalist`);
   const status = container.querySelector(`#${prefix}-schemastatus`);
-  const emptyLabel = container.querySelector(`#${prefix}-schema`).dataset.empty || '';
 
   btn.addEventListener('click', async () => {
     const cfg = readCfg();
@@ -228,24 +231,18 @@ function wireSchemaPicker(container, prefix, readCfg, opts) {
     try {
       const res = await api.listSchemas({ config: cfg, project_id: opts.projectId, side: opts.side });
       const schemas = res.schemas || [];
+      list.innerHTML = schemas.map((n) => `<option value="${esc(n)}"></option>`).join('');
+      input.setAttribute('list', list.id);
       const current = cfg.schema;
-      const options = current && !schemas.includes(current) ? [current, ...schemas] : schemas;
-      slot.innerHTML = `<select id="${prefix}-schema" data-empty="${esc(emptyLabel)}">
-        <option value="" ${current ? '' : 'selected'}>— ${esc(emptyLabel)} —</option>
-        ${options.map((n) => `<option value="${esc(n)}" ${n === current ? 'selected' : ''}>${esc(n)}</option>`).join('')}
-      </select>`;
-      status.innerHTML = `<div class="hint">Connected · ${schemas.length} schema${schemas.length === 1 ? '' : 's'} found.
-        <a href="#" id="${prefix}-schemamanual">Type a name instead</a></div>`;
-      status.querySelector(`#${prefix}-schemamanual`).addEventListener('click', (e) => {
-        e.preventDefault();
-        const value = container.querySelector(`#${prefix}-schema`).value;
-        slot.innerHTML = `<input type="text" id="${prefix}-schema" value="${esc(value)}" placeholder="${esc(emptyLabel)}" data-empty="${esc(emptyLabel)}">`;
-        status.innerHTML = '';
-      });
+      let note = `Connected · ${schemas.length} schema${schemas.length === 1 ? '' : 's'} in ${esc(cfg.database)}: ${
+        schemas.length ? schemas.slice(0, 8).map(esc).join(', ') + (schemas.length > 8 ? ', …' : '') : 'none'}.
+        Pick one in the box${opts.isTarget ? ' or type a new name' : ''}.`;
       if (current && !schemas.includes(current)) {
-        status.insertAdjacentHTML('beforeend', `<div class="hint">"${esc(current)}" is not among them${
-          opts.isTarget ? ' — it will be created when the first table is written there' : ''}.</div>`);
+        note += opts.isTarget ? ` "${esc(current)}" doesn't exist yet: it is created on the first write.`
+          : ` "${esc(current)}" is not among them.`;
       }
+      status.innerHTML = `<div class="hint">${note}</div>`;
+      input.focus();
     } catch (err) {
       status.innerHTML = errorBanner('Could not list schemas: ' + err.message);
     } finally {
