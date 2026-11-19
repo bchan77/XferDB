@@ -55,6 +55,13 @@ All notable changes to XferDB are documented here.
   progress step `reading_source` / `reading_target` is now a single `reading` step.
 
 ### Fixed
+- **A sharded MongoDB source no longer fails a table when a document moves shards during the copy.**
+  Read through mongos while its shard key changed, a document could come back from both shards,
+  side by side in `_id` order; when both copies landed in one batch, a PostgreSQL or YugabyteDB
+  target's upsert failed with `ON CONFLICT DO UPDATE command cannot affect row a second time`
+  (seen once in 15 runs of the matrix's `mongo80-sh-yb2026-live`). A batch now keeps the first
+  copy of a repeated `_id` (numbers compared by value); a live migration's stream, started before
+  the copy, replays the move.
 - **Analyze no longer calls every table of a first migration incompatible.** A table the target
   doesn't have yet was an error (`INCOMPATIBLE · 1 ISSUE(S)` on every row of a new project), though
   the migration creates it. It is now status `new` (issue severity `info`), shown as
