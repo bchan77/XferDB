@@ -1394,7 +1394,7 @@ function renderTableCards(area, projectId, items, locked) {
     <div class="list-row${locked ? ' disabled' : ''}" data-name="${esc(t.name)}">
       <div class="name mono">${esc(t.name)}</div>
       <div class="right">
-        <span class="badge ${t.badge}">${esc(t.badgeText)}</span>
+        <span class="badge ${t.badge}"${t.badgeTitle ? ` title="${esc(t.badgeTitle)}"` : ''}>${esc(t.badgeText)}</span>
         ${t.validation ? `<span class="badge ${t.validation.cls}" title="${esc(t.validation.title)}">${esc(t.validation.text)}</span>` : ''}
       </div>
     </div>
@@ -1469,11 +1469,37 @@ async function loadTables(id, project, analyzeOpts = {}) {
     stopTicker();
   }
   const tables = result.Tables || [];
-  return tables.map((t) => ({
+  return tables.map((t) => analysisBadge(t));
+}
+
+// analysisBadge turns one table's analysis into its list badge: "new" for a
+// table the migration will create, otherwise the status and the first issue
+// by name (the rest counted), with every issue's suggestion on hover.
+function analysisBadge(t) {
+  const issues = t.Issues || [];
+  const title = issues.map((i) => i.Suggestion || issueText(i)).join('\n');
+  if (t.Status === 'new') {
+    return { name: t.Name, badge: 'info', badgeText: 'new · will be created', badgeTitle: title };
+  }
+  let text = t.Status;
+  if (issues.length) {
+    text += ' · ' + issueText(issues[0]) + (issues.length > 1 ? ` +${issues.length - 1} more` : '');
+  }
+  return {
     name: t.Name,
-    badge: t.Status === 'compatible' ? 'ok' : 'warn',
-    badgeText: `${t.Status}${t.Issues && t.Issues.length ? ' · ' + t.Issues.length + ' issue(s)' : ''}`,
-  }));
+    badge: t.Status === 'compatible' && !issues.length ? 'ok' : 'warn',
+    badgeText: text,
+    badgeTitle: title,
+  };
+}
+
+function issueText(i) {
+  switch (i.Type) {
+    case 'missing_table': return 'not on the target';
+    case 'missing_column': return `no column ${i.Column} on the target`;
+    case 'type_mismatch': return `${i.Column}: ${i.SourceType} vs ${i.TargetType}`;
+    default: return i.Type;
+  }
 }
 
 async function renderTablesList(id) {

@@ -13,14 +13,14 @@ type Issue struct {
 	Column     string
 	SourceType string
 	TargetType string
-	Severity   string // "error" | "warning"
+	Severity   string // "error" | "warning" | "info"
 	Suggestion string
 }
 
 // TableAnalysis holds the diff result for a single table.
 type TableAnalysis struct {
 	Name        string
-	Status      string // "compatible" | "incompatible"
+	Status      string // "compatible" | "new" (not on the target yet) | "incompatible"
 	Issues      []Issue
 	Suggestions []string
 }
@@ -71,13 +71,9 @@ func (a *Analyzer) Analyze(ctx context.Context, source adapters.SourceAdapter, t
 			}
 		}
 
-		status := "compatible"
-		for _, iss := range issues {
-			if iss.Severity == "error" {
-				status = "incompatible"
-				analysis.Compatible = false
-				break
-			}
+		status := tableStatus(issues)
+		if status == "incompatible" {
+			analysis.Compatible = false
 		}
 
 		analysis.Tables = append(analysis.Tables, TableAnalysis{
@@ -89,4 +85,20 @@ func (a *Analyzer) Analyze(ctx context.Context, source adapters.SourceAdapter, t
 	}
 
 	return analysis, nil
+}
+
+// tableStatus sums up a table's issues: "new" for a table the target doesn't
+// have yet (the migration creates it, so that is no fault), "incompatible"
+// when any issue is an error, else "compatible" (warnings included).
+func tableStatus(issues []Issue) string {
+	status := "compatible"
+	for _, iss := range issues {
+		switch {
+		case iss.Type == "missing_table":
+			return "new"
+		case iss.Severity == "error":
+			status = "incompatible"
+		}
+	}
+	return status
 }
