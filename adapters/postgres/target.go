@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -18,6 +19,30 @@ type Target struct {
 	mu      sync.RWMutex
 	schemas map[string]*adapters.TableSchema // cached for upsert key resolution
 	useCopy bool                             // use COPY instead of INSERT; only safe when target table is clean
+
+	xmlOnce sync.Once
+	xmlOK   bool // the server can store xml values (see columnType)
+}
+
+// columnType is the column type CreateTable/AlterTable use for a source
+// type. A server built without libxml (YugabyteDB 2025.2, say) has an xml
+// type but refuses every non-NULL value with "unsupported XML feature"
+// (0A000), so there an xml column is created as text, which holds the same
+// serialized document.
+func (t *Target) columnType(ctx context.Context, srcType string) string {
+	pgType := mapTypeToPostgres(srcType)
+	if strings.ToLower(pgType) != "xml" {
+		return pgType
+	}
+	t.xmlOnce.Do(func() {
+		_, err := t.db.ExecContext(ctx, `SELECT '<x/>'::xml`)
+		var pqErr *pq.Error
+		t.xmlOK = !(errors.As(err, &pqErr) && pqErr.Code == "0A000")
+	})
+	if !t.xmlOK {
+		return "text"
+	}
+	return pgType
 }
 
 // EnableCopy switches WriteBatch to use the PostgreSQL COPY protocol instead of
@@ -87,7 +112,7 @@ func (t *Target) CreateTable(ctx context.Context, schema *adapters.TableSchema) 
 	defs := make([]string, 0, len(schema.Columns))
 	var pks []string
 	for _, c := range schema.Columns {
-		pgType := mapTypeToPostgres(c.Type)
+		pgType := t.columnType(ctx, c.Type)
 		def := fmt.Sprintf(`%s %s`, quote(c.Name), pgType)
 		if !c.Nullable {
 			def += " NOT NULL"
@@ -213,7 +238,7 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 		var query string
 		switch change.Type {
 		case adapters.ChangeAddColumn:
-			pgType := mapTypeToPostgres(change.Column.Type)
+			pgType := t.columnType(ctx, change.Column.Type)
 			def := fmt.Sprintf(`%s %s`, quote(change.Column.Name), pgType)
 			if !change.Column.Nullable {
 				def += " NOT NULL"
@@ -226,7 +251,7 @@ func (t *Target) AlterTable(ctx context.Context, table string, changes []adapter
 			query = fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`,
 				qualify(table), quote(change.Column.Name))
 		case adapters.ChangeAlterColumn:
-			pgType := mapTypeToPostgres(change.Column.Type)
+			pgType := t.columnType(ctx, change.Column.Type)
 			query = fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s TYPE %s`,
 				qualify(table), quote(change.Column.Name), pgType)
 		default:
