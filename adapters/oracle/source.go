@@ -516,10 +516,17 @@ func (s *Source) GetPKRange(ctx context.Context, table, pkColumn string) (int64,
 }
 
 // selectList is the column list of a table's reads, in catalog order.
+// An XMLTYPE column is read as its serialized text: go-ora can't decode an
+// XMLTYPE value (the read fails with "TTC error: received code 1/2 during
+// response reading"). NO INDENT keeps binary-stored XML compact rather than
+// pretty-printed.
 func selectList(cols []column) string {
 	parts := make([]string, len(cols))
 	for i, c := range cols {
 		parts[i] = quote(c.oracleName)
+		if c.dataType == "XMLTYPE" {
+			parts[i] = fmt.Sprintf("XMLSERIALIZE(CONTENT %s AS CLOB NO INDENT)", parts[i])
+		}
 	}
 	return strings.Join(parts, ", ")
 }

@@ -55,6 +55,14 @@ All notable changes to XferDB are documented here.
   progress step `reading_source` / `reading_target` is now a single `reading` step.
 
 ### Fixed
+- **Oracle tables with an XMLTYPE column can be migrated.** Reading one failed with
+  `TTC error: received code … during response reading`, since the Oracle driver can't decode
+  XMLTYPE; the column is now read as its serialized text (compact, not re-indented) and
+  lands in an `xml` column as before.
+- **An xml column can be written to a server built without libxml** (YugabyteDB 2025.2, for
+  one), which refuses every XML value with `unsupported XML feature (0A000)`. A PostgreSQL or
+  YugabyteDB target now checks once whether the server accepts XML and, if not, creates such a
+  column as `text`, holding the same document.
 - **A sharded MongoDB source no longer fails a table when a document moves shards during the copy.**
   Read through mongos while its shard key changed, a document could come back from both shards,
   side by side in `_id` order; when both copies landed in one batch, a PostgreSQL or YugabyteDB
