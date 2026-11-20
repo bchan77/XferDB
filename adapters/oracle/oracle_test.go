@@ -191,14 +191,18 @@ func TestIdentityType(t *testing.T) {
 	}
 }
 
-// go-ora can't decode an XMLTYPE value, so reads serialize it to text.
+// go-ora can't decode an XMLTYPE value and fetches JSON slowly, so reads
+// serialize both to text.
 func TestSelectListSerializesXML(t *testing.T) {
 	got := selectList([]column{
 		{oracleName: "ID", dataType: "NUMBER"},
 		{oracleName: "DOC", dataType: "XMLTYPE"},
 		{oracleName: "Mixed", dataType: "VARCHAR2"},
+		{oracleName: "J", dataType: "JSON"},
 	})
-	want := `"ID", XMLSERIALIZE(CONTENT "DOC" AS CLOB NO INDENT), "Mixed"`
+	want := `"ID", XMLSERIALIZE(CONTENT "DOC" AS CLOB NO INDENT), "Mixed", ` +
+		`JSON_SERIALIZE("J" RETURNING VARCHAR2(4000) NULL ON ERROR), ` +
+		`CASE WHEN JSON_SERIALIZE("J" RETURNING VARCHAR2(4000) NULL ON ERROR) IS NULL THEN JSON_SERIALIZE("J" RETURNING CLOB) END`
 	if got != want {
 		t.Errorf("selectList = %s, want %s", got, want)
 	}
