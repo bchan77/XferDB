@@ -96,7 +96,7 @@ func (e *Engine) runSchemaJobs(ctx context.Context, tables []adapters.TableSchem
 			indexes, constraints = keep(indexes), keep(constraints)
 		}
 	}
-	if workers < 1 {
+	if workers < 1 || e.serialDDL() {
 		workers = 1
 	}
 	p := &schemaProgress{total: total, done: skipped, locks: map[string]*sync.Mutex{}}
@@ -205,6 +205,18 @@ func (e *Engine) runSchemaStage(ctx context.Context, jobs []schemaJob, workers i
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// serialDDL reports a target whose post-schema statements must run one at a
+// time, even on different tables: YugabyteDB. Its online index build waits,
+// at each stage, for every backend to reach the new catalog version, and a
+// backend running another build on another table is still in its own DDL
+// transaction on the old one, so two builds wait for each other until
+// yb_wait_for_backends_catalog_version_timeout ("timed out waiting for
+// postgres backends to catch up", XX000) and leave both indexes invalid.
+// pg_dump post-data runs one statement at a time for the same reason.
+func (e *Engine) serialDDL() bool {
+	return e.project != nil && e.project.TargetConfig.Type == adapters.TypeYugabyte
 }
 
 // ddlRetryFor is how long a statement YugabyteDB refuses for another DDL on

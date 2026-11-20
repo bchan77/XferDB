@@ -23,6 +23,11 @@ All notable changes to XferDB are documented here.
   became `numeric(19)` and the other `bigint`, and PostgreSQL/YugabyteDB refused the foreign key
   (`foreign key constraint ... cannot be implemented`, 42804). A `NUMBER` foreign key column now
   takes the type of the column it references (following chains of keys).
+- **Index builds on YugabyteDB no longer hang for 15 minutes and fail.** Post-schema built indexes
+  on several tables at once; YugabyteDB's online builds wait for each other's sessions until
+  `yb_wait_for_backends_catalog_version_timeout`, then fail with `timed out waiting for postgres
+  backends to catch up (XX000)`, even on an 80-row table. On a YugabyteDB target, indexes and
+  constraints are now created one at a time, as pg_dump post-data already was.
 
 ### Added
 - **Support bundles tell what happened, in order.** A bundle now has `timeline.json` (migrations,
