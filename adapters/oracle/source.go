@@ -193,11 +193,25 @@ func (s *Source) columns(ctx context.Context, table string) ([]column, string, e
 	if ok {
 		return cached, otable, nil
 	}
+	// refs_identity: the column is in an enabled foreign key to an identity
+	// column of this schema, which identityType may report as bigint, so
+	// this column gets the same type: PostgreSQL refuses a foreign key from
+	// numeric to bigint (42804).
 	rows, err := s.db.QueryContext(ctx, `
-SELECT column_name, data_type, NVL(char_length, 0), NVL(data_precision, -1), NVL(data_scale, -1), identity_column
-FROM all_tab_columns
-WHERE owner = :1 AND table_name = :2
-ORDER BY column_id`, s.owner, otable)
+SELECT t.column_name, t.data_type, NVL(t.char_length, 0), NVL(t.data_precision, -1), NVL(t.data_scale, -1), t.identity_column,
+	CASE WHEN EXISTS (
+		SELECT 1
+		FROM all_constraints c
+		JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+		JOIN all_constraints r ON r.owner = c.r_owner AND r.constraint_name = c.r_constraint_name
+		JOIN all_cons_columns rc ON rc.owner = r.owner AND rc.constraint_name = r.constraint_name AND rc.position = cc.position
+		JOIN all_tab_columns rt ON rt.owner = rc.owner AND rt.table_name = rc.table_name AND rt.column_name = rc.column_name
+		WHERE c.owner = t.owner AND c.table_name = t.table_name AND cc.column_name = t.column_name
+			AND c.constraint_type = 'R' AND c.status = 'ENABLED' AND r.owner = c.owner AND rt.identity_column = 'YES'
+	) THEN 'YES' ELSE 'NO' END
+FROM all_tab_columns t
+WHERE t.owner = :1 AND t.table_name = :2
+ORDER BY t.column_id`, s.owner, otable)
 	if err != nil {
 		return nil, "", fmt.Errorf("oracle columns(%s): %w", table, err)
 	}
@@ -207,13 +221,13 @@ ORDER BY column_id`, s.owner, otable)
 	for rows.Next() {
 		var c column
 		var charLen, prec, scale int
-		var identity string
-		if err := rows.Scan(&c.oracleName, &c.dataType, &charLen, &prec, &scale, &identity); err != nil {
+		var identity, refsIdentity string
+		if err := rows.Scan(&c.oracleName, &c.dataType, &charLen, &prec, &scale, &identity, &refsIdentity); err != nil {
 			return nil, "", err
 		}
 		c.charLen = charLen
 		c.typ, c.conv = mapType(c.dataType, charLen, prec, scale)
-		if identity == "YES" {
+		if identity == "YES" || refsIdentity == "YES" {
 			c.typ, c.conv = identityType(c.typ, c.conv, scale)
 		}
 		cols = append(cols, c)

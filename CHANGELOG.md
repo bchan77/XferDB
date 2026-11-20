@@ -17,6 +17,11 @@ All notable changes to XferDB are documented here.
   the timeout cancelled the statement (`57014`), so the database was never created. `CREATE
   DATABASE` now has 2 minutes; connecting is still limited to 10 seconds. If it does time out, the
   error says the database was not created.
+- **Oracle foreign keys to identity columns are created.** An Oracle identity column wider than
+  bigint (`NUMBER`, `NUMBER(19)`...) is migrated as `bigint`, but a column referencing it stayed
+  `numeric(19)`, and PostgreSQL/YugabyteDB refused the foreign key (`foreign key constraint ...
+  cannot be implemented`, 42804). A column in a foreign key to an identity column now gets the same
+  type.
 
 ### Added
 - **Support bundles tell what happened, in order.** A bundle now has `timeline.json` (migrations,
