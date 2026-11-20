@@ -30,7 +30,7 @@ func Compare(src, tgt *adapters.TableSchema) []Issue {
 			})
 			continue
 		}
-		if sc.Type != tc.Type {
+		if !SameType(sc.Type, tc.Type) {
 			issues = append(issues, Issue{
 				Type:       "type_mismatch",
 				Column:     sc.Name,

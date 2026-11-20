@@ -61,30 +61,28 @@ func (a *Analyzer) Analyze(ctx context.Context, source adapters.SourceAdapter, t
 	}
 
 	for _, st := range srcTables {
-		issues := Compare(&st, tgtIndex[st.Name])
-		suggestions := Generate(issues)
-
-		// Attach suggestions to their issues.
-		for i := range issues {
-			if i < len(suggestions) {
-				issues[i].Suggestion = suggestions[i]
-			}
-		}
-
-		status := tableStatus(issues)
-		if status == "incompatible" {
+		t := AnalyzeTable(&st, tgtIndex[st.Name])
+		if t.Status == "incompatible" {
 			analysis.Compatible = false
 		}
-
-		analysis.Tables = append(analysis.Tables, TableAnalysis{
-			Name:        st.Name,
-			Status:      status,
-			Issues:      issues,
-			Suggestions: suggestions,
-		})
+		analysis.Tables = append(analysis.Tables, t)
 	}
 
 	return analysis, nil
+}
+
+// AnalyzeTable compares one source table with the target's table of the same
+// name (nil when the target has none): its issues, each with its
+// suggestion, and its status.
+func AnalyzeTable(src, tgt *adapters.TableSchema) TableAnalysis {
+	issues := Compare(src, tgt)
+	suggestions := Generate(issues)
+	for i := range issues {
+		if i < len(suggestions) {
+			issues[i].Suggestion = suggestions[i]
+		}
+	}
+	return TableAnalysis{Name: src.Name, Status: tableStatus(issues), Issues: issues, Suggestions: suggestions}
 }
 
 // tableStatus sums up a table's issues: "new" for a table the target doesn't

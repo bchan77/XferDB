@@ -78,6 +78,13 @@ All notable changes to XferDB are documented here.
   progress step `reading_source` / `reading_target` is now a single `reading` step.
 
 ### Fixed
+- **Analyze no longer reports one type spelled two ways as a difference.** `varchar(10)` vs
+  `character varying(10)`, `numeric(19)` vs `numeric(19,0)`, `timestamp(6)` vs `timestamp without
+  time zone` and the like (an Oracle source against a PostgreSQL/YugabyteDB target showed them on
+  almost every table) now compare equal (`analyzer.SameType`); only real differences are listed.
+  A table's page now opens with what its badge summarises: every difference from the target table
+  (source type → target type, with the suggestion), or that it matches or will be created
+  (`GET /projects/:id/tables/:table` returns the table's `analysis`).
 - **Post-schema DDL no longer fails on YugabyteDB with `TABLE_SCHEMA_CHANGE_IN_PROGRESS`.** Indexes
   and constraints were created table by table in parallel, so a foreign key (which also changes the
   table it references) could run while that table was getting its own indexes, which YugabyteDB
