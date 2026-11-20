@@ -2500,7 +2500,15 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
           return;
         }
         const body = document.getElementById('migCardBody');
-        if (body) body.insertAdjacentHTML('afterbegin', errorBanner('Stats fetch failed: ' + err.message));
+        if (body) {
+          // One banner, updated in place, not one more per tick.
+          let banner = document.getElementById('migCardStatsError');
+          if (!banner) {
+            body.insertAdjacentHTML('afterbegin', '<div id="migCardStatsError"></div>');
+            banner = document.getElementById('migCardStatsError');
+          }
+          banner.innerHTML = errorBanner('Stats fetch failed: ' + err.message);
+        }
       }
       if (!stopped) timer = setTimeout(tick, 1500);
     }
@@ -3089,8 +3097,27 @@ async function renderMigrationProgress(migId) {
         return;
       }
     } catch (err) {
+      // No live stats: the migration may have ended meanwhile (a server
+      // restart fails what was running or paused). Show it as ended, with
+      // its Resume button, rather than polling stats that won't come back.
+      try {
+        const now = await api.getMigration(migId);
+        if (!stopped && !ACTIVE_STATUSES.includes(now.status)) {
+          clearTimer();
+          renderMigrationProgress(migId);
+          return;
+        }
+      } catch (err2) { /* report the stats error below */ }
+      // One banner, updated in place, not one more per tick.
       const area = document.getElementById('progressArea');
-      if (area) area.insertAdjacentHTML('afterbegin', errorBanner('Stats fetch failed: ' + err.message));
+      if (area) {
+        let banner = document.getElementById('statsFetchError');
+        if (!banner) {
+          area.insertAdjacentHTML('afterbegin', '<div id="statsFetchError"></div>');
+          banner = document.getElementById('statsFetchError');
+        }
+        banner.innerHTML = errorBanner('Stats fetch failed: ' + err.message);
+      }
     }
     if (!stopped) timer = setTimeout(tick, 1500);
   }
@@ -3114,6 +3141,9 @@ async function renderMigrationProgress(migId) {
       .sort((a, b) => a.Name.localeCompare(b.Name));
     const records = await api.getStatsHistory(migId);
     const last = records && records.length ? records[records.length - 1] : null;
+    // An ended migration's status wins over its last sample, which a server
+    // restart can leave at paused or in_progress (with Pause/Resume buttons).
+    const ended = { completed: 'complete', failed: 'failed', cancelled: 'cancelled' }[m.status];
     if (!last) {
       const transferred = tables.reduce((n, t) => n + (t.Transferred || 0), 0);
       const total = tables.reduce((n, t) => n + (t.Total || 0), 0);
@@ -3128,7 +3158,7 @@ async function renderMigrationProgress(migId) {
       };
     }
     return {
-      Phase: phase || last.phase,
+      Phase: phase || ended || last.phase,
       ElapsedSeconds: last.elapsed_secs,
       ETASeconds: 0,
       Rows: {

@@ -114,16 +114,20 @@ func (m *MetaDB) ListMigrations(ctx context.Context, projectID string) ([]adapte
 	return migs, nil
 }
 
-// MarkInterruptedMigrations marks any pending or in_progress migrations as failed.
-// Called on server startup to clean up migrations that were running when the server last stopped.
-// Live migrations are left alone: the server resumes them (ActiveLiveMigrations).
+// MarkInterruptedMigrations marks any pending, in_progress or paused
+// migrations as failed. Called on server startup to clean up migrations that
+// were running when the server last stopped. A paused one's engine is gone
+// too: left paused, nothing could resume or cancel it, and it blocked new
+// migrations of its project; failed, it resumes from its checkpoints
+// (resumeEnded). Live migrations are left alone: the server resumes them
+// (ActiveLiveMigrations).
 func (m *MetaDB) MarkInterruptedMigrations(ctx context.Context) (int, error) {
 	res, err := m.db.ExecContext(ctx,
 		`UPDATE migrations SET status = ?, completed_at = ?, error = ?
-		 WHERE status IN (?, ?) AND mode != ?`,
+		 WHERE status IN (?, ?, ?) AND mode != ?`,
 		string(adapters.StatusFailed), time.Now(),
 		"interrupted by server restart",
-		string(adapters.StatusPending), string(adapters.StatusInProgress),
+		string(adapters.StatusPending), string(adapters.StatusInProgress), string(adapters.StatusPaused),
 		adapters.MigrationModeLive,
 	)
 	if err != nil {
