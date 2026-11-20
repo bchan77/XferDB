@@ -81,7 +81,9 @@ var oracleSeed = []string{
 	)`,
 	`CREATE TABLE xfdb_events (payload VARCHAR2(100), at DATE)`, // no primary key
 	`CREATE TABLE "XfdbMixed" ("Id" NUMBER(5) PRIMARY KEY, "Label" VARCHAR2(20))`,
-	`CREATE TABLE xfdb_docs (id NUMBER(6) PRIMARY KEY, doc XMLTYPE)`, // go-ora can't decode XMLTYPE itself
+	// go-ora can't decode XMLTYPE itself; JSON is read inline as VARCHAR2,
+	// or as a CLOB when longer than 4000 bytes (every 7th row here).
+	`CREATE TABLE xfdb_docs (id NUMBER(6) PRIMARY KEY, doc XMLTYPE, meta JSON)`,
 	fmt.Sprintf(`INSERT INTO xfdb_customers (id, email, full_name, balance, score, ratio, weight, approx, code, notes, photo, token,
 		born, seen_at, local_at, tenure, lag, status, empty_text)
 	SELECT LEVEL, 'user' || LEVEL || '@example.com', N'Zoë Müller ' || LEVEL, LEVEL * 1.25, ROUND(LEVEL / 7, 25), LEVEL / 3, LEVEL / 4, LEVEL / 8,
@@ -98,11 +100,20 @@ var oracleSeed = []string{
 	`INSERT INTO "XfdbMixed" VALUES (1, 'one')`,
 	`INSERT INTO "XfdbMixed" VALUES (2, 'two')`,
 	`INSERT INTO xfdb_docs SELECT LEVEL, CASE WHEN MOD(LEVEL, 5) > 0 THEN
-		XMLELEMENT("line", XMLATTRIBUTES(LEVEL AS "no"), XMLELEMENT("sku", 'SKU-' || LEVEL), XMLELEMENT("qty", MOD(LEVEL, 50))) END
+		XMLELEMENT("line", XMLATTRIBUTES(LEVEL AS "no"), XMLELEMENT("sku", 'SKU-' || LEVEL), XMLELEMENT("qty", MOD(LEVEL, 50))) END,
+		CASE WHEN MOD(LEVEL, 7) = 0 THEN JSON(TO_CLOB('{"n":' || LEVEL || ',"pad":"') || TO_CLOB(RPAD('p', 3000, 'p')) || TO_CLOB(RPAD('q', 3000, 'q')) || TO_CLOB('"}'))
+			WHEN MOD(LEVEL, 6) > 0 THEN JSON('{"n":' || LEVEL || ',"tags":["a","é"],"ok":true}') END
 	FROM dual CONNECT BY LEVEL <= 50`,
 }
 
 var oracleTables = []string{"xfdb_customers", "xfdb_orders", "xfdb_order_lines", "xfdb_events", "XfdbMixed", "xfdb_docs"}
+
+func segmentWorkers(target string) int {
+	if strings.HasSuffix(target, "-single") {
+		return 1
+	}
+	return 3
+}
 
 func seedOracle(t *testing.T, ctx context.Context, dsn string) {
 	t.Helper()
@@ -132,6 +143,9 @@ func TestOracleSource(t *testing.T) {
 
 	targets := map[string]map[string]any{
 		"sqlite": {"type": "sqlite", "dsn": filepath.Join(t.TempDir(), "target.db")},
+		// One segment worker: tables with a primary key are read by key
+		// (engine keyPager), not split into PK ranges.
+		"sqlite-single": {"type": "sqlite", "dsn": filepath.Join(t.TempDir(), "single.db")},
 	}
 	if pg := os.Getenv("XFERDB_TEST_ORACLE_PG"); pg != "" {
 		targets["postgres"] = map[string]any{"type": "postgres", "dsn": pg}
@@ -151,7 +165,7 @@ func TestOracleSource(t *testing.T) {
 				"source_config": map[string]any{"type": "oracle", "dsn": oraDSN},
 				"target_config": target,
 				"transfer_config": map[string]any{
-					"batch_size": 400, "table_workers": 2, "segment_workers": 3, "validation_level": "L3",
+					"batch_size": 400, "table_workers": 2, "segment_workers": segmentWorkers(name), "validation_level": "L3",
 				},
 			}, http.StatusCreated)
 			pre := postJSON(t, ts.URL+"/api/v1/projects/"+proj["id"].(string)+"/preflight", map[string]any{}, http.StatusOK)
@@ -205,7 +219,7 @@ func TestOracleSource(t *testing.T) {
 				}
 			}
 
-			checkOracleTarget(t, name, target["dsn"].(string))
+			checkOracleTarget(t, target["type"].(string), target["dsn"].(string))
 		})
 	}
 }

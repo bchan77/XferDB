@@ -515,20 +515,42 @@ func (s *Source) GetPKRange(ctx context.Context, table, pkColumn string) (int64,
 	return minV, maxV, nil
 }
 
-// selectList is the column list of a table's reads, in catalog order.
-// An XMLTYPE column is read as its serialized text: go-ora can't decode an
-// XMLTYPE value (the read fails with "TTC error: received code 1/2 during
-// response reading"). NO INDENT keeps binary-stored XML compact rather than
-// pretty-printed.
+// selectList is the column list of a table's reads, in catalog order, each
+// column read through readExprs.
 func selectList(cols []column) string {
-	parts := make([]string, len(cols))
-	for i, c := range cols {
-		parts[i] = quote(c.oracleName)
-		if c.dataType == "XMLTYPE" {
-			parts[i] = fmt.Sprintf("XMLSERIALIZE(CONTENT %s AS CLOB NO INDENT)", parts[i])
-		}
+	var parts []string
+	for _, c := range cols {
+		parts = append(parts, readExprs(c)...)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// jsonInline is the longest serialized JSON document read inline, as
+// VARCHAR2 (a STANDARD max_string_size database's limit).
+const jsonInline = 4000
+
+// readExprs are the select-list expressions a column is read through; most
+// columns are read as themselves.
+//   - XMLTYPE: as its serialized text. go-ora can't decode an XMLTYPE value
+//     (the read fails with "TTC error: received code 1/2 during response
+//     reading"); NO INDENT keeps binary-stored XML compact.
+//   - JSON: as two expressions, its text as VARCHAR2 when it fits
+//     (jsonInline), else as a CLOB. go-ora fetches a native JSON value like a
+//     LOB, with round trips of its own for every value: 10,000 rows with two
+//     JSON columns took 34s that way and 0.3s as VARCHAR2. Only a document
+//     too long for VARCHAR2 is fetched as a CLOB. scanRowsWithKey takes the
+//     first that isn't NULL.
+func readExprs(c column) []string {
+	col := quote(c.oracleName)
+	switch c.dataType {
+	case "XMLTYPE":
+		return []string{fmt.Sprintf("XMLSERIALIZE(CONTENT %s AS CLOB NO INDENT)", col)}
+	case "JSON":
+		inline := fmt.Sprintf("JSON_SERIALIZE(%s RETURNING VARCHAR2(%d) NULL ON ERROR)", col, jsonInline)
+		return []string{inline,
+			fmt.Sprintf("CASE WHEN %s IS NULL THEN JSON_SERIALIZE(%s RETURNING CLOB) END", inline, col)}
+	}
+	return []string{col}
 }
 
 func (s *Source) ReadBatch(ctx context.Context, table string, opts adapters.BatchOptions) (*adapters.Batch, error) {
@@ -630,7 +652,11 @@ func scanRows(rows *sql.Rows, cols []column, fn func(map[string]interface{}) err
 // scanRowsWithKey is scanRows for a query that selects nkey more columns
 // after cols, the key's text forms, which fn gets apart from the record.
 func scanRowsWithKey(rows *sql.Rows, cols []column, nkey int, fn func(map[string]interface{}, []string) error) error {
-	vals := make([]interface{}, len(cols)+nkey)
+	width := 0 // the select list's expressions for cols (readExprs)
+	for _, c := range cols {
+		width += len(readExprs(c))
+	}
+	vals := make([]interface{}, width+nkey)
 	ptrs := make([]interface{}, len(vals))
 	for rows.Next() {
 		for i := range vals {
@@ -641,8 +667,15 @@ func scanRowsWithKey(rows *sql.Rows, cols []column, nkey int, fn func(map[string
 			return err
 		}
 		rec := make(map[string]interface{}, len(cols))
-		for i, c := range cols {
-			v, err := convert(vals[i], c.conv)
+		at := 0
+		for _, c := range cols {
+			n := len(readExprs(c))
+			raw := vals[at]
+			for j := 1; raw == nil && j < n; j++ {
+				raw = vals[at+j]
+			}
+			at += n
+			v, err := convert(raw, c.conv)
 			if err != nil {
 				return fmt.Errorf("column %s: %w", c.name, err)
 			}
@@ -652,7 +685,7 @@ func scanRowsWithKey(rows *sql.Rows, cols []column, nkey int, fn func(map[string
 		if nkey > 0 {
 			key = make([]string, nkey)
 			for i := range key {
-				key[i] = fmt.Sprint(vals[len(cols)+i])
+				key[i] = fmt.Sprint(vals[width+i])
 			}
 		}
 		if err := fn(rec, key); err != nil {

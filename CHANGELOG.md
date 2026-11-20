@@ -43,6 +43,16 @@ All notable changes to XferDB are documented here.
   fails the migration. See `docs/LIVE_MIGRATION.md`.
 
 ### Changed
+- **Much faster single-worker copies and Oracle reads.** A table copied with one segment worker
+  (the default) was read with `OFFSET`, which makes the source skip every earlier row for each
+  batch, so its cost grew with the square of the table's size. It is now read by primary key
+  ranges when the source can page by key (PostgreSQL, YugabyteDB, Oracle); MySQL and SQLite
+  sources, and tables without a primary key, still use `OFFSET`, and a migration started
+  before this change resumes the way it began. Oracle reads also fetch 1,000 rows per round trip
+  instead of the driver's 25 (a DSN can set `PREFETCH_ROWS`), and native `JSON` columns are read
+  as text, as a CLOB only for documents over 4,000 bytes, instead of one fetch per value. One
+  worker copying a 1M-row Oracle table with two JSON columns went from ~39s to 0.6s per
+  10,000-row batch.
 - **Validation runs tables in parallel and reads both sides at once (#200).** `after` mode and
   *Validate now* validate as many tables at once as the migration's table workers, largest first
   (`per_table` already did; for *Validate now* / `xferdb validate`, the project's `table_workers`,
