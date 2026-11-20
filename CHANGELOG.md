@@ -5,6 +5,12 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Index and constraint progress after the copy.** The post-schema phase now records every index,
+  foreign key and check constraint as a step with its start, end, attempts and any error
+  (`GET /api/v1/migrations/:id/schema-steps`, kept after the run), logs each with its duration
+  (`migration.post_schema_step`), and the migration page shows what is running and for how long
+  ("12/52 done · index orders_customer_ix on orders, 3m10s") plus an *Indexes & constraints* card
+  listing every step, running and failed first, then the slowest.
 - **Schema and database pickers for every connection type.** PostgreSQL, YugabyteDB and Oracle
   connections get a *Load schemas* button that offers the database's schemas as suggestions in
   the Schema field, which stays free text so a target can name a new schema (Oracle: the schemas
@@ -65,6 +71,12 @@ All notable changes to XferDB are documented here.
   progress step `reading_source` / `reading_target` is now a single `reading` step.
 
 ### Fixed
+- **Post-schema DDL no longer fails on YugabyteDB with `TABLE_SCHEMA_CHANGE_IN_PROGRESS`.** Indexes
+  and constraints were created table by table in parallel, so a foreign key (which also changes the
+  table it references) could run while that table was getting its own indexes, which YugabyteDB
+  refuses. Every index is now created before any constraint, no two statements run on one table at
+  once, and a statement YugabyteDB refuses for another DDL still being verified is retried for up
+  to two minutes.
 - **Oracle tables with an XMLTYPE column can be migrated.** Reading one failed with
   `TTC error: received code … during response reading`, since the Oracle driver can't decode
   XMLTYPE; the column is now read as its serialized text (compact, not re-indented) and

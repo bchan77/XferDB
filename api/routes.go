@@ -48,6 +48,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/migrations/{id}/cutover", mh.Cutover)
 	mux.HandleFunc("GET /api/v1/migrations/{id}/stats", mh.GetStats)
 	mux.HandleFunc("GET /api/v1/migrations/{id}/stats/history", mh.GetStatsHistory)
+	mux.HandleFunc("GET /api/v1/migrations/{id}/schema-steps", mh.GetSchemaSteps)
 
 	// Validations: compare a migration's source and target after the fact.
 	vh := s.validations

@@ -133,6 +133,21 @@ func (m *MetaDB) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_migration_stats_migration_id
 			ON migration_stats(migration_id);
 
+		CREATE TABLE IF NOT EXISTS migration_schema_steps (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			migration_id TEXT NOT NULL REFERENCES migrations(id) ON DELETE CASCADE,
+			kind         TEXT NOT NULL,
+			table_name   TEXT NOT NULL,
+			name         TEXT NOT NULL,
+			started_at   DATETIME NOT NULL,
+			finished_at  DATETIME,
+			status       TEXT NOT NULL DEFAULT 'running',
+			attempts     INTEGER NOT NULL DEFAULT 1,
+			error        TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS idx_migration_schema_steps_migration_id
+			ON migration_schema_steps(migration_id);
+
 		CREATE TABLE IF NOT EXISTS validations (
 			id           TEXT PRIMARY KEY,
 			migration_id TEXT NOT NULL REFERENCES migrations(id) ON DELETE CASCADE,

@@ -718,6 +718,7 @@ POST   /api/v1/migrations/:id/cutover       # live migrations (beta); body: {"ig
 DELETE /api/v1/migrations/:id               # cancel + delete record
 GET    /api/v1/migrations/:id/stats
 GET    /api/v1/migrations/:id/stats/history # recorded snapshots (every 5s during migration)
+GET    /api/v1/migrations/:id/schema-steps  # indexes/constraints created after the copy, with timings
 
 # Validations
 POST   /api/v1/migrations/:id/validations   # body: {"level":"L3","sample":10,"tables":["orders"]} (all optional)

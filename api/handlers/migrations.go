@@ -673,3 +673,15 @@ func (h *MigrationsHandler) GetStatsHistory(w http.ResponseWriter, r *http.Reque
 
 	writeJSON(w, http.StatusOK, records)
 }
+
+// GetSchemaSteps returns the indexes and constraints a migration created
+// after copying its rows, each with its start, end, status and error, in
+// the order they started.
+func (h *MigrationsHandler) GetSchemaSteps(w http.ResponseWriter, r *http.Request) {
+	steps, err := h.DB.ListSchemaSteps(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, steps)
+}
