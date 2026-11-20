@@ -20,9 +20,10 @@ type Source struct {
 	config adapters.ConnectionConfig
 	owner  string // the schema read, as Oracle stores it
 
-	mu     sync.Mutex
-	tables map[string]string   // reported table name -> Oracle name
-	cols   map[string][]column // reported table name -> its columns
+	mu      sync.Mutex
+	tables  map[string]string   // reported table name -> Oracle name
+	cols    map[string][]column // reported table name -> its columns
+	fkTypes *fkTypes            // NUMBER foreign key links (fktypes.go), with cols
 }
 
 func NewSource() adapters.SourceAdapter {
@@ -154,6 +155,7 @@ func (s *Source) refreshTables(ctx context.Context) ([]string, error) {
 		reported = append(reported, folded[n])
 	}
 	s.cols = map[string][]column{}
+	s.fkTypes = nil
 	return reported, nil
 }
 
@@ -193,6 +195,10 @@ func (s *Source) columns(ctx context.Context, table string) ([]column, string, e
 	if ok {
 		return cached, otable, nil
 	}
+	fks, err := s.foreignKeyTypes(ctx)
+	if err != nil {
+		return nil, "", err
+	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT column_name, data_type, NVL(char_length, 0), NVL(data_precision, -1), NVL(data_scale, -1), identity_column
 FROM all_tab_columns
@@ -216,6 +222,9 @@ ORDER BY column_id`, s.owner, otable)
 		if identity == "YES" {
 			c.typ, c.conv = identityType(c.typ, c.conv, scale)
 		}
+		if typ, conv, ok := fks.typeFor(colRef{otable, c.oracleName}); ok {
+			c.typ, c.conv = typ, conv // the referenced column's type (fktypes.go)
+		}
 		cols = append(cols, c)
 		names = append(names, c.oracleName)
 	}
@@ -237,6 +246,7 @@ ORDER BY column_id`, s.owner, otable)
 func (s *Source) forgetColumns(table string) {
 	s.mu.Lock()
 	delete(s.cols, table)
+	s.fkTypes = nil // its keys may have changed too
 	s.mu.Unlock()
 }
 

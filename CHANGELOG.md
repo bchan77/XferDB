@@ -17,6 +17,12 @@ All notable changes to XferDB are documented here.
   the timeout cancelled the statement (`57014`), so the database was never created. `CREATE
   DATABASE` now has 2 minutes; connecting is still limited to 10 seconds. If it does time out, the
   error says the database was not created.
+- **Oracle foreign keys between differently declared NUMBER columns are created.** Oracle lets a
+  foreign key column differ from the key it references (`NUMBER(19)` referencing an identity
+  column, migrated as `bigint`; `NUMBER(19)` referencing `NUMBER(10)`). Mapped separately, one side
+  became `numeric(19)` and the other `bigint`, and PostgreSQL/YugabyteDB refused the foreign key
+  (`foreign key constraint ... cannot be implemented`, 42804). A `NUMBER` foreign key column now
+  takes the type of the column it references (following chains of keys).
 - **Index builds on YugabyteDB no longer hang for 15 minutes and fail.** Post-schema built indexes
   on several tables at once; YugabyteDB's online builds wait for each other's sessions until
   `yb_wait_for_backends_catalog_version_timeout`, then fail with `timed out waiting for postgres

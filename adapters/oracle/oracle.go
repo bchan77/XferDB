@@ -238,6 +238,7 @@ func mapType(dataType string, charLength, precision, scale int) (string, convKin
 // NUMBER(*,0), NUMBER(19+)) is reported as bigint, which every target can
 // make an identity column of (#194); PostgreSQL can't make one of numeric.
 // A key past bigint's range then fails the read instead of being rounded.
+// A column referencing it takes the same type (fktypes.go).
 func identityType(typ string, conv convKind, scale int) (string, convKind) {
 	if conv == convNone && strings.HasPrefix(typ, "numeric") && scale <= 0 {
 		return "bigint", convInt
