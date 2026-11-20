@@ -411,60 +411,10 @@ func (e *Engine) Run(ctx context.Context) error {
 	return nil
 }
 
-// createPostSchema creates tables' indexes and constraints, tables in
-// parallel across workers.
+// createPostSchema creates tables' indexes, then their foreign keys and
+// check constraints (postschema.go).
 func (e *Engine) createPostSchema(ctx context.Context, tables []adapters.TableSchema, workers int) error {
-	work := make(chan adapters.TableSchema, len(tables))
-	for _, schema := range tables {
-		if len(schema.Indexes) > 0 || len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
-			work <- schema
-		}
-	}
-	close(work)
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var postErr error
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for schema := range work {
-				if len(schema.Indexes) > 0 {
-					e.emit(ProgressEvent{
-						Kind:          EventPostSchemaItem,
-						PostSchemaMsg: fmt.Sprintf("%-16s %s (%d)", "indexes:", schema.Name, len(schema.Indexes)),
-						Timestamp:     time.Now(),
-					})
-					if err := e.target.CreateIndexes(ctx, schema.Name, schema.Indexes); err != nil {
-						mu.Lock()
-						if postErr == nil {
-							postErr = fmt.Errorf("create indexes for %s: %w", schema.Name, err)
-						}
-						mu.Unlock()
-						return
-					}
-				}
-				if len(schema.ForeignKeys) > 0 || len(schema.Checks) > 0 {
-					e.emit(ProgressEvent{
-						Kind:          EventPostSchemaItem,
-						PostSchemaMsg: fmt.Sprintf("%-16s %s (%d fk, %d check)", "constraints:", schema.Name, len(schema.ForeignKeys), len(schema.Checks)),
-						Timestamp:     time.Now(),
-					})
-					if err := e.target.CreateConstraints(ctx, schema.Name, schema.ForeignKeys, schema.Checks); err != nil {
-						mu.Lock()
-						if postErr == nil {
-							postErr = fmt.Errorf("create constraints for %s: %w", schema.Name, err)
-						}
-						mu.Unlock()
-						return
-					}
-				}
-			}
-		}()
-	}
-	wg.Wait()
-	return postErr
+	return e.runSchemaJobs(ctx, tables, workers)
 }
 
 // connect instantiates and connects source and target adapters using the project config.

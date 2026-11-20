@@ -226,6 +226,9 @@ func (m *MetaDB) DeleteMigration(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE migration_id = ?`, id); err != nil {
 		return fmt.Errorf("delete checkpoints: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM migration_schema_steps WHERE migration_id = ?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM migration_tables WHERE migration_id = ?`, id); err != nil {
 		return fmt.Errorf("delete migration_tables: %w", err)
 	}

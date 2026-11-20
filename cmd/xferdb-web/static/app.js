@@ -2291,6 +2291,22 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     if (timer) { clearTimeout(timer); timer = null; }
   }
 
+  // The indexes and constraints built after the copy (post_schema), each
+  // with its timing; fetched while that phase runs and once when the
+  // migration has ended.
+  let schemaStepsFinal = false;
+  async function refreshSchemaSteps(phase) {
+    if (schemaStepsFinal) return;
+    const ended = ['complete', 'failed', 'cancelled'].includes(phase);
+    if (phase !== 'post_schema' && !ended) return;
+    try {
+      const steps = await api.getSchemaSteps(migId);
+      const el = document.getElementById('schemaStepsArea');
+      if (el) el.innerHTML = schemaStepsCard(steps, phase === 'post_schema');
+      if (ended) schemaStepsFinal = true;
+    } catch (err) { /* an older server has no such endpoint; show nothing */ }
+  }
+
   async function render() {
     if (stopped) return;
     container.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading migration status…</div>`;
@@ -2748,6 +2764,48 @@ function tableProgressRow(t, activity) {
   `;
 }
 
+// schemaStepsCard lists the indexes, foreign keys and check constraints a
+// migration created after its copy, with when each started and how long it
+// took (still running: so far).
+function schemaStepsCard(steps, running) {
+  if (!steps || steps.length === 0) return '';
+  const now = Date.now();
+  const secs = (st) => ((st.finished_at ? Date.parse(st.finished_at) : now) - Date.parse(st.started_at)) / 1000;
+  const kinds = { index: 'Index', foreign_key: 'Foreign key', check: 'Check' };
+  const count = (status) => steps.filter((st) => st.status === status).length;
+  const done = count('done'), active = count('running'), failed = count('failed');
+  const first = Math.min(...steps.map((st) => Date.parse(st.started_at)));
+  const last = Math.max(...steps.map((st) => (st.finished_at ? Date.parse(st.finished_at) : now)));
+  const badge = (st) => st.status === 'done' ? '<span class="badge ok">done</span>'
+    : st.status === 'failed' ? '<span class="badge fail">failed</span>'
+    : '<span class="badge progress">running</span>';
+  // Running and failed first, then the slowest.
+  const order = { running: 0, failed: 1, done: 2 };
+  const sorted = [...steps].sort((a, b) => order[a.status] - order[b.status] || secs(b) - secs(a));
+  const rows = sorted.map((st) => `
+    <tr>
+      <td>${badge(st)}</td>
+      <td>${kinds[st.kind] || esc(st.kind)}</td>
+      <td class="mono">${esc(st.name)}</td>
+      <td class="mono">${esc(st.table)}</td>
+      <td>${new Date(st.started_at).toLocaleTimeString()}</td>
+      <td>${fmtDuration(secs(st))}${st.attempts > 1 ? ` <span class="hint">(${st.attempts} tries)</span>` : ''}</td>
+    </tr>
+    ${st.error ? `<tr><td></td><td colspan="5" class="schema-step-error">${esc(st.error)}</td></tr>` : ''}`).join('');
+  return `
+    <div class="card">
+      <strong>Indexes &amp; constraints</strong>
+      <div class="hint">${done} done${active ? `, ${active} running` : ''}${failed ? `, ${failed} failed` : ''} · ${fmtDuration((last - first) / 1000)}${running ? ' so far' : ' in all'}. Running and failed first, then the slowest.</div>
+      <details ${running || failed ? 'open' : ''} style="margin-top:8px;">
+        <summary>${steps.length} statement(s)</summary>
+        <div class="schema-steps-wrap"><table class="schema-steps">
+          <thead><tr><th>Status</th><th>Kind</th><th>Name</th><th>Table</th><th>Started</th><th>Took</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </details>
+    </div>`;
+}
+
 async function renderMigrationProgress(migId) {
   document.title = 'XferDB — Migration';
   app.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading migration…</div>`;
@@ -2766,6 +2824,7 @@ async function renderMigrationProgress(migId) {
     </div>
     ${mig.mode === 'live' ? '<div class="card" id="liveArea"></div>' : ''}
     <div id="progressArea"></div>
+    <div id="schemaStepsArea"></div>
     <div id="validationArea"></div>
   `;
   const isLive = mig.mode === 'live';
@@ -2821,6 +2880,7 @@ async function renderMigrationProgress(migId) {
         <div class="stat-box"><div class="label">${isLive ? 'Copy ETA' : 'ETA'}</div><div class="value">${snap.ETASeconds ? fmtDuration(snap.ETASeconds) : '—'}</div></div>
         <div class="stat-box"><div class="label">${isLive ? 'Copy rate' : 'Rate'}</div><div class="value">${Math.round(rows.RatePerSecond || 0)}/s</div></div>
       </div>
+      ${snap.Phase === 'post_schema' && snap.PostSchemaStatus ? `<div class="banner info"><span><span class="spinner"></span> Creating indexes and constraints: ${esc(snap.PostSchemaStatus)}</span></div>` : ''}
       <div class="card">
         <strong>Resource Usage</strong>
         <div class="stat-grid" style="margin-top:8px;">
@@ -2962,6 +3022,7 @@ async function renderMigrationProgress(migId) {
     try {
       const snap = await api.getStats(migId);
       renderProgress(snap);
+      refreshSchemaSteps(snap.Phase);
       checkEarlyValidation();
       if (snap.Phase === 'complete' || snap.Phase === 'failed' || snap.Phase === 'cancelled') {
         clearTimer();

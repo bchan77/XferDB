@@ -78,6 +78,7 @@ export const api = {
   deleteMigration: (id) => req('DELETE', `/api/v1/migrations/${encodeURIComponent(id)}`),
   getStats: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}/stats`),
   getStatsHistory: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}/stats/history`),
+  getSchemaSteps: (id) => req('GET', `/api/v1/migrations/${encodeURIComponent(id)}/schema-steps`),
 
   startValidation: (migId, body) =>
     req('POST', `/api/v1/migrations/${encodeURIComponent(migId)}/validations`, body || {}),
