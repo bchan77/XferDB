@@ -10,6 +10,14 @@ All notable changes to XferDB are documented here.
   and the browser tab title names both.
 
 ### Fixed
+- **A migration paused when the server restarted can be resumed.** On startup the server failed
+  only pending and running migrations ("interrupted by server restart"); a paused one stayed
+  paused with no engine behind it: Resume answered 409, Cancel 404, it blocked new migrations of
+  its project, and its page repeated "Stats fetch failed: no stats collector for migration" every
+  1.5 seconds. It is now failed like the others, so *Resume* continues it from its checkpoints. The
+  migration page shows one stats error instead of a growing stack, switches to the finished view
+  when the migration ends meanwhile, and shows a finished migration's own status rather than its
+  last progress sample's (which showed *paused* with Pause/Cancel buttons).
 - **YugabyteDB "Restart read required" no longer fails post-schema.** Creating an index on a table
   with rows can be aborted by YugabyteDB with `Restart read required (40001)`; such a statement (and
   a deadlock, 40P01) is now retried like a DDL conflict. An index whose build failed or was
