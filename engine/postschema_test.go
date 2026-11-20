@@ -22,6 +22,8 @@ type ddlTarget struct {
 	order    []string // kind:name, in the order they ran
 	failOnce map[string]bool
 	failErr  error // what a failOnce statement fails with (default: a DDL conflict)
+	running  int   // statements running now, on any table
+	maxRun   int   // the most that ever ran at once
 }
 
 func (t *ddlTarget) enter(kind, name string, tables ...string) error {
@@ -33,6 +35,8 @@ func (t *ddlTarget) enter(kind, name string, tables ...string) error {
 		}
 	}
 	t.order = append(t.order, kind+":"+name)
+	t.running++
+	t.maxRun = max(t.maxRun, t.running)
 	fail := t.failOnce[name]
 	delete(t.failOnce, name)
 	t.mu.Unlock()
@@ -41,6 +45,7 @@ func (t *ddlTarget) enter(kind, name string, tables ...string) error {
 	for _, tb := range tables {
 		t.busy[tb]--
 	}
+	t.running--
 	t.mu.Unlock()
 	if fail && t.failErr != nil {
 		return t.failErr
@@ -178,5 +183,35 @@ func TestPostSchemaErrorNamesStatementOnce(t *testing.T) {
 	err := eng.createPostSchema(context.Background(), []adapters.TableSchema{{Name: "t", Indexes: []adapters.IndexDef{{Name: "t_ix"}}}}, 1)
 	if err == nil || strings.Count(err.Error(), "create index t_ix on t") != 1 {
 		t.Errorf("error %v, want the statement named once", err)
+	}
+}
+
+// On a YugabyteDB target post-schema runs one statement at a time, even on
+// different tables: concurrent online index builds wait for each other's
+// backends until they time out ("timed out waiting for postgres backends to
+// catch up"). Another target still builds on several tables at once.
+func TestPostSchemaSerialOnYugabyte(t *testing.T) {
+	tables := []adapters.TableSchema{
+		{Name: "accounts", Indexes: []adapters.IndexDef{{Name: "accounts_code_uk"}}},
+		{Name: "categories", Indexes: []adapters.IndexDef{{Name: "categories_slug_uk"}}},
+		{Name: "api_requests", Indexes: []adapters.IndexDef{{Name: "api_requests_at_ix"}}},
+	}
+	for _, tc := range []struct {
+		typ     string
+		wantMax func(int) bool
+	}{
+		{adapters.TypeYugabyte, func(n int) bool { return n == 1 }},
+		{"postgres", func(n int) bool { return n > 1 }},
+	} {
+		tgt := &ddlTarget{busy: map[string]int{}}
+		eng, _, cleanup := newTestEngine(t, &offsetSource{}, tgt)
+		eng.project.TargetConfig.Type = tc.typ
+		if err := eng.createPostSchema(context.Background(), tables, 3); err != nil {
+			t.Fatal(err)
+		}
+		if !tc.wantMax(tgt.maxRun) {
+			t.Errorf("%s target: %d statements ran at once", tc.typ, tgt.maxRun)
+		}
+		cleanup()
 	}
 }
