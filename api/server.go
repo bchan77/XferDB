@@ -125,20 +125,25 @@ func (s *Server) Handler() http.Handler {
 
 // ListenAndServe starts the HTTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
-	if n, err := s.db.MarkInterruptedMigrations(context.Background()); err != nil {
+	s.Recover(context.Background())
+	s.log.Info("server.started", "addr", addr)
+	mux := s.routes()
+	return http.ListenAndServe(addr, mux)
+}
+
+// Recover cleans up after the last run of the server, before it serves:
+// migrations and validations it was running (or had paused) fail as
+// interrupted, and live migrations are resumed. Call once, at startup.
+func (s *Server) Recover(ctx context.Context) {
+	if n, err := s.db.MarkInterruptedMigrations(ctx); err != nil {
 		s.log.Warn("could not mark interrupted migrations", "error", err)
 	} else if n > 0 {
 		s.log.Warn("marked interrupted migrations as failed", "count", n)
 	}
-	if n, err := s.db.MarkInterruptedValidations(context.Background()); err != nil {
+	if n, err := s.db.MarkInterruptedValidations(ctx); err != nil {
 		s.log.Warn("could not mark interrupted validations", "error", err)
 	} else if n > 0 {
 		s.log.Warn("marked interrupted validations as failed", "count", n)
 	}
-
-	s.ResumeLive(context.Background())
-
-	s.log.Info("server.started", "addr", addr)
-	mux := s.routes()
-	return http.ListenAndServe(addr, mux)
+	s.ResumeLive(ctx)
 }
