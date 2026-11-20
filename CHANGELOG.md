@@ -4,6 +4,11 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **The migration page names its project.** It is headed by the project's name (the breadcrumb said
+  only "Project" and the heading was the migration ID), with "Migration <id> · progress" under it,
+  and the browser tab title names both.
+
 ### Fixed
 - **YugabyteDB "Restart read required" no longer fails post-schema.** Creating an index on a table
   with rows can be aborted by YugabyteDB with `Restart read required (40001)`; such a statement (and
