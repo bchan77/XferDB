@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -155,11 +156,46 @@ func (t *Target) CreateIndexes(ctx context.Context, table string, indexes []adap
 		if idx.Unique {
 			unique = "UNIQUE "
 		}
+		if err := t.dropInvalidIndex(ctx, table, idx.Name); err != nil {
+			return err
+		}
 		query := fmt.Sprintf(`CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)`,
 			unique, quote(idx.Name), qualify(table), strings.Join(cols, ", "))
 		if _, err := t.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("create index %s on %s: %w", idx.Name, table, err)
 		}
+	}
+	return nil
+}
+
+// dropInvalidIndex drops the index name in table's schema if a build of it
+// failed or was cancelled part way: YugabyteDB (whose CREATE INDEX on a table
+// with rows builds online) and PostgreSQL's CREATE INDEX CONCURRENTLY leave
+// such an index behind, marked invalid: never used, and a unique one enforces
+// nothing. CREATE INDEX IF NOT EXISTS would take it as already done, so a
+// retry or resume would quietly keep it.
+func (t *Target) dropInvalidIndex(ctx context.Context, table, name string) error {
+	schema, _ := splitName(table)
+	var invalid bool
+	err := t.db.QueryRowContext(ctx, `
+		SELECT NOT i.indisvalid
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indexrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = `+schemaExpr(2)+` AND c.relname = $1`, name, schema).Scan(&invalid)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !invalid) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check index %s on %s: %w", name, table, err)
+	}
+	slog.Warn("postgres: dropping invalid index left by an earlier failed build", "index", name, "table", table)
+	qualified := quote(name)
+	if schema != "" {
+		qualified = quote(schema) + "." + quote(name)
+	}
+	if _, err := t.db.ExecContext(ctx, `DROP INDEX IF EXISTS `+qualified); err != nil {
+		return fmt.Errorf("drop invalid index %s on %s: %w", name, table, err)
 	}
 	return nil
 }

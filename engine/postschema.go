@@ -243,7 +243,7 @@ func (e *Engine) runSchemaJob(ctx context.Context, j *schemaJob, p *schemaProgre
 	var err error
 	for wait := time.Second; ; wait = min(2*wait, 10*time.Second) {
 		attempts++
-		if err = j.run(ctx); err == nil || !isDDLConflict(err) || time.Since(started)+wait > ddlRetryFor {
+		if err = j.run(ctx); err == nil || !isRetryableDDL(err) || time.Since(started)+wait > ddlRetryFor {
 			break
 		}
 		slog.Info("migration.post_schema_retry", "migration_id", e.migrationID, "kind", j.kind,
@@ -278,9 +278,27 @@ func (e *Engine) runSchemaJob(ctx context.Context, j *schemaJob, p *schemaProgre
 	e.emit(ProgressEvent{Kind: EventPostSchemaItem, PostSchemaMsg: p.status(), Timestamp: finished})
 	if err != nil {
 		what := map[string]string{"index": "create index", "foreign_key": "add foreign key", "check": "add check constraint"}[j.kind]
-		return fmt.Errorf("%s %s on %s: %w", what, j.name, j.table, err)
+		prefix := fmt.Sprintf("%s %s on %s", what, j.name, j.table)
+		if strings.HasPrefix(err.Error(), prefix) {
+			return err // the adapter already said which statement
+		}
+		return fmt.Errorf("%s: %w", prefix, err)
 	}
 	return nil
+}
+
+// isRetryableDDL reports a post-schema statement failure that goes away when
+// the statement runs again: a DDL conflict (isDDLConflict), or a transaction
+// the server aborted as it would any transaction, not for what it does, such
+// as YugabyteDB's "Restart read required" while building an index online
+// (40001, serialization_failure; also deadlock_detected, 40P01). The target
+// drops what a failed index build left behind before trying again
+// (dropInvalidIndex on postgres).
+func isRetryableDDL(err error) bool {
+	msg := err.Error()
+	return isDDLConflict(err) ||
+		strings.Contains(msg, "(40001)") || strings.Contains(msg, "Restart read required") ||
+		strings.Contains(msg, "(40P01)")
 }
 
 // isDDLConflict reports a YugabyteDB refusal of DDL on a table another DDL

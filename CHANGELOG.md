@@ -4,6 +4,14 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **YugabyteDB "Restart read required" no longer fails post-schema.** Creating an index on a table
+  with rows can be aborted by YugabyteDB with `Restart read required (40001)`; such a statement (and
+  a deadlock, 40P01) is now retried like a DDL conflict. An index whose build failed or was
+  cancelled is left behind *invalid* (never used; a unique one enforces nothing), and creating it
+  again used to keep it as if done: it is now dropped and rebuilt, on PostgreSQL too. The error no
+  longer names the statement twice.
+
 ### Added
 - **Support bundles tell what happened, in order.** A bundle now has `timeline.json` (migrations,
   tables with their errors, post-schema steps, schema overrides, progress phases, validations and
