@@ -11,6 +11,12 @@ All notable changes to XferDB are documented here.
   cancelled is left behind *invalid* (never used; a unique one enforces nothing), and creating it
   again used to keep it as if done: it is now dropped and rebuilt, on PostgreSQL too. The error no
   longer names the statement twice.
+- **Create database no longer gives up after 10 seconds.** *Create database* (project settings and
+  the connection editor) shared the 10-second timeout of *Load databases*. PostgreSQL 15+ copies the
+  template database through the WAL and syncs it to disk, which took 13s on NFS-backed storage, and
+  the timeout cancelled the statement (`57014`), so the database was never created. `CREATE
+  DATABASE` now has 2 minutes; connecting is still limited to 10 seconds. If it does time out, the
+  error says the database was not created.
 
 ### Added
 - **Support bundles tell what happened, in order.** A bundle now has `timeline.json` (migrations,
