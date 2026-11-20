@@ -24,6 +24,11 @@ type ddlTarget struct {
 	failErr  error // what a failOnce statement fails with (default: a DDL conflict)
 	running  int   // statements running now, on any table
 	maxRun   int   // the most that ever ran at once
+	// waitFor, when set, holds each statement until that many have run at
+	// once, or waitMax passes (instead of a fixed 20ms), so a test of
+	// concurrency doesn't depend on timing.
+	waitFor int
+	waitMax time.Duration
 }
 
 func (t *ddlTarget) enter(kind, name string, tables ...string) error {
@@ -40,7 +45,18 @@ func (t *ddlTarget) enter(kind, name string, tables ...string) error {
 	fail := t.failOnce[name]
 	delete(t.failOnce, name)
 	t.mu.Unlock()
-	time.Sleep(20 * time.Millisecond)
+	if t.waitFor > 0 {
+		for deadline := time.Now().Add(t.waitMax); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			t.mu.Lock()
+			reached := t.maxRun >= t.waitFor
+			t.mu.Unlock()
+			if reached {
+				break
+			}
+		}
+	} else {
+		time.Sleep(20 * time.Millisecond)
+	}
 	t.mu.Lock()
 	for _, tb := range tables {
 		t.busy[tb]--
@@ -196,14 +212,18 @@ func TestPostSchemaSerialOnYugabyte(t *testing.T) {
 		{Name: "categories", Indexes: []adapters.IndexDef{{Name: "categories_slug_uk"}}},
 		{Name: "api_requests", Indexes: []adapters.IndexDef{{Name: "api_requests_at_ix"}}},
 	}
+	// Each statement waits for a second one to start: on postgres one does
+	// (within 10s, however slow the runner), on YugabyteDB none may, so each
+	// gives up after 200ms.
 	for _, tc := range []struct {
 		typ     string
+		waitMax time.Duration
 		wantMax func(int) bool
 	}{
-		{adapters.TypeYugabyte, func(n int) bool { return n == 1 }},
-		{"postgres", func(n int) bool { return n > 1 }},
+		{adapters.TypeYugabyte, 200 * time.Millisecond, func(n int) bool { return n == 1 }},
+		{"postgres", 10 * time.Second, func(n int) bool { return n > 1 }},
 	} {
-		tgt := &ddlTarget{busy: map[string]int{}}
+		tgt := &ddlTarget{busy: map[string]int{}, waitFor: 2, waitMax: tc.waitMax}
 		eng, _, cleanup := newTestEngine(t, &offsetSource{}, tgt)
 		eng.project.TargetConfig.Type = tc.typ
 		if err := eng.createPostSchema(context.Background(), tables, 3); err != nil {
