@@ -207,3 +207,50 @@ func TestSelectListSerializesXML(t *testing.T) {
 		t.Errorf("selectList = %s, want %s", got, want)
 	}
 }
+
+// A NUMBER foreign key column takes the type of the column at the end of its
+// chain of references, so the target can create the key (42804 otherwise).
+func TestForeignKeyTypes(t *testing.T) {
+	ref := func(table, col string) colRef { return colRef{table, col} }
+	f := &fkTypes{
+		refs: map[colRef]colRef{
+			ref("CARTS", "CUSTOMER_ID"):  ref("CUSTOMERS", "ID"), // NUMBER(19) -> identity NUMBER(19)
+			ref("ACCOUNTS", "PARENT_ID"): ref("ACCOUNTS", "ID"),  // NUMBER(10) -> NUMBER(19)
+			ref("LINES", "ORDER_ID"):     ref("ORDERS", "ID"),    // chain: ORDERS.ID is itself a key
+			ref("ORDERS", "ID"):          ref("CUSTOMERS", "ID"),
+			ref("SMALL", "BIG_ID"):       ref("TINY", "ID"),  // NUMBER(19) -> NUMBER(9)
+			ref("LOOP_A", "X"):           ref("LOOP_B", "X"), // a cycle
+			ref("LOOP_B", "X"):           ref("LOOP_A", "X"),
+		},
+		cols: map[colRef]numberCol{
+			ref("CUSTOMERS", "ID"): {prec: 19, scale: 0, identity: true},
+			ref("ACCOUNTS", "ID"):  {prec: 19, scale: 0},
+			ref("TINY", "ID"):      {prec: 9, scale: 0},
+			ref("LOOP_A", "X"):     {prec: 5, scale: 0},
+			ref("LOOP_B", "X"):     {prec: 5, scale: 0},
+		},
+	}
+	for _, c := range []struct {
+		col  colRef
+		want string // "" = keeps its own type
+	}{
+		{ref("CARTS", "CUSTOMER_ID"), "bigint"},
+		{ref("ACCOUNTS", "PARENT_ID"), "numeric(19)"},
+		{ref("LINES", "ORDER_ID"), "bigint"},
+		{ref("SMALL", "BIG_ID"), "integer"},
+		{ref("LOOP_A", "X"), ""},
+		{ref("CUSTOMERS", "ID"), ""}, // references nothing
+	} {
+		got, _, ok := f.typeFor(c.col)
+		if !ok {
+			got = ""
+		}
+		if got != c.want {
+			t.Errorf("%s.%s: %q, want %q", c.col.table, c.col.col, got, c.want)
+		}
+	}
+	var none *fkTypes
+	if _, _, ok := none.typeFor(ref("A", "B")); ok {
+		t.Error("nil fkTypes reported a type")
+	}
+}
