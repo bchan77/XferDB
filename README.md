@@ -422,7 +422,7 @@ xferdb validate --tables orders,customers
 
 ### Support bundle
 
-Generate a diagnostic archive for troubleshooting — system info, project config, source/target database metadata, preflight results, migration history, checkpoints, table schemas, and MongoDB schema plan (if applicable). Passwords and API keys are automatically redacted.
+Generate a diagnostic archive for troubleshooting. Start with `timeline.json`: one time-ordered list of what happened — migrations and tables starting and ending (with each failed table's error), indexes and constraints created after the copy, schema type overrides being saved, progress phase changes, validations, and the server's warnings and errors. Alongside it: `logs.jsonl` (the server's recent log lines for this project, kept in memory, so no `--log-file` is needed; lines from before the last restart are only in a log file), migration history with the settings each run used, progress samples, validation results, the schema plan, checkpoints, project config, source/target database metadata, preflight results and table schemas. `README.txt` in the archive lists every file. Passwords and API keys are automatically redacted.
 
 ```bash
 xferdb support-bundle [project-name]

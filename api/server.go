@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"gitea.homelab.local/nextdevops/XferDB/logring"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -35,6 +36,17 @@ type Server struct {
 
 	// live runs live migrations (#102); nil until EnableLive.
 	live *live.Manager
+
+	// logs keeps the recent log lines for support bundles; nil until
+	// SetLogRing. logFile is the --log-file path, if any.
+	logs    *logring.Ring
+	logFile string
+}
+
+// SetLogRing gives support bundles the server's recent log lines, and the
+// path of its log file (empty if none).
+func (s *Server) SetLogRing(r *logring.Ring, logFile string) {
+	s.logs, s.logFile = r, logFile
 }
 
 // EnableLive lets the server run live migrations, with each one's worker

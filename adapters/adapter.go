@@ -116,6 +116,9 @@ type TableProgress struct {
 	RowsTransferred int64           `json:"rows_transferred"`
 	StartedAt       *time.Time      `json:"started_at,omitempty"`
 	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
+	// Error is why the table failed (empty otherwise), kept so a finished
+	// migration and a support bundle still show it.
+	Error string `json:"error,omitempty"`
 }
 
 // Checkpoint records the last successfully written batch for a table,

@@ -9,12 +9,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"gitea.homelab.local/nextdevops/XferDB/api"
 	"gitea.homelab.local/nextdevops/XferDB/cdc/live"
+	"gitea.homelab.local/nextdevops/XferDB/logring"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/version"
+	"github.com/spf13/cobra"
 )
 
 // ServerAddr is the base URL of the XferDB API server, set via --server flag.
@@ -101,7 +102,10 @@ var serverCmd = &cobra.Command{
 		logFile, _ := cmd.Flags().GetString("log-file")
 		logLevel, _ := cmd.Flags().GetString("log-level")
 
-		log := newLogger(logLevel, logFile)
+		ring := logring.New(logRingLines)
+		log := newLogger(logLevel, logFile, ring)
+		// The engine and adapters log through slog's default logger.
+		slog.SetDefault(log)
 
 		dbPath := xferdbStatePath()
 		if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
@@ -115,6 +119,7 @@ var serverCmd = &cobra.Command{
 
 		log.Info("server.init", "state", dbPath, "log_file", logFile, "log_level", logLevel)
 		srv := api.NewServer(db, log)
+		srv.SetLogRing(ring, logFile)
 		// Live migrations keep their worker directories (spec, queue,
 		// status) next to the state database.
 		srv.EnableLive(filepath.Join(filepath.Dir(dbPath), "cdc"), live.ExecLauncher{})
@@ -128,21 +133,40 @@ func init() {
 	serverCmd.Flags().String("log-level", "info", "Log level: debug, info, warn, error")
 }
 
+// logRingLines is how many recent log lines the server keeps in memory for
+// support bundles.
+const logRingLines = 20000
+
 // newLogger builds a slog.Logger that always writes text to stderr.
-// When logFile is set, it additionally writes JSON to that file.
-func newLogger(level, logFile string) *slog.Logger {
-	var lvl slog.Level
+// When logFile is set, it additionally writes JSON to that file. With ring,
+// every record at info or above (or the chosen level, if lower) is also kept
+// there for support bundles.
+func newLogger(level, logFile string, ring *logring.Ring) *slog.Logger {
+	l := newBaseLogger(level, logFile)
+	if ring == nil {
+		return l
+	}
+	ringLevel := slog.LevelInfo
+	if lvl := parseLevel(level); lvl < ringLevel {
+		ringLevel = lvl
+	}
+	return slog.New(logring.NewHandler(l.Handler(), ring, ringLevel, logring.SkipOKRequests))
+}
+
+func parseLevel(level string) slog.Level {
 	switch strings.ToLower(level) {
 	case "debug":
-		lvl = slog.LevelDebug
+		return slog.LevelDebug
 	case "warn":
-		lvl = slog.LevelWarn
+		return slog.LevelWarn
 	case "error":
-		lvl = slog.LevelError
-	default:
-		lvl = slog.LevelInfo
+		return slog.LevelError
 	}
+	return slog.LevelInfo
+}
 
+func newBaseLogger(level, logFile string) *slog.Logger {
+	lvl := parseLevel(level)
 	opts := &slog.HandlerOptions{Level: lvl}
 	textHandler := slog.NewTextHandler(os.Stderr, opts)
 
@@ -211,4 +235,3 @@ func xferdbContextPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".xferdb", "current_project")
 }
-

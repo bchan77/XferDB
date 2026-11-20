@@ -338,8 +338,10 @@ func (e *Engine) Run(ctx context.Context) error {
 						now := time.Now()
 						writeCtx := context.WithoutCancel(ctx)
 						status, kind, regStatus := adapters.StatusFailed, EventTableFailed, "failed"
+						errText := err.Error()
 						if ctx.Err() != nil {
 							status, kind, regStatus = adapters.StatusCancelled, EventTableCancelled, "cancelled"
+							errText = ""
 						}
 						// A lost status write leaves the table's previous status
 						// in migration_tables, which resume and validation go by,
@@ -348,6 +350,7 @@ func (e *Engine) Run(ctx context.Context) error {
 							TableName:   schema.Name,
 							Status:      status,
 							CompletedAt: &now,
+							Error:       errText,
 						}); werr != nil {
 							err = fmt.Errorf("%w (recording table as %s also failed: %v)", err, status, werr)
 						}

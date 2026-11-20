@@ -11,7 +11,7 @@ import (
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	ph := &handlers.ProjectsHandler{DB: s.db, Log: s.log}
+	ph := &handlers.ProjectsHandler{DB: s.db, Log: s.log, Logs: s.logs, LogFile: s.logFile}
 	mh := s.migrationsHandler()
 
 	// Health

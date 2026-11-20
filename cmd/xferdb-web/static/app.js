@@ -3110,7 +3110,7 @@ async function renderMigrationProgress(migId) {
   // stats, with the table list from the migration's own table records.
   async function historySnap(m, phase) {
     const tables = (m.tables || [])
-      .map((t) => ({ Name: t.table_name, Status: STATUS_TO_DETAIL[t.status] || t.status, Transferred: t.rows_transferred, Total: t.rows_total }))
+      .map((t) => ({ Name: t.table_name, Status: STATUS_TO_DETAIL[t.status] || t.status, Transferred: t.rows_transferred, Total: t.rows_total, Error: t.error || '' }))
       .sort((a, b) => a.Name.localeCompare(b.Name));
     const records = await api.getStatsHistory(migId);
     const last = records && records.length ? records[records.length - 1] : null;

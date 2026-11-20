@@ -5,6 +5,14 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Support bundles tell what happened, in order.** A bundle now has `timeline.json` (migrations,
+  tables with their errors, post-schema steps, schema overrides, progress phases, validations and
+  warning/error log lines, in time order), `logs.jsonl` (the server keeps its last 20,000 log
+  lines in memory, credentials masked, so a bundle has the log without `--log-file`; successful
+  HTTP requests are left out), each migration's run settings and post-schema steps, progress
+  samples, validation results, the schema plan for every source type (it held only MongoDB's) and a
+  `README.txt`. A failed table's error is now saved (`migration_tables.error`, `error` in the
+  migration's tables) and shown on a finished migration's page; before, it was only in the log.
 - **Resume a failed or cancelled migration.** A snapshot migration that failed (including one
   interrupted by a server restart) or was cancelled can be resumed from the migration page's
   *Resume* button, `xferdb resume [--table-workers N]` or `PATCH /api/v1/migrations/:id

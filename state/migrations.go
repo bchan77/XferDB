@@ -52,6 +52,7 @@ type tableProgressRow struct {
 	RowsTransferred int64        `db:"rows_transferred"`
 	StartedAt       sql.NullTime `db:"started_at"`
 	CompletedAt     sql.NullTime `db:"completed_at"`
+	Error           string       `db:"error"`
 }
 
 func (r *tableProgressRow) toTableProgress() adapters.TableProgress {
@@ -60,6 +61,7 @@ func (r *tableProgressRow) toTableProgress() adapters.TableProgress {
 		Status:          adapters.MigrationStatus(r.Status),
 		RowsTotal:       r.RowsTotal,
 		RowsTransferred: r.RowsTransferred,
+		Error:           r.Error,
 	}
 	if r.StartedAt.Valid {
 		t := r.StartedAt.Time
@@ -184,16 +186,17 @@ func (m *MetaDB) SetMigrationCancelled(ctx context.Context, id string) error {
 func (m *MetaDB) UpsertTableProgress(ctx context.Context, migrationID string, tp adapters.TableProgress) error {
 	_, err := m.db.ExecContext(ctx, `
 		INSERT INTO migration_tables
-		    (migration_id, table_name, status, rows_total, rows_transferred, started_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		    (migration_id, table_name, status, rows_total, rows_transferred, started_at, completed_at, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (migration_id, table_name) DO UPDATE SET
 		    status           = excluded.status,
 		    rows_total       = excluded.rows_total,
 		    rows_transferred = excluded.rows_transferred,
 		    started_at       = COALESCE(migration_tables.started_at, excluded.started_at),
-		    completed_at     = excluded.completed_at`,
+		    completed_at     = excluded.completed_at,
+		    error            = excluded.error`,
 		migrationID, tp.TableName, string(tp.Status),
-		tp.RowsTotal, tp.RowsTransferred, tp.StartedAt, tp.CompletedAt,
+		tp.RowsTotal, tp.RowsTransferred, tp.StartedAt, tp.CompletedAt, tp.Error,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert table progress: %w", err)
