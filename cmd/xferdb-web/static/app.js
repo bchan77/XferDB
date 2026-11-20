@@ -2347,22 +2347,6 @@ function mountMigSection(container, projectId, sourceType, targetType, getTables
     if (timer) { clearTimeout(timer); timer = null; }
   }
 
-  // The indexes and constraints built after the copy (post_schema), each
-  // with its timing; fetched while that phase runs and once when the
-  // migration has ended.
-  let schemaStepsFinal = false;
-  async function refreshSchemaSteps(phase) {
-    if (schemaStepsFinal) return;
-    const ended = ['complete', 'failed', 'cancelled'].includes(phase);
-    if (phase !== 'post_schema' && !ended) return;
-    try {
-      const steps = await api.getSchemaSteps(migId);
-      const el = document.getElementById('schemaStepsArea');
-      if (el) el.innerHTML = schemaStepsCard(steps, phase === 'post_schema');
-      if (ended) schemaStepsFinal = true;
-    } catch (err) { /* an older server has no such endpoint; show nothing */ }
-  }
-
   async function render() {
     if (stopped) return;
     container.innerHTML = `<div class="loading-block"><span class="spinner"></span> Loading migration status…</div>`;
@@ -2908,6 +2892,22 @@ async function renderMigrationProgress(migId) {
     if (timer) { clearTimeout(timer); timer = null; }
   }
 
+  // The indexes and constraints built after the copy (post_schema), each
+  // with its timing; fetched while that phase runs and once when the
+  // migration has ended.
+  let schemaStepsFinal = false;
+  async function refreshSchemaSteps(phase) {
+    if (schemaStepsFinal) return;
+    const ended = ['complete', 'failed', 'cancelled'].includes(phase);
+    if (phase !== 'post_schema' && !ended) return;
+    try {
+      const steps = await api.getSchemaSteps(migId);
+      const el = document.getElementById('schemaStepsArea');
+      if (el) el.innerHTML = schemaStepsCard(steps, phase === 'post_schema');
+      if (ended) schemaStepsFinal = true;
+    } catch (err) { /* an older server has no such endpoint; show nothing */ }
+  }
+
   function renderProgress(snap) {
     const actionsEl = document.getElementById('migActions');
     if (actionsEl) {
@@ -3152,6 +3152,8 @@ async function renderMigrationProgress(migId) {
   if (finishedStatuses.includes(mig.status)) {
     showValidation(false);
     if (isLive) renderLive();
+    // Its indexes and constraints, with their timings, stay viewable.
+    refreshSchemaSteps(mig.status === 'completed' ? 'complete' : mig.status);
     try {
       renderProgress(await historySnap(mig));
     } catch (err) {
