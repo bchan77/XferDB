@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ type ddlTarget struct {
 	overlap  []string
 	order    []string // kind:name, in the order they ran
 	failOnce map[string]bool
+	failErr  error // what a failOnce statement fails with (default: a DDL conflict)
 }
 
 func (t *ddlTarget) enter(kind, name string, tables ...string) error {
@@ -40,6 +42,9 @@ func (t *ddlTarget) enter(kind, name string, tables ...string) error {
 		t.busy[tb]--
 	}
 	t.mu.Unlock()
+	if fail && t.failErr != nil {
+		return t.failErr
+	}
 	if fail {
 		return errors.New(`pq: DDL transaction x cannot continue as table carts is undergoing DDL transaction verification for y: TABLE_SCHEMA_CHANGE_IN_PROGRESS (XX000)`)
 	}
@@ -127,8 +132,51 @@ func TestPostSchemaFailureRecorded(t *testing.T) {
 	}
 }
 
-type failingDDLTarget struct{ devNullTarget }
+type failingDDLTarget struct {
+	devNullTarget
+	msg string
+}
 
-func (failingDDLTarget) CreateIndexes(context.Context, string, []adapters.IndexDef) error {
+func (f failingDDLTarget) CreateIndexes(context.Context, string, []adapters.IndexDef) error {
+	if f.msg != "" {
+		return errors.New(f.msg)
+	}
 	return errors.New("pq: could not create unique index (23505)")
+}
+
+// YugabyteDB can abort an online index build with "Restart read required"
+// (40001); the index is created on the next attempt instead of failing the
+// migration. An error that won't go away still fails it at once.
+func TestPostSchemaRetriesRestartRead(t *testing.T) {
+	tgt := &ddlTarget{busy: map[string]int{}, failOnce: map[string]bool{"categories_slug_uk": true},
+		failErr: errors.New("create index categories_slug_uk on categories: pq: Restart read required (40001)")}
+	eng, db, cleanup := newTestEngine(t, &offsetSource{}, tgt)
+	defer cleanup()
+	ctx := context.Background()
+	tables := []adapters.TableSchema{{Name: "categories", Indexes: []adapters.IndexDef{{Name: "categories_slug_uk"}}}}
+	if err := eng.createPostSchema(ctx, tables, 2); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ := db.ListSchemaSteps(ctx, eng.migrationID)
+	if len(steps) != 1 || steps[0].Status != "done" || steps[0].Attempts != 2 {
+		t.Errorf("steps %+v, want one done in 2 attempts", steps)
+	}
+
+	for _, msg := range []string{"pq: could not create unique index (23505)", "pq: syntax error (42601)"} {
+		if isRetryableDDL(errors.New(msg)) {
+			t.Errorf("%q retried", msg)
+		}
+	}
+}
+
+// The error names the statement once, not once from the adapter and again
+// from the engine.
+func TestPostSchemaErrorNamesStatementOnce(t *testing.T) {
+	tgt := &failingDDLTarget{msg: "create index t_ix on t: pq: boom (XX000)"}
+	eng, _, cleanup := newTestEngine(t, &offsetSource{}, tgt)
+	defer cleanup()
+	err := eng.createPostSchema(context.Background(), []adapters.TableSchema{{Name: "t", Indexes: []adapters.IndexDef{{Name: "t_ix"}}}}, 1)
+	if err == nil || strings.Count(err.Error(), "create index t_ix on t") != 1 {
+		t.Errorf("error %v, want the statement named once", err)
+	}
 }
