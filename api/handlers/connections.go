@@ -17,6 +17,12 @@ import (
 // packets fails the request in seconds instead of hanging the form.
 const listDatabasesTimeout = 10 * time.Second
 
+// createDatabaseTimeout bounds CREATE DATABASE itself (connecting is still
+// bounded by listDatabasesTimeout). PostgreSQL 15+ copies the template
+// through the WAL and fsyncs it, which took over 10s on slow (NFS) storage,
+// and a timeout cancels the statement, so the database is never created.
+const createDatabaseTimeout = 2 * time.Minute
+
 // listDatabasesRequest is the body of POST /api/v1/connections/databases.
 // ProjectID and Side are optional: the project settings form never shows the
 // stored password, so it sends them to have an empty password filled from the
@@ -298,7 +304,7 @@ func (h *ProjectsHandler) CreateTargetDatabase(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), listDatabasesTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), createDatabaseTimeout)
 	defer cancel()
 	if err := createDatabase(ctx, cfg); err != nil {
 		h.Log.Info("project.create_target_database", "project_id", id, "database", cfg.Database, "error", err)
@@ -335,7 +341,7 @@ func (h *ProjectsHandler) CreateDatabase(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), listDatabasesTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), createDatabaseTimeout)
 	defer cancel()
 	if err := createDatabase(ctx, cfg); err != nil {
 		h.Log.Info("connection.create_database", "type", cfg.Type, "host", cfg.Host, "database", cfg.Database, "error", err)
@@ -356,7 +362,10 @@ func createDatabase(ctx context.Context, cfg adapters.ConnectionConfig) error {
 			return err
 		}
 		defer tgt.Close()
-		if err := tgt.Connect(ctx, c); err != nil {
+		connectCtx, cancel := context.WithTimeout(ctx, listDatabasesTimeout)
+		err = tgt.Connect(connectCtx, c)
+		cancel()
+		if err != nil {
 			return err
 		}
 		creator, ok := tgt.(adapters.DatabaseCreator)
@@ -371,6 +380,9 @@ func friendlyCreateDatabaseError(err error) string {
 	msg := err.Error()
 	if strings.Contains(msg, "42501") || strings.Contains(msg, "Error 1044") || strings.Contains(msg, "permission denied") {
 		return msg + " — this user may not create databases: ask an administrator to create it, or to let this user create databases"
+	}
+	if strings.Contains(msg, "57014") || errors.Is(err, context.DeadlineExceeded) {
+		return msg + " — the server took longer than " + createDatabaseTimeout.String() + " and the database was not created: create it on the server, then test the connection again"
 	}
 	return friendlyConnectError(err)
 }
