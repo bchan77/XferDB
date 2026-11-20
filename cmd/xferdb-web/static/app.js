@@ -2856,10 +2856,19 @@ async function renderMigrationProgress(migId) {
     app.innerHTML = errorBanner('Migration not found: ' + err.message) + `<a class="btn" href="#/">Back to projects</a>`;
     return;
   }
+  // The project's name heads the page; a failed lookup only loses the name.
+  let projectName = '';
+  try {
+    projectName = (await api.getProject(mig.project_id)).name || '';
+  } catch (err) { /* keep the page usable */ }
+  document.title = projectName ? `XferDB — ${projectName} migration ${migId.slice(0, 8)}` : 'XferDB — Migration';
   app.innerHTML = `
-    <div class="breadcrumb"><a href="#/">Projects</a> / <a href="#/projects/${encodeURIComponent(mig.project_id)}">Project</a> / Migration</div>
+    <div class="breadcrumb"><a href="#/">Projects</a> / <a href="#/projects/${encodeURIComponent(mig.project_id)}">${esc(projectName || 'Project')}</a> / Migration</div>
     <div class="page-header">
-      <div><h1 class="mono">${esc(migId.slice(0, 8))}</h1><div class="sub">Migration progress</div></div>
+      <div>
+        <h1>${esc(projectName || 'Migration')}</h1>
+        <div class="sub">Migration <span class="mono">${esc(migId.slice(0, 8))}</span> · progress</div>
+      </div>
       <div class="actions-row" id="migActions"></div>
     </div>
     ${mig.mode === 'live' ? '<div class="card" id="liveArea"></div>' : ''}
