@@ -1493,6 +1493,41 @@ function analysisBadge(t) {
   };
 }
 
+// tableAnalysisBox explains, at the top of a table's page, what the tables
+// list's badge summarises: every difference between the source table and the
+// target's, with what the migration does about it.
+function tableAnalysisBox(a) {
+  if (!a) return '';
+  const issues = a.Issues || [];
+  if (a.Status === 'new') {
+    return '<div class="card analysis-box"><strong>Not on the target yet</strong><div class="hint">The migration creates it with the target types shown below.</div></div>';
+  }
+  if (!issues.length) {
+    return '<div class="card analysis-box ok"><strong>Matches the target</strong><div class="hint">Every source column exists on the target with the same type; the rows are copied as they are.</div></div>';
+  }
+  const label = { error: 'blocks the copy', warning: 'differs', info: 'note' };
+  const rows = issues.map((i) => {
+    let what;
+    switch (i.Type) {
+      case 'type_mismatch':
+        what = `<span class="mono">${esc(i.Column)}</span>: source <span class="mono">${esc(i.SourceType)}</span> → target <span class="mono">${esc(i.TargetType)}</span>`;
+        break;
+      case 'missing_column':
+        what = `<span class="mono">${esc(i.Column)}</span> (<span class="mono">${esc(i.SourceType)}</span>) isn’t on the target`;
+        break;
+      default:
+        what = esc(issueText(i));
+    }
+    return `<li><span class="badge ${i.Severity === 'error' ? 'fail' : 'warn'}">${esc(label[i.Severity] || i.Severity)}</span> ${what}${i.Suggestion ? `<div class="hint">${esc(i.Suggestion)}</div>` : ''}</li>`;
+  }).join('');
+  const errors = issues.filter((i) => i.Severity === 'error').length;
+  return `<div class="card analysis-box ${errors ? 'fail' : 'warn'}">
+    <strong>${issues.length} difference${issues.length > 1 ? 's' : ''} from the target table</strong>
+    <div class="hint">The target table already exists, so rows are written into its columns as they are; a type is only changed if the migration runs with “Drop &amp; recreate target tables”.</div>
+    <ul class="analysis-issues">${rows}</ul>
+  </div>`;
+}
+
 function issueText(i) {
   switch (i.Type) {
     case 'missing_table': return 'not on the target';
@@ -1834,6 +1869,7 @@ async function renderRelationalSplit(area, id, tableName, locked, targetDialect)
   tgtCols.forEach((c) => { tgtByName[c.name] = c; });
   const overrideByField = {};
   (plan[tableName] || []).forEach((r) => { overrideByField[r.field_name] = r; });
+  const analysisBox = tableAnalysisBox(schema.analysis);
 
   // Normalize each source column into a SchemaPlanRow-shaped row: a saved
   // override wins, else the existing target column (table already exists on
@@ -1854,6 +1890,7 @@ async function renderRelationalSplit(area, id, tableName, locked, targetDialect)
 
   if (locked || rows.length === 0) {
     area.innerHTML = `
+      ${analysisBox}
       ${!tgtExists ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created automatically when the migration runs.</div>' : ''}
       <div class="split"><h3>Source</h3><h3>Target ${tgtExists ? '' : '(not yet created)'}</h3></div>
       <div class="schema-rows">
@@ -1869,6 +1906,7 @@ async function renderRelationalSplit(area, id, tableName, locked, targetDialect)
 
   const hasOverrides = rows.some((r) => r.overridden);
   area.innerHTML = `
+    ${analysisBox}
     ${!tgtExists
       ? '<div class="banner info">This table doesn’t exist on the target yet — it will be created with these settings when the migration runs.</div>'
       : '<div class="banner info">This table already exists on the target. Type overrides only take effect if the migration is run with "Drop &amp; recreate target tables".</div>'}

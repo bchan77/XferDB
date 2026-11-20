@@ -373,6 +373,10 @@ func (h *ProjectsHandler) GetTableSchema(w http.ResponseWriter, r *http.Request)
 	var result struct {
 		Source *adapters.TableSchema `json:"source"`
 		Target *adapters.TableSchema `json:"target"`
+		// Analysis is the source table compared with the target's, as the
+		// project's analyze reports it (the tables list's badge); absent
+		// when either side couldn't be read.
+		Analysis *analyzer.TableAnalysis `json:"analysis,omitempty"`
 	}
 
 	if src, err := connectSource(ctx, p.SourceConfig); err == nil {
@@ -383,6 +387,10 @@ func (h *ProjectsHandler) GetTableSchema(w http.ResponseWriter, r *http.Request)
 		if err := tgt.Connect(ctx, p.TargetConfig); err == nil {
 			defer tgt.Close()
 			result.Target, _ = tgt.GetSchema(ctx, table)
+			if result.Source != nil {
+				a := analyzer.AnalyzeTable(result.Source, result.Target)
+				result.Analysis = &a
+			}
 		}
 	}
 

@@ -336,3 +336,12 @@ table.schema-steps { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.schema-steps th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
 table.schema-steps td { padding: 5px 8px 5px 0; vertical-align: top; white-space: nowrap; }
 table.schema-steps td.schema-step-error { color: var(--danger); white-space: normal; padding-top: 0; }
+
+/* Table page: differences from the target table (tableAnalysisBox) */
+.analysis-box { border-left: 4px solid var(--border); }
+.analysis-box.ok { border-left-color: var(--ok, #16a34a); }
+.analysis-box.warn { border-left-color: var(--warn, #d97706); }
+.analysis-box.fail { border-left-color: var(--danger); }
+ul.analysis-issues { list-style: none; padding: 0; margin: 8px 0 0; }
+ul.analysis-issues li { padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; }
+ul.analysis-issues li:first-child { border-top: none; }
