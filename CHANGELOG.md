@@ -4,43 +4,14 @@ All notable changes to XferDB are documented here.
 
 ## [Unreleased]
 
-### Changed
-- **The migration page names its project.** It is headed by the project's name (the breadcrumb said
-  only "Project" and the heading was the migration ID), with "Migration <id> · progress" under it,
-  and the browser tab title names both.
+## [1.3.0] - 2026-11-20
 
-### Fixed
-- **A migration paused when the server restarted can be resumed.** On startup the server failed
-  only pending and running migrations ("interrupted by server restart"); a paused one stayed
-  paused with no engine behind it: Resume answered 409, Cancel 404, it blocked new migrations of
-  its project, and its page repeated "Stats fetch failed: no stats collector for migration" every
-  1.5 seconds. It is now failed like the others, so *Resume* continues it from its checkpoints. The
-  migration page shows one stats error instead of a growing stack, switches to the finished view
-  when the migration ends meanwhile, and shows a finished migration's own status rather than its
-  last progress sample's (which showed *paused* with Pause/Cancel buttons).
-- **YugabyteDB "Restart read required" no longer fails post-schema.** Creating an index on a table
-  with rows can be aborted by YugabyteDB with `Restart read required (40001)`; such a statement (and
-  a deadlock, 40P01) is now retried like a DDL conflict. An index whose build failed or was
-  cancelled is left behind *invalid* (never used; a unique one enforces nothing), and creating it
-  again used to keep it as if done: it is now dropped and rebuilt, on PostgreSQL too. The error no
-  longer names the statement twice.
-- **Create database no longer gives up after 10 seconds.** *Create database* (project settings and
-  the connection editor) shared the 10-second timeout of *Load databases*. PostgreSQL 15+ copies the
-  template database through the WAL and syncs it to disk, which took 13s on NFS-backed storage, and
-  the timeout cancelled the statement (`57014`), so the database was never created. `CREATE
-  DATABASE` now has 2 minutes; connecting is still limited to 10 seconds. If it does time out, the
-  error says the database was not created.
-- **Oracle foreign keys between differently declared NUMBER columns are created.** Oracle lets a
-  foreign key column differ from the key it references (`NUMBER(19)` referencing an identity
-  column, migrated as `bigint`; `NUMBER(19)` referencing `NUMBER(10)`). Mapped separately, one side
-  became `numeric(19)` and the other `bigint`, and PostgreSQL/YugabyteDB refused the foreign key
-  (`foreign key constraint ... cannot be implemented`, 42804). A `NUMBER` foreign key column now
-  takes the type of the column it references (following chains of keys).
-- **Index builds on YugabyteDB no longer hang for 15 minutes and fail.** Post-schema built indexes
-  on several tables at once; YugabyteDB's online builds wait for each other's sessions until
-  `yb_wait_for_backends_catalog_version_timeout`, then fail with `timed out waiting for postgres
-  backends to catch up (XX000)`, even on an 80-row table. On a YugabyteDB target, indexes and
-  constraints are now created one at a time, as pg_dump post-data already was.
+Oracle as a migration source (copy and live, beta), live migration from MongoDB (beta), and
+failed migrations that resume where they stopped; identity columns carried over, validation in
+parallel, and many YugabyteDB index and constraint fixes. Upgrading from 1.2.0 needs no
+configuration changes, but two things behave differently: `xferdb migrate` now runs with the
+project's saved transfer settings unless a flag, `XFERDB_*` variable or config file sets them
+(#172), and identity / auto-increment columns are created as such on the target (#194).
 
 ### Added
 - **Support bundles tell what happened, in order.** A bundle now has `timeline.json` (migrations,
@@ -102,6 +73,9 @@ All notable changes to XferDB are documented here.
   fails the migration. See `docs/LIVE_MIGRATION.md`.
 
 ### Changed
+- **The migration page names its project.** It is headed by the project's name (the breadcrumb said
+  only "Project" and the heading was the migration ID), with "Migration <id> · progress" under it,
+  and the browser tab title names both.
 - **Much faster single-worker copies and Oracle reads.** A table copied with one segment worker
   (the default) was read with `OFFSET`, which makes the source skip every earlier row for each
   batch, so its cost grew with the square of the table's size. It is now read by primary key
@@ -124,6 +98,37 @@ All notable changes to XferDB are documented here.
   progress step `reading_source` / `reading_target` is now a single `reading` step.
 
 ### Fixed
+- **A migration paused when the server restarted can be resumed.** On startup the server failed
+  only pending and running migrations ("interrupted by server restart"); a paused one stayed
+  paused with no engine behind it: Resume answered 409, Cancel 404, it blocked new migrations of
+  its project, and its page repeated "Stats fetch failed: no stats collector for migration" every
+  1.5 seconds. It is now failed like the others, so *Resume* continues it from its checkpoints. The
+  migration page shows one stats error instead of a growing stack, switches to the finished view
+  when the migration ends meanwhile, and shows a finished migration's own status rather than its
+  last progress sample's (which showed *paused* with Pause/Cancel buttons).
+- **YugabyteDB "Restart read required" no longer fails post-schema.** Creating an index on a table
+  with rows can be aborted by YugabyteDB with `Restart read required (40001)`; such a statement (and
+  a deadlock, 40P01) is now retried like a DDL conflict. An index whose build failed or was
+  cancelled is left behind *invalid* (never used; a unique one enforces nothing), and creating it
+  again used to keep it as if done: it is now dropped and rebuilt, on PostgreSQL too. The error no
+  longer names the statement twice.
+- **Create database no longer gives up after 10 seconds.** *Create database* (project settings and
+  the connection editor) shared the 10-second timeout of *Load databases*. PostgreSQL 15+ copies the
+  template database through the WAL and syncs it to disk, which took 13s on NFS-backed storage, and
+  the timeout cancelled the statement (`57014`), so the database was never created. `CREATE
+  DATABASE` now has 2 minutes; connecting is still limited to 10 seconds. If it does time out, the
+  error says the database was not created.
+- **Oracle foreign keys between differently declared NUMBER columns are created.** Oracle lets a
+  foreign key column differ from the key it references (`NUMBER(19)` referencing an identity
+  column, migrated as `bigint`; `NUMBER(19)` referencing `NUMBER(10)`). Mapped separately, one side
+  became `numeric(19)` and the other `bigint`, and PostgreSQL/YugabyteDB refused the foreign key
+  (`foreign key constraint ... cannot be implemented`, 42804). A `NUMBER` foreign key column now
+  takes the type of the column it references (following chains of keys).
+- **Index builds on YugabyteDB no longer hang for 15 minutes and fail.** Post-schema built indexes
+  on several tables at once; YugabyteDB's online builds wait for each other's sessions until
+  `yb_wait_for_backends_catalog_version_timeout`, then fail with `timed out waiting for postgres
+  backends to catch up (XX000)`, even on an 80-row table. On a YugabyteDB target, indexes and
+  constraints are now created one at a time, as pg_dump post-data already was.
 - **Analyze no longer reports one type spelled two ways as a difference.** `varchar(10)` vs
   `character varying(10)`, `numeric(19)` vs `numeric(19,0)`, `timestamp(6)` vs `timestamp without
   time zone` and the like (an Oracle source against a PostgreSQL/YugabyteDB target showed them on
