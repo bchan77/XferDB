@@ -249,3 +249,19 @@ func (m *MetaDB) DeleteMigration(ctx context.Context, id string) error {
 
 	return tx.Commit()
 }
+
+// ReopenMigration moves a failed or cancelled migration back to pending to
+// run it again (resume): its error and end time are cleared, its tables'
+// progress and checkpoints kept. It reports false when the migration isn't
+// failed or cancelled (any more).
+func (m *MetaDB) ReopenMigration(ctx context.Context, id string) (bool, error) {
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE migrations SET status = ?, error = '', completed_at = NULL
+		 WHERE id = ? AND status IN (?, ?)`,
+		string(adapters.StatusPending), id, string(adapters.StatusFailed), string(adapters.StatusCancelled))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}

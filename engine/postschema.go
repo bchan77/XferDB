@@ -70,14 +70,36 @@ func (e *Engine) runSchemaJobs(ctx context.Context, tables []adapters.TableSchem
 	if total == 0 {
 		return nil
 	}
+	skipped := 0
 	if e.migrationID != "" {
-		// Steps a restart left running are over.
+		// Steps a restart left running are over; steps an earlier run of
+		// this migration (resumed) finished aren't run again.
 		_ = e.db.MarkSchemaStepsInterrupted(ctx, e.migrationID, time.Now())
+		if steps, err := e.db.ListSchemaSteps(ctx, e.migrationID); err == nil {
+			done := map[string]bool{}
+			for _, st := range steps {
+				if st.Status == "done" {
+					done[st.Kind+"\x00"+st.Table+"\x00"+st.Name] = true
+				}
+			}
+			keep := func(jobs []schemaJob) []schemaJob {
+				var out []schemaJob
+				for _, j := range jobs {
+					if done[j.kind+"\x00"+j.table+"\x00"+j.name] {
+						skipped++
+						continue
+					}
+					out = append(out, j)
+				}
+				return out
+			}
+			indexes, constraints = keep(indexes), keep(constraints)
+		}
 	}
 	if workers < 1 {
 		workers = 1
 	}
-	p := &schemaProgress{total: total, locks: map[string]*sync.Mutex{}}
+	p := &schemaProgress{total: total, done: skipped, locks: map[string]*sync.Mutex{}}
 	for _, stage := range [][]schemaJob{indexes, constraints} {
 		if err := e.runSchemaStage(ctx, stage, workers, p); err != nil {
 			return err

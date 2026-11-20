@@ -208,7 +208,7 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 		// while it streams, differences would only be lag.
 		validationMode = validate.ModeOff
 	}
-	h.launch(mig, p, validationMode, validationLevel)
+	h.launch(mig, p, validationMode, validationLevel, false)
 
 	// The effective validation settings tell the client whether to wait for
 	// a validation once the migration completes.
@@ -222,9 +222,12 @@ func (h *MigrationsHandler) StartMigration(w http.ResponseWriter, r *http.Reques
 // launch runs a migration's engine in the background, with its stats
 // collector, metrics and validation; for a live migration, the snapshot,
 // after which the stream carries on under h.Live.
-func (h *MigrationsHandler) launch(mig *adapters.Migration, p *adapters.Project, validationMode, validationLevel string) {
+func (h *MigrationsHandler) launch(mig *adapters.Migration, p *adapters.Project, validationMode, validationLevel string, resume bool) {
 	migrationID, projectID := mig.ID, p.ID
 	eng := engine.New(migrationID, p, h.DB)
+	if resume {
+		eng.SetResume()
+	}
 
 	// Normalise effective config values so the display reflects what the engine will use.
 	effectiveBatchSize := p.TransferConfig.BatchSize
@@ -261,6 +264,7 @@ func (h *MigrationsHandler) launch(mig *adapters.Migration, p *adapters.Project,
 	}
 	migLog.Info("migration.started",
 		"mode", mig.Mode,
+		"resume", resume,
 		"tables", tables,
 		"table_workers", effectiveTableWorkers,
 		"segment_workers", effectiveSegmentWorkers,
@@ -405,7 +409,7 @@ func (h *MigrationsHandler) ResumeLive(ctx context.Context) {
 			}
 		default:
 			mode, level := validate.ModeOff, p.TransferConfig.ValidationLevel
-			h.launch(mig, p, mode, level)
+			h.launch(mig, p, mode, level, false)
 		}
 		h.Log.Info("live.resumed", "migration_id", mig.ID, "phase", mig.Phase)
 	}
@@ -460,6 +464,10 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 
 	var body struct {
 		Action string `json:"action"`
+		// TableWorkers optionally changes a resumed run's table workers;
+		// every other setting stays as the run began (its checkpoints
+		// depend on them).
+		TableWorkers int `json:"table_workers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -474,6 +482,10 @@ func (h *MigrationsHandler) PatchMigration(w http.ResponseWriter, r *http.Reques
 	// resumed and cancelled through h.Live; until then, through its engine.
 	if !ok && h.Live != nil && h.Live.Active(id) {
 		h.patchLive(w, r.Context(), id, body.Action)
+		return
+	}
+	if !ok && body.Action == "resume" {
+		h.resumeEnded(w, r.Context(), id, body.TableWorkers)
 		return
 	}
 	if !ok {
@@ -684,4 +696,74 @@ func (h *MigrationsHandler) GetSchemaSteps(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, steps)
+}
+
+// resumeEnded runs a failed or cancelled snapshot migration again under the
+// same id and settings (engine.SetResume): completed tables are skipped, the
+// rest continue from their checkpoints, and post-schema skips what is done.
+// A live migration can't be resumed this way: its stream is gone.
+func (h *MigrationsHandler) resumeEnded(w http.ResponseWriter, ctx context.Context, id string, tableWorkers int) {
+	mig, err := h.DB.GetMigration(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "migration not found")
+		return
+	}
+	if mig.Mode == adapters.MigrationModeLive {
+		writeError(w, http.StatusConflict, "a live migration that failed or was cancelled can't be resumed: its stream was torn down; start a new one")
+		return
+	}
+	if mig.Status != adapters.StatusFailed && mig.Status != adapters.StatusCancelled {
+		writeError(w, http.StatusConflict, fmt.Sprintf("migration %s is %s; only a failed or cancelled one can be resumed", id, mig.Status))
+		return
+	}
+	others, err := h.DB.ListMigrations(ctx, mig.ProjectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, m := range others {
+		if m.ID != id && (m.Status == adapters.StatusPending || m.Status == adapters.StatusInProgress || m.Status == adapters.StatusPaused) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("migration %s is %s for this project; wait for it to finish first", m.ID, m.Status))
+			return
+		}
+	}
+	// The run's own settings (saved when it started), not the project's
+	// current ones.
+	p, err := live.ProjectFor(ctx, h.DB, mig)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tableWorkers > 0 && tableWorkers != p.TransferConfig.TableWorkers {
+		p.TransferConfig.TableWorkers = tableWorkers
+		if err := h.DB.SetRunConfig(ctx, id, p.TransferConfig); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	ok, err := h.DB.ReopenMigration(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusConflict, "migration was resumed or changed meanwhile")
+		return
+	}
+	mig.Status = adapters.StatusPending
+	validationMode := p.TransferConfig.Validation
+	if validationMode == "" {
+		validationMode = validate.DefaultMode
+	}
+	validationLevel := p.TransferConfig.ValidationLevel
+	if validationLevel == "" {
+		validationLevel = validate.DefaultLevel
+	}
+	h.launch(mig, p, validationMode, validationLevel, true)
+	h.Log.Info("migration.resumed_after_end", "migration_id", id, "was", "failed or cancelled")
+	writeJSON(w, http.StatusAccepted, struct {
+		*adapters.Migration
+		Validation      string `json:"validation"`
+		ValidationLevel string `json:"validation_level"`
+	}{mig, validationMode, validationLevel})
 }

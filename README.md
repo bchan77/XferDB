@@ -364,6 +364,11 @@ xferdb leftovers [drop NAME]              # streams left on the source by ended 
 # Cancel the running migration (keeps history, preserves checkpoints)
 xferdb migrate --cancel
 
+# Resume a failed or cancelled migration (snapshot mode): completed tables are skipped,
+# the rest continue from their checkpoints, nothing is dropped or truncated, and only the
+# indexes/constraints not created yet are run. Also the web UI's Resume button.
+xferdb resume [--table-workers N]
+
 # Migrate N tables in parallel (inter-table)
 xferdb migrate --table-workers 5
 
