@@ -2057,6 +2057,12 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea, live = fa
   const buttons = [];
   if (['in_progress', 'schema', 'post_schema'].includes(phase)) buttons.push('<button class="btn" id="pauseBtn">Pause</button>');
   if (phase === 'paused') buttons.push('<button class="btn primary" id="resumeBtn">Resume</button>');
+  // A failed or cancelled snapshot migration runs again under its own id:
+  // completed tables are skipped, the rest continue from their checkpoints.
+  // A live one's stream is gone, so it can't.
+  if (!live && ['failed', 'cancelled'].includes(phase)) {
+    buttons.push('<button class="btn primary" id="resumeEndedBtn" title="Run it again: completed tables are skipped, the rest continue from where they stopped, then the indexes and constraints not yet created">Resume</button>');
+  }
   if (!['complete', 'failed', 'cancelled'].includes(phase)) buttons.push('<button class="btn danger" id="cancelBtn">Cancel</button>');
   actionsEl.innerHTML = buttons.join(' ');
 
@@ -2073,13 +2079,25 @@ function mountMigActions(actionsEl, migId, phase, { onDone, errorArea, live = fa
   if (pauseBtn) pauseBtn.addEventListener('click', () => doAction('pause'));
   const resumeBtn = actionsEl.querySelector('#resumeBtn');
   if (resumeBtn) resumeBtn.addEventListener('click', () => doAction('resume'));
+  const resumeEndedBtn = actionsEl.querySelector('#resumeEndedBtn');
+  if (resumeEndedBtn) resumeEndedBtn.addEventListener('click', async () => {
+    resumeEndedBtn.disabled = true;
+    try {
+      await api.patchMigration(migId, 'resume');
+      // The page stopped polling when the run ended: start it over.
+      window.location.reload();
+    } catch (err) {
+      resumeEndedBtn.disabled = false;
+      if (errorArea) errorArea.insertAdjacentHTML('afterbegin', errorBanner('resume failed: ' + err.message));
+    }
+  });
   const cancelBtn = actionsEl.querySelector('#cancelBtn');
   if (cancelBtn) cancelBtn.addEventListener('click', async () => {
     const ok = await confirmModal({
       title: live ? 'Cancel live migration?' : 'Cancel migration?',
       body: live
         ? 'This stops streaming changes and removes the stream from the source (on PostgreSQL and YugabyteDB it drops the replication slot). Rows already written to the target are kept, but the run is marked cancelled and cannot be resumed.'
-        : 'This stops the migration. Rows already written are kept, but the run is marked cancelled and cannot be resumed.',
+        : 'This stops the migration. Rows already written are kept; the run is marked cancelled, and you can resume it later from where it stopped.',
       confirmLabel: 'Cancel Migration',
       danger: true,
     });
@@ -2858,6 +2876,7 @@ async function renderMigrationProgress(migId) {
       mountMigActions(actionsEl, migId, snap.Phase, {
         onDone: () => { clearTimer(); tick(); },
         errorArea: document.getElementById('progressArea'),
+        live: isLive,
       });
     }
     const rows = snap.Rows || {};

@@ -5,6 +5,13 @@ All notable changes to XferDB are documented here.
 ## [Unreleased]
 
 ### Added
+- **Resume a failed or cancelled migration.** A snapshot migration that failed (including one
+  interrupted by a server restart) or was cancelled can be resumed from the migration page's
+  *Resume* button, `xferdb resume [--table-workers N]` or `PATCH /api/v1/migrations/:id
+  {"action":"resume"}`. It runs again under the same id and settings: completed tables are skipped,
+  the others continue from their checkpoints, nothing on the target is dropped or truncated (even
+  with *Recreate schema*), COPY mode is off, and post-schema runs only the indexes and constraints
+  not yet created. A live migration can't be resumed this way (its stream is gone).
 - **Index and constraint progress after the copy.** The post-schema phase now records every index,
   foreign key and check constraint as a step with its start, end, attempts and any error
   (`GET /api/v1/migrations/:id/schema-steps`, kept after the run), logs each with its duration

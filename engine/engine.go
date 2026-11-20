@@ -40,7 +40,21 @@ type Engine struct {
 
 	// live, when set, makes this run a live migration's snapshot.
 	live *Live
+
+	// resume makes this run continue a failed or cancelled migration
+	// (SetResume).
+	resume bool
 }
+
+// SetResume makes Run continue a migration that failed or was cancelled,
+// with the same id and settings. When the earlier run got as far as copying
+// rows (any table has progress), Run leaves the target's tables as they are:
+// no drop, recreate or truncate, and no COPY mode (which needs empty
+// tables); tables still missing are created. Completed tables are skipped,
+// the others continue from their checkpoints, and post-schema skips the
+// statements recorded as done. A run that failed before copying anything
+// starts over as it began. Call before Run.
+func (e *Engine) SetResume() { e.resume = true }
 
 // OnTableDone registers fn to be called, from the engine's worker goroutine,
 // each time a table finishes transferring and is recorded as completed. fn
@@ -166,6 +180,17 @@ func (e *Engine) Run(ctx context.Context) error {
 	dataOnly := cfg.DataOnly
 	schemaOnly := cfg.SchemaOnly
 
+	// A resumed run that copied rows before keeps the target's tables.
+	existingProgress, err := e.db.GetTableProgress(ctx, e.migrationID)
+	if err != nil {
+		return e.fail(ctx, err)
+	}
+	resuming := e.resume && len(existingProgress) > 0
+	started := make(map[string]bool, len(existingProgress))
+	for _, tp := range existingProgress {
+		started[tp.TableName] = true
+	}
+
 	// Relational sources have no automatic schema-plan seeding (only the Mongo
 	// analyze path calls SavePlan), but a user can still save column-type
 	// overrides directly from the table split view via schema-plan overrides.
@@ -188,10 +213,16 @@ func (e *Engine) Run(ctx context.Context) error {
 	// column-type overrides for this project — pg_dump bypasses CreateTable
 	// entirely, so overrides would otherwise be silently ignored.
 	// Skipped entirely for --truncate (schema already exists on target).
+	if resuming {
+		// pg_dump's pre-data can't run over existing tables (and with
+		// recreate_schema would drop them): only learn whether the first run
+		// used it, so post-schema takes the same path.
+		nativeSchema = !dataOnly && !cfg.Truncate && nativeSchemaFor(e.project, relationalPlan)
+	}
 	if !dataOnly && !cfg.Truncate {
 		e.emit(ProgressEvent{Kind: EventSchemaPhase, Timestamp: time.Now()})
 
-		if adapters.PostgresFamily(e.project.SourceConfig.Type) && adapters.PostgresFamily(e.project.TargetConfig.Type) && len(relationalPlan) == 0 {
+		if !resuming && adapters.PostgresFamily(e.project.SourceConfig.Type) && adapters.PostgresFamily(e.project.TargetConfig.Type) && len(relationalPlan) == 0 {
 			ok, err := e.pgDumpPreData(ctx, e.project.SourceConfig, e.project.TargetConfig, cfg.RecreateSchema)
 			if err != nil {
 				return e.fail(ctx, fmt.Errorf("pg_dump pre-data: %w", err))
@@ -216,7 +247,7 @@ func (e *Engine) Run(ctx context.Context) error {
 				if e.live != nil && e.project.SourceConfig.Type == "mongodb" {
 					schema = nullableColumns(schema)
 				}
-				if cfg.RecreateSchema {
+				if cfg.RecreateSchema && !(resuming && started[schema.Name]) {
 					if err := e.target.DropTable(ctx, schema.Name); err != nil {
 						return e.fail(ctx, fmt.Errorf("drop table %s: %w", schema.Name, err))
 					}
@@ -238,11 +269,16 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	if !schemaOnly {
 		// Phase 2: Data — transfer rows for each table, skipping already-complete ones.
-		existingProgress, err := e.db.GetTableProgress(ctx, e.migrationID)
-		if err != nil {
-			return e.fail(ctx, err)
-		}
 		doneSet := completedTableSet(existingProgress)
+		if resuming {
+			// The tables the earlier run completed show as done.
+			for _, tp := range existingProgress {
+				if tp.Status == adapters.StatusCompleted {
+					e.emit(ProgressEvent{Kind: EventTableDone, TableName: tp.TableName,
+						RowsTransferred: tp.RowsTransferred, RowsTotal: tp.RowsTotal, Timestamp: time.Now()})
+				}
+			}
+		}
 
 		// Truncate requested: clear existing data before loading.
 		// With native pg_dump schema (--recreate-schema), tables are dropped and
@@ -250,7 +286,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		// DropTable+CreateTable also leaves tables empty. Either way, skip truncate.
 		if cfg.Truncate && !cfg.RecreateSchema {
 			for _, schema := range tables {
-				if !doneSet[schema.Name] {
+				// A table a resumed run already wrote to keeps its rows: its
+				// checkpoints count them.
+				if !doneSet[schema.Name] && !(resuming && started[schema.Name]) {
 					if err := e.target.TruncateTable(ctx, schema.Name); err != nil {
 						return e.fail(ctx, fmt.Errorf("truncate table %s: %w", schema.Name, err))
 					}
@@ -262,7 +300,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		// therefore only produces correct results when every target table is
 		// guaranteed empty going in. Silently honoring it otherwise turns any
 		// pre-existing row into a duplicate-key failure on every single table.
-		if cfg.BulkCopy && (cfg.Truncate || cfg.RecreateSchema) {
+		if cfg.BulkCopy && (cfg.Truncate || cfg.RecreateSchema) && !resuming {
 			if bw, ok := e.target.(adapters.BulkCopyWriter); ok {
 				bw.EnableCopy()
 			}
