@@ -221,6 +221,10 @@ func (m *MetaDB) migrate() error {
 			return err
 		}
 	}
+	// Why a table failed, kept after the run (support bundles, history).
+	if err := m.addColumnIfMissing("migration_tables", "error TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// The schema change a live stream is paused at (#102 phase 4), as JSON.
 	if err := m.addColumnIfMissing("cdc_streams", "schema_change TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err

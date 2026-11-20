@@ -43,16 +43,36 @@ func (h *ProjectsHandler) SupportBundle(w http.ResponseWriter, r *http.Request) 
 	defer tw.Close()
 
 	// Collect and write each section.
+	// What the metadb and the log hold first: they don't depend on the
+	// source or target being reachable.
+	migs, err := h.loadBundleMigrations(ctx, p.ID)
+	if err != nil {
+		writeTarJSON(tw, "migrations.json", map[string]any{"error": err.Error()})
+	}
+	plan, planErr := h.DB.GetPlanForProject(ctx, p.ID)
+	logs := h.projectLogLines(p, migs)
+
+	writeTarFile(tw, "README.txt", []byte(bundleReadme))
+	writeTarJSON(tw, "timeline.json", buildTimeline(plan, migs, logs))
+	writeLogs(tw, logs)
 	h.writeSystemInfo(tw)
 	h.writeProjectInfo(tw, p)
+	if err == nil {
+		writeMigrations(tw, migs)
+	}
+	writeStats(tw, migs)
+	writeValidations(tw, migs)
+	if planErr != nil {
+		writeTarJSON(tw, "schema_plan.json", map[string]any{"error": planErr.Error()})
+	} else {
+		writeTarJSON(tw, "schema_plan.json", plan)
+	}
+	h.writeCheckpoints(ctx, tw, p)
 	h.writeSourceInfo(ctx, tw, p)
 	h.writeTargetInfo(ctx, tw, p)
 	h.writePreflight(ctx, tw, p)
-	h.writeMigrations(ctx, tw, p)
-	h.writeCheckpoints(ctx, tw, p)
 	h.writeSourceSchema(ctx, tw, p)
 	h.writeTargetSchema(ctx, tw, p)
-	h.writeSchemaPlan(ctx, tw, p)
 
 	h.Log.Info("support_bundle.generated", "project_id", id, "project_name", p.Name)
 }
@@ -65,6 +85,10 @@ func (h *ProjectsHandler) writeSystemInfo(tw *tar.Writer) {
 		"os":             runtime.GOOS,
 		"arch":           runtime.GOARCH,
 		"generated_at":   time.Now().UTC().Format(time.RFC3339),
+		"log_file":       h.LogFile,
+	}
+	if h.Logs != nil {
+		info["log_buffer_lines"] = h.Logs.Cap()
 	}
 	writeTarJSON(tw, "system.json", info)
 }
@@ -149,35 +173,6 @@ func (h *ProjectsHandler) writePreflight(ctx context.Context, tw *tar.Writer, p 
 	writeTarJSON(tw, "preflight.json", result)
 }
 
-// writeMigrations writes migrations.json with recent migration history.
-func (h *ProjectsHandler) writeMigrations(ctx context.Context, tw *tar.Writer, p *adapters.Project) {
-	migrations, err := h.DB.ListMigrations(ctx, p.ID)
-	if err != nil {
-		writeTarJSON(tw, "migrations.json", map[string]any{"error": err.Error()})
-		return
-	}
-
-	// Include table progress for each migration.
-	var result []map[string]any
-	for _, m := range migrations {
-		entry := map[string]any{
-			"id":           m.ID,
-			"status":       m.Status,
-			"created_at":   m.CreatedAt,
-			"started_at":   m.StartedAt,
-			"completed_at": m.CompletedAt,
-			"error":        m.Error,
-		}
-
-		// Get table progress.
-		tables, _ := h.DB.GetTableProgress(ctx, m.ID)
-		entry["tables"] = tables
-
-		result = append(result, entry)
-	}
-	writeTarJSON(tw, "migrations.json", result)
-}
-
 // writeCheckpoints writes checkpoints.json for the latest migration.
 func (h *ProjectsHandler) writeCheckpoints(ctx context.Context, tw *tar.Writer, p *adapters.Project) {
 	migrations, err := h.DB.ListMigrations(ctx, p.ID)
@@ -259,21 +254,6 @@ func (h *ProjectsHandler) writeTargetSchema(ctx context.Context, tw *tar.Writer,
 		return
 	}
 	writeTarJSON(tw, "target_schema.json", schemas)
-}
-
-// writeSchemaPlan writes schema_plan.json for MongoDB projects.
-func (h *ProjectsHandler) writeSchemaPlan(ctx context.Context, tw *tar.Writer, p *adapters.Project) {
-	if p.SourceConfig.Type != "mongodb" {
-		// Not a MongoDB project, skip.
-		return
-	}
-
-	plan, err := h.DB.GetPlanForProject(ctx, p.ID)
-	if err != nil {
-		writeTarJSON(tw, "schema_plan.json", map[string]any{"error": err.Error()})
-		return
-	}
-	writeTarJSON(tw, "schema_plan.json", plan)
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

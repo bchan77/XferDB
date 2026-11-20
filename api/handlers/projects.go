@@ -4,23 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"gitea.homelab.local/nextdevops/XferDB/logring"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"gitea.homelab.local/nextdevops/XferDB/adapters"
 	"gitea.homelab.local/nextdevops/XferDB/analyzer"
 	"gitea.homelab.local/nextdevops/XferDB/registry"
 	"gitea.homelab.local/nextdevops/XferDB/state"
 	"gitea.homelab.local/nextdevops/XferDB/validate"
+	"github.com/google/uuid"
 )
 
 // ProjectsHandler holds shared dependencies for project-related endpoints.
 type ProjectsHandler struct {
 	DB  *state.MetaDB
 	Log *slog.Logger
+	// Logs and LogFile go into support bundles: the server's recent log
+	// lines (nil: not kept) and its --log-file path.
+	Logs    *logring.Ring
+	LogFile string
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -36,8 +41,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // CreateProject handles POST /api/v1/projects.
 func (h *ProjectsHandler) CreateProject(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name           string                  `json:"name"`
-		Description    string                  `json:"description"`
+		Name           string                    `json:"name"`
+		Description    string                    `json:"description"`
 		SourceConfig   adapters.ConnectionConfig `json:"source_config"`
 		TargetConfig   adapters.ConnectionConfig `json:"target_config"`
 		TransferConfig adapters.TransferConfig   `json:"transfer_config"`
